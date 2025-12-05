@@ -1,0 +1,1 @@
+[NewEV] Implement isRunning Binary Signal    2022/8/5 22:43:26    e86dbe529c7f2b296f73be368da69954196f4c1a

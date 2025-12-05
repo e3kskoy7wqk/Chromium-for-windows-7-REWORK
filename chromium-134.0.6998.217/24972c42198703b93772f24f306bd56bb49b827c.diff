@@ -1,0 +1,22 @@
+diff --git a/base/process/process_metrics_win.cc b/base/process/process_metrics_win.cc
+index bc3e24468dadf..07bd10f397e74 100644
+--- a/base/process/process_metrics_win.cc
++++ b/base/process/process_metrics_win.cc
+@@ -134,7 +134,7 @@ base::expected<TimeDelta, ProcessCPUUsageError> GetImpreciseCumulativeCPUUsage(
+   if (!GetProcessTimes(process.get(), &creation_time, &exit_time, &kernel_time,
+                        &user_time)) {
+     // This should never fail when the handle is valid.
+-    NOTREACHED();
++    return base::unexpected(ProcessCPUUsageError::kSystemError);
+   }
+ 
+   return base::ok(TimeDelta::FromFileTime(kernel_time) +
+@@ -163,7 +162,7 @@ std::unique_ptr<ProcessMetrics> ProcessMetrics::CreateProcessMetrics(
+ 
+ base::expected<TimeDelta, ProcessCPUUsageError>
+ ProcessMetrics::GetCumulativeCPUUsage() {
+-#if defined(ARCH_CPU_ARM64)
++#if 1
+   // Precise CPU usage is not available on Arm CPUs because they don't support
+   // constant rate TSC.
+   return GetImpreciseCumulativeCPUUsage(process_);

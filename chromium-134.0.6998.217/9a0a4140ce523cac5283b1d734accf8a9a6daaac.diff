@@ -1,0 +1,535 @@
+diff --git a/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc b/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc
+index 01abaf8086c8a..29d2c92f10395 100644
+--- a/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc
++++ b/chrome/browser/extensions/api/language_settings_private/language_settings_private_api_unittest.cc
+@@ -348,8 +348,13 @@ void LanguageSettingsPrivateApiTest::RunGetLanguageListTest() {
+   // only reports spellchecking is supported for these languages if the language
+   // pack is installed.
+ #if BUILDFLAG(IS_WIN)
+-  languages_to_test.push_back({"ar", "ar-SA", true, true});
+-  languages_to_test.push_back({"bn", "bn-IN", false, true});
++  if (spellcheck::WindowsVersionSupportsSpellchecker()) {
++    languages_to_test.push_back({"ar", "ar-SA", true, true});
++    languages_to_test.push_back({"bn", "bn-IN", false, true});
++  } else {
++    languages_to_test.push_back({"ar", "ar-SA", true, false});
++    languages_to_test.push_back({"bn", "bn-IN", false, false});
++  }
+ #else
+   languages_to_test.push_back({"ar", "ar-SA", true, false});
+   languages_to_test.push_back({"bn", "bn-IN", false, false});
+diff --git a/chrome/browser/renderer_context_menu/spelling_menu_observer_browsertest.cc b/chrome/browser/renderer_context_menu/spelling_menu_observer_browsertest.cc
+index 8cc2f049f8ef6..52a070a55ede7 100644
+--- a/chrome/browser/renderer_context_menu/spelling_menu_observer_browsertest.cc
++++ b/chrome/browser/renderer_context_menu/spelling_menu_observer_browsertest.cc
+@@ -36,6 +36,11 @@ class SpellingMenuObserverTest : public InProcessBrowserTest {
+     Reset(false);
+ 
+ #if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
++    // Windows versions that don't support platform
++    // spellchecker fallback to Hunspell.
++    if (!spellcheck::WindowsVersionSupportsSpellchecker())
++      return;
++
+     base::Value::List dictionary;
+     dictionary.Append("en-US");
+     menu()->GetPrefs()->SetList(spellcheck::prefs::kSpellCheckDictionaries,
+@@ -115,9 +120,11 @@ class SpellingMenuObserverTest : public InProcessBrowserTest {
+     if (params.misspelled_word.empty())
+       callback_received_ = true;
+ 
+-    observer_->RegisterSuggestionsCompleteCallbackForTesting(
+-        base::BindOnce(&SpellingMenuObserverTest::OnSuggestionsComplete,
+-                       base::Unretained(this)));
++    if (spellcheck::WindowsVersionSupportsSpellchecker()) {
++      observer_->RegisterSuggestionsCompleteCallbackForTesting(
++          base::BindOnce(&SpellingMenuObserverTest::OnSuggestionsComplete,
++                         base::Unretained(this)));
++    }
+ #endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+ 
+     observer_->InitMenu(params);
+@@ -127,7 +134,8 @@ class SpellingMenuObserverTest : public InProcessBrowserTest {
+     observer_->OnContextMenuShown(params, gfx::Rect());
+ 
+ #if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+-    RunUntilCallbackReceived();
++    if (spellcheck::WindowsVersionSupportsSpellchecker())
++      RunUntilCallbackReceived();
+ #endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+   }
+ 
+@@ -217,6 +225,10 @@ IN_PROC_BROWSER_TEST_F(SpellingMenuObserverTest, InitMenuWithMisspelledWord) {
+ // by both Hunspell and Windows platform combines their suggestions.
+ IN_PROC_BROWSER_TEST_F(SpellingMenuObserverTest,
+                        WinInitMenuWithMisspelledWordCombined) {
++  // Test invalid for Windows versions that don't support platform spellchecker.
++  if (!spellcheck::WindowsVersionSupportsSpellchecker())
++    return;
++
+   InitMenu("mispelled", "misspelling");
+   EXPECT_EQ(6U, menu()->GetMenuSize());
+ 
+@@ -263,6 +275,10 @@ IN_PROC_BROWSER_TEST_F(SpellingMenuObserverTest,
+ // single suggestion.
+ IN_PROC_BROWSER_TEST_F(SpellingMenuObserverTest,
+                        WinInitMenuWithMisspelledWordNoDuplicateSuggestions) {
++  // Test invalid for Windows versions that don't support platform spellchecker.
++  if (!spellcheck::WindowsVersionSupportsSpellchecker())
++    return;
++
+   InitMenu("mispelled", "misspelled");
+   EXPECT_EQ(5U, menu()->GetMenuSize());
+ 
+@@ -303,6 +319,10 @@ IN_PROC_BROWSER_TEST_F(SpellingMenuObserverTest,
+ // 3 suggestions.
+ IN_PROC_BROWSER_TEST_F(SpellingMenuObserverTest,
+                        WinInitMenuWithMisspelledWordMaxSuggestions) {
++  // Test invalid for Windows versions that don't support platform spellchecker.
++  if (!spellcheck::WindowsVersionSupportsSpellchecker())
++    return;
++
+   InitMenu("wtree", "wee");
+   EXPECT_EQ(7U, menu()->GetMenuSize());
+ 
+diff --git a/chrome/browser/spellchecker/spell_check_host_chrome_impl_win_browsertest.cc b/chrome/browser/spellchecker/spell_check_host_chrome_impl_win_browsertest.cc
+index 22ae36811b160..d96265b20027c 100644
+--- a/chrome/browser/spellchecker/spell_check_host_chrome_impl_win_browsertest.cc
++++ b/chrome/browser/spellchecker/spell_check_host_chrome_impl_win_browsertest.cc
+@@ -110,6 +110,10 @@ IN_PROC_BROWSER_TEST_F(SpellCheckHostChromeImplWinBrowserTest,
+ }
+ 
+ void SpellCheckHostChromeImplWinBrowserTest::RunSpellCheckReturnMessageTest() {
++  if (!spellcheck::WindowsVersionSupportsSpellchecker()) {
++    return;
++  }
++
+   spellcheck_platform::SetLanguage(
+       platform_spell_checker_, "en-US",
+       base::BindOnce(&SpellCheckHostChromeImplWinBrowserTest::
+diff --git a/chrome/browser/spellchecker/spellcheck_service.cc b/chrome/browser/spellchecker/spellcheck_service.cc
+index 9718d5fbe6837..fc5b06239736c 100644
+--- a/chrome/browser/spellchecker/spellcheck_service.cc
++++ b/chrome/browser/spellchecker/spellcheck_service.cc
+@@ -900,14 +900,16 @@ void SpellcheckService::InitializePlatformSpellchecker() {
+   // since metrics on the availability of Windows platform language packs are
+   // being recorded. Thus method should only be called once, except in test
+   // code.
+-  if (!platform_spell_checker()) {
++  if (!platform_spell_checker() &&
++      spellcheck::WindowsVersionSupportsSpellchecker()) {
+     platform_spell_checker_ = std::make_unique<WindowsSpellChecker>(
+         base::ThreadPool::CreateCOMSTATaskRunner({base::MayBlock()}));
+   }
+ }
+ 
+ void SpellcheckService::RecordSpellcheckLocalesStats() {
+-  if (metrics_ && platform_spell_checker() && !hunspell_dictionaries_.empty()) {
++  if (spellcheck::WindowsVersionSupportsSpellchecker() && metrics_ &&
++      platform_spell_checker() && !hunspell_dictionaries_.empty()) {
+     std::vector<std::string> hunspell_locales;
+     for (auto& dict : hunspell_dictionaries_) {
+       hunspell_locales.push_back(dict->GetLanguage());
+@@ -920,6 +922,7 @@ void SpellcheckService::RecordSpellcheckLocalesStats() {
+ }
+ 
+ void SpellcheckService::RecordChromeLocalesStats() {
++  if (spellcheck::WindowsVersionSupportsSpellchecker())
+   if (metrics_ && platform_spell_checker()) {
+     std::vector<std::string> accept_languages =
+         GetNormalizedAcceptLanguages(/* normalize_for_spellcheck */ false);
+diff --git a/chrome/browser/spellchecker/spellcheck_service.h b/chrome/browser/spellchecker/spellcheck_service.h
+index 1527b8f76ad0d..648697cb61d1f 100644
+--- a/chrome/browser/spellchecker/spellcheck_service.h
++++ b/chrome/browser/spellchecker/spellcheck_service.h
+@@ -173,7 +173,7 @@ class SpellcheckService : public KeyedService,
+ 
+   // The returned pointer can be null if the current platform doesn't need a
+   // per-profile, platform-specific spell check object. Currently, only Windows
+-  // requires one.
++  // requires one, and only on certain versions.
+   PlatformSpellChecker* platform_spell_checker() {
+     return platform_spell_checker_.get();
+   }
+diff --git a/chrome/browser/spellchecker/spellcheck_service_browsertest.cc b/chrome/browser/spellchecker/spellcheck_service_browsertest.cc
+index d69f6ea81c832..96ac3bf39ed36 100644
+--- a/chrome/browser/spellchecker/spellcheck_service_browsertest.cc
++++ b/chrome/browser/spellchecker/spellcheck_service_browsertest.cc
+@@ -707,6 +707,9 @@ class SpellcheckServiceWindowsHybridBrowserTest
+ 
+ IN_PROC_BROWSER_TEST_F(SpellcheckServiceWindowsHybridBrowserTest,
+                        WindowsHybridSpellcheck) {
++  if (!spellcheck::WindowsVersionSupportsSpellchecker())
++    return;
++
+   // This test specifically covers the case where spellcheck delayed
+   // initialization is not enabled, so return early if it is. Other tests
+   // cover the case where delayed initialization is enabled.
+@@ -830,6 +833,9 @@ IN_PROC_BROWSER_TEST_F(SpellcheckServiceWindowsHybridBrowserTestDelayInit,
+ 
+ IN_PROC_BROWSER_TEST_F(SpellcheckServiceWindowsHybridBrowserTestDelayInit,
+                        WindowsHybridSpellcheckDelayInit) {
++  if (!spellcheck::WindowsVersionSupportsSpellchecker())
++    return;
++
+   ASSERT_TRUE(spellcheck::UseBrowserSpellChecker());
+ 
+   // Note that the base class forces dictionary sync to not be performed, and
+diff --git a/chrome/browser/spellchecker/spellcheck_service_unittest.cc b/chrome/browser/spellchecker/spellcheck_service_unittest.cc
+index 42c96836486ad..bb93f0b890d56 100644
+--- a/chrome/browser/spellchecker/spellcheck_service_unittest.cc
++++ b/chrome/browser/spellchecker/spellcheck_service_unittest.cc
+@@ -230,6 +230,9 @@ void SpellcheckServiceHybridUnitTestBase::RunGetDictionariesTest(
+     const std::string accept_languages,
+     const std::vector<std::string> spellcheck_dictionaries,
+     const std::vector<SpellcheckService::Dictionary> expected_dictionaries) {
++  if (!spellcheck::WindowsVersionSupportsSpellchecker())
++    return;
++
+   prefs()->SetString(language::prefs::kAcceptLanguages, accept_languages);
+   base::Value::List spellcheck_dictionaries_list;
+   for (std::string dict : spellcheck_dictionaries) {
+@@ -257,6 +260,9 @@ void SpellcheckServiceHybridUnitTestBase::RunDictionaryMappingTest(
+     const std::string expected_tag_passed_to_spellcheck,
+     const std::string expected_accept_language_generic,
+     const std::string expected_tag_passed_to_spellcheck_generic) {
++  if (!spellcheck::WindowsVersionSupportsSpellchecker())
++    return;
++
+   InitializeSpellcheckService({full_tag});
+ 
+   std::string supported_dictionary;
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index e7fe1c565aac5..40148eeaef7d1 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -83,6 +81,35 @@ int GetPreRS5UniversalApiContractVersion() {
+   NOTREACHED();
+ }
+ 
++// Return the legacy windows platform version to match the spec description
++// https://wicg.github.io/ua-client-hints/#get-the-legacy-windows-version-number,
++// which is available for Windows versions between range WIN7 and WIN8_1.
++// Otherwise, returns 0.
++const std::string& GetLegacyWindowsPlatformVersion() {
++  static const base::NoDestructor<std::string> legacy_windows_platform_version(
++      [] {
++        int major_version = 0;
++        int minor_version = 0;
++        switch (base::win::GetVersion()) {
++          case base::win::Version::WIN7:
++            minor_version = 1;
++            break;
++          case base::win::Version::WIN8:
++            minor_version = 2;
++            break;
++          case base::win::Version::WIN8_1:
++            minor_version = 3;
++            break;
++          default:
++            minor_version = 0;
++            break;
++        }
++        return base::StrCat({base::NumberToString(major_version), ".",
++                             base::NumberToString(minor_version), ".0"});
++      }());
++  return *legacy_windows_platform_version;
++}
++
+ // Returns the UniversalApiContract version number, which is available for
+ // Windows versions greater than RS5. Otherwise, returns 0.
+ const std::string& GetUniversalApiContractVersion() {
+@@ -95,25 +122,26 @@ const std::string& GetUniversalApiContractVersion() {
+       [] {
+         int major_version = 0;
+         int minor_version = 0;
+-        if (base::win::OSInfo::Kernel32Version() <=
+-            base::win::Version::WIN10_RS4) {
+-          major_version = GetPreRS5UniversalApiContractVersion();
+-        } else {
+-          base::win::RegKey version_key(
+-              HKEY_LOCAL_MACHINE, kWindowsRuntimeWellKnownContractsRegKeyName,
+-              KEY_QUERY_VALUE | KEY_WOW64_64KEY);
+-          if (version_key.Valid()) {
+-            DWORD universal_api_contract_version = 0;
+-            LONG result = version_key.ReadValueDW(
+-                kUniversalApiContractName, &universal_api_contract_version);
+-            if (result == ERROR_SUCCESS) {
+-              major_version = HIWORD(universal_api_contract_version);
+-              minor_version = LOWORD(universal_api_contract_version);
++        if (base::win::GetVersion() >= base::win::Version::WIN10) {
++          if (base::win::GetVersion() <= base::win::Version::WIN10_RS4) {
++            major_version = GetPreRS5UniversalApiContractVersion();
++          } else {
++            base::win::RegKey version_key(
++                HKEY_LOCAL_MACHINE, kWindowsRuntimeWellKnownContractsRegKeyName,
++                KEY_QUERY_VALUE | KEY_WOW64_64KEY);
++            if (version_key.Valid()) {
++              DWORD universal_api_contract_version = 0;
++              LONG result = version_key.ReadValueDW(
++                  kUniversalApiContractName, &universal_api_contract_version);
++              if (result == ERROR_SUCCESS) {
++                major_version = HIWORD(universal_api_contract_version);
++                minor_version = LOWORD(universal_api_contract_version);
++              } else {
++                major_version = kHighestKnownUniversalApiContractVersion;
++              }
+             } else {
+               major_version = kHighestKnownUniversalApiContractVersion;
+             }
+-          } else {
+-            major_version = kHighestKnownUniversalApiContractVersion;
+           }
+         }
+         // The major version of the contract is stored in the HIWORD, while the
+@@ -124,6 +153,9 @@ const std::string& GetUniversalApiContractVersion() {
+ }
+ 
+ const std::string& GetWindowsPlatformVersion() {
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    return GetLegacyWindowsPlatformVersion();
++  }
+   return GetUniversalApiContractVersion();
+ }
+ #endif  // BUILDFLAG(IS_WIN)
+@@ -173,6 +205,16 @@ bool ShouldSendUserAgentUnifiedPlatform(
+          base::FeatureList::IsEnabled(
+              blink::features::kReduceUserAgentAndroidVersionDeviceModel);
+ #else
++// For legacy windows, only reduce the user agent platform and oscpu when
++// kLegacyWindowsPlatform parameter set to true.
++#if BUILDFLAG(IS_WIN)
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    return ShouldReduceUserAgentMinorVersion(user_agent_reduction) &&
++           base::FeatureList::IsEnabled(
++               blink::features::kReduceUserAgentPlatformOsCpu);
++  }
++#endif
++
+   return ShouldReduceUserAgentMinorVersion(user_agent_reduction) &&
+          base::FeatureList::IsEnabled(
+              blink::features::kReduceUserAgentPlatformOsCpu);
+diff --git a/components/services/quarantine/quarantine_win.cc b/components/services/quarantine/quarantine_win.cc
+index 9e6f72b623c1f..a29932bbdd78a 100644
+--- a/components/services/quarantine/quarantine_win.cc
++++ b/components/services/quarantine/quarantine_win.cc
+@@ -26,6 +26,7 @@
+ #include "base/uuid.h"
+ #include "base/win/scoped_handle.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ #include "components/services/quarantine/common.h"
+ #include "components/services/quarantine/common_win.h"
+ #include "url/gurl.h"
+@@ -200,16 +201,18 @@ QuarantineFileResult SetInternetZoneIdentifierDirectly(
+   static const char kHostUrlFormat[] = "HostUrl=%s\r\n";
+ 
+   std::string identifier = "[ZoneTransfer]\r\nZoneId=3\r\n";
+-  // Match what the InvokeAttachmentServices() function will output, including
+-  // the order of the values.
+-  if (IsValidUrlForAttachmentServices(referrer_url)) {
+-    identifier.append(
+-        base::StringPrintf(kReferrerUrlFormat, referrer_url.spec().c_str()));
++  if (base::win::GetVersion() >= base::win::Version::WIN10) {
++    // Match what the InvokeAttachmentServices() function will output, including
++    // the order of the values.
++    if (IsValidUrlForAttachmentServices(referrer_url)) {
++      identifier.append(
++          base::StringPrintf(kReferrerUrlFormat, referrer_url.spec().c_str()));
++    }
++    identifier.append(base::StringPrintf(
++        kHostUrlFormat, IsValidUrlForAttachmentServices(source_url)
++                            ? source_url.spec().c_str()
++                            : "about:internet"));
+   }
+-  identifier.append(base::StringPrintf(
+-      kHostUrlFormat, IsValidUrlForAttachmentServices(source_url)
+-                          ? source_url.spec().c_str()
+-                          : "about:internet"));
+ 
+   // Don't include trailing null in data written.
+   DWORD written = 0;
+diff --git a/components/services/quarantine/test_support_win.cc b/components/services/quarantine/test_support_win.cc
+index 449ba455163df..6f356900fd59e 100644
+--- a/components/services/quarantine/test_support_win.cc
++++ b/components/services/quarantine/test_support_win.cc
+@@ -12,6 +12,7 @@
+ #include "base/strings/string_split.h"
+ #include "base/strings/string_util.h"
+ #include "base/win/scoped_handle.h"
++#include "base/win/windows_version.h"
+ #include "components/services/quarantine/common.h"
+ #include "components/services/quarantine/common_win.h"
+ 
+@@ -78,7 +79,11 @@ bool ZoneIdentifierPresentForFile(const base::FilePath& path,
+ bool IsFileQuarantined(const base::FilePath& file,
+                        const GURL& source_url,
+                        const GURL& referrer_url) {
+-  return ZoneIdentifierPresentForFile(file, source_url, referrer_url);
++  if (base::win::GetVersion() >= base::win::Version::WIN10)
++    return ZoneIdentifierPresentForFile(file, source_url, referrer_url);
++  else
++    return ZoneIdentifierPresentForFile(file, GURL::EmptyGURL(),
++                                        GURL::EmptyGURL());
+ }
+ 
+ }  // namespace quarantine
+diff --git a/components/spellcheck/browser/spellcheck_platform_win.cc b/components/spellcheck/browser/spellcheck_platform_win.cc
+index dd1e9b3889bdd..1e79bdeffbe7d 100644
+--- a/components/spellcheck/browser/spellcheck_platform_win.cc
++++ b/components/spellcheck/browser/spellcheck_platform_win.cc
+@@ -162,8 +162,10 @@ void RecordChromeLocalesStats(PlatformSpellChecker* spell_checker_instance,
+   if (!spell_checker_instance) {
+     return;
+   }
+-  static_cast<WindowsSpellChecker*>(spell_checker_instance)
+-      ->RecordChromeLocalesStats(std::move(chrome_locales));
++  if (spellcheck::WindowsVersionSupportsSpellchecker()) {
++    static_cast<WindowsSpellChecker*>(spell_checker_instance)
++        ->RecordChromeLocalesStats(std::move(chrome_locales));
++  }
+ }
+ 
+ void RecordSpellcheckLocalesStats(PlatformSpellChecker* spell_checker_instance,
+@@ -173,8 +175,10 @@ void RecordSpellcheckLocalesStats(
+   if (!spell_checker_instance) {
+     return;
+   }
+-  static_cast<WindowsSpellChecker*>(spell_checker_instance)
+-      ->RecordSpellcheckLocalesStats(std::move(spellcheck_locales));
++  if (spellcheck::WindowsVersionSupportsSpellchecker()) {
++    static_cast<WindowsSpellChecker*>(spell_checker_instance)
++        ->RecordSpellcheckLocalesStats(std::move(spellcheck_locales));
++  }
+ }
+ 
+ }  // namespace spellcheck_platform
+diff --git a/components/spellcheck/browser/windows_spell_checker.cc b/components/spellcheck/browser/windows_spell_checker.cc
+index 6a61ac4303e5c..0275fa44f1dc5 100644
+--- a/components/spellcheck/browser/windows_spell_checker.cc
++++ b/components/spellcheck/browser/windows_spell_checker.cc
+@@ -159,7 +159,8 @@ void BackgroundHelper::CreateSpellCheckerFactory() {
+   // Mitigate the issues caused by loading DLLs on a background thread
+   // (https://issues.chromium.org/issues/41464781).
+   SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY_REPEATEDLY();
+-  if (FAILED(::CoCreateInstance(__uuidof(::SpellCheckerFactory), nullptr,
++  if (!spellcheck::WindowsVersionSupportsSpellchecker() ||
++      FAILED(::CoCreateInstance(__uuidof(::SpellCheckerFactory), nullptr,
+                                 (CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER),
+                                 IID_PPV_ARGS(&spell_checker_factory_)))) {
+     spell_checker_factory_ = nullptr;
+diff --git a/components/spellcheck/browser/windows_spell_checker_unittest.cc b/components/spellcheck/browser/windows_spell_checker_unittest.cc
+index 2537f4d7bba4a..01a1f8a429892 100644
+--- a/components/spellcheck/browser/windows_spell_checker_unittest.cc
++++ b/components/spellcheck/browser/windows_spell_checker_unittest.cc
+@@ -131,7 +131,8 @@ class WindowsSpellCheckerTest : public testing::Test {
+ 
+ void WindowsSpellCheckerTest::RunRequestTextCheckTest(
+     const RequestTextCheckTestCase& test_case) {
+-  ASSERT_TRUE(set_language_result_);
++  ASSERT_EQ(set_language_result_,
++            spellcheck::WindowsVersionSupportsSpellchecker());
+ 
+   const std::u16string word(base::ASCIIToUTF16(test_case.text_to_check));
+ 
+@@ -142,6 +143,13 @@ void WindowsSpellCheckerTest::RunRequestTextCheckTest(
+                      base::Unretained(this)));
+   RunUntilResultReceived();
+ 
++  if (!spellcheck::WindowsVersionSupportsSpellchecker()) {
++    // On Windows versions that don't support platform spellchecking, the
++    // returned vector of results should be empty.
++    ASSERT_TRUE(spell_check_results_.empty());
++    return;
++  }
++
+   ASSERT_EQ(1u, spell_check_results_.size())
+       << "RequestTextCheck: Wrong number of results";
+ 
+@@ -216,6 +224,13 @@ TEST_F(WindowsSpellCheckerTest, RetrieveSpellcheckLanguages) {
+ 
+   RunUntilResultReceived();
+ 
++  if (!spellcheck::WindowsVersionSupportsSpellchecker()) {
++    // On Windows versions that don't support platform spellchecking, the
++    // returned vector of results should be empty.
++    ASSERT_TRUE(spellcheck_languages_.empty());
++    return;
++  }
++
+   ASSERT_LE(1u, spellcheck_languages_.size());
+   ASSERT_TRUE(base::Contains(spellcheck_languages_, "en-US"));
+ }
+@@ -243,7 +258,8 @@ TEST_F(WindowsSpellCheckerTest, RetrieveSpellcheckLanguagesFakeDictionaries) {
+ }
+ 
+ TEST_F(WindowsSpellCheckerTest, GetPerLanguageSuggestions) {
+-  ASSERT_TRUE(set_language_result_);
++  ASSERT_EQ(set_language_result_,
++            spellcheck::WindowsVersionSupportsSpellchecker());
+ 
+   win_spell_checker_->GetPerLanguageSuggestions(
+       u"tihs",
+@@ -252,6 +268,13 @@ TEST_F(WindowsSpellCheckerTest, GetPerLanguageSuggestions) {
+           base::Unretained(this)));
+   RunUntilResultReceived();
+ 
++  if (!spellcheck::WindowsVersionSupportsSpellchecker()) {
++    // On Windows versions that don't support platform spellchecking, the
++    // returned vector of results should be empty.
++    ASSERT_TRUE(per_language_suggestions_.empty());
++    return;
++  }
++
+   ASSERT_EQ(per_language_suggestions_.size(), 1u);
+   ASSERT_GT(per_language_suggestions_[0].size(), 0u);
+ }
+diff --git a/components/spellcheck/common/spellcheck_features.cc b/components/spellcheck/common/spellcheck_features.cc
+index 9942d3a72004b..0f17118a96785 100644
+--- a/components/spellcheck/common/spellcheck_features.cc
++++ b/components/spellcheck/common/spellcheck_features.cc
+@@ -8,6 +8,10 @@
+ #include "build/build_config.h"
+ #include "components/spellcheck/spellcheck_buildflags.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ namespace spellcheck {
+ 
+ #if BUILDFLAG(ENABLE_SPELLCHECK)
+@@ -16,7 +20,8 @@ bool UseBrowserSpellChecker() {
+ #if !BUILDFLAG(USE_BROWSER_SPELLCHECKER)
+   return false;
+ #elif BUILDFLAG(IS_WIN)
+-  return g_browser_spell_checker_enabled;
++  return g_browser_spell_checker_enabled &&
++         WindowsVersionSupportsSpellchecker();
+ #else
+   return true;
+ #endif
+@@ -35,6 +40,10 @@ BASE_FEATURE(kWinRetrieveSuggestionsOnlyOnDemand,
+              "WinDelaySpellcheckServiceInit",
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
++bool WindowsVersionSupportsSpellchecker() {
++  return base::win::GetVersion() > base::win::Version::WIN7 &&
++         base::win::GetVersion() < base::win::Version::WIN_LAST;
++}
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(IS_ANDROID)
+diff --git a/components/spellcheck/common/spellcheck_features.h b/components/spellcheck/common/spellcheck_features.h
+index f73ce6f7d4ce1..aeade54f1158b 100644
+--- a/components/spellcheck/common/spellcheck_features.h
++++ b/components/spellcheck/common/spellcheck_features.h
+@@ -43,6 +43,8 @@ BASE_DECLARE_FEATURE(kWinDelaySpellcheckServiceInit);
+ //    --enable-features=WinDelaySpellcheckServiceInit
+ //    --disable-sync-types="Dictionary"
+ BASE_DECLARE_FEATURE(kWinDelaySpellcheckServiceInit);
++
++bool WindowsVersionSupportsSpellchecker();
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(IS_ANDROID)

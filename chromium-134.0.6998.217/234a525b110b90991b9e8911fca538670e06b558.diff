@@ -1,0 +1,36 @@
+diff --git a/chrome/browser/os_crypt/app_bound_encryption_win.cc b/chrome/browser/os_crypt/app_bound_encryption_win.cc
+index 8b83e0970ee8e..a8bdec7feac15 100644
+--- a/chrome/browser/os_crypt/app_bound_encryption_win.cc
++++ b/chrome/browser/os_crypt/app_bound_encryption_win.cc
+@@ -24,10 +24,21 @@ SupportLevel GetAppBoundEncryptionSupportLevel() {
+     return SupportLevel::kNotUsingDefaultUserDataDir;
+   }
+ 
++typedef BOOL WINAPI FNQUERYFULLPROCESSIMAGENAME(HANDLE,  DWORD, LPSTR, PDWORD);
++typedef FNQUERYFULLPROCESSIMAGENAME *PFNQUERYFULLPROCESSIMAGENAME;
++
++
++   /* Loading the module and getting the symbol for each and every process is expensive
++    * -- since this function (at the moment) only is used for debugging purposes it's okay. */
++   PFNQUERYFULLPROCESSIMAGENAME pfnQueryFullProcessImageName;
++   pfnQueryFullProcessImageName = (PFNQUERYFULLPROCESSIMAGENAME)
++       GetProcAddress(LoadLibraryW(L"kernel32.dll"), "QueryFullProcessImageNameA");
++   if (!pfnQueryFullProcessImageName)
++       return SupportLevel::kApiFailed;
+   std::string image_path(MAX_PATH, L'\0');
+   DWORD path_length = image_path.size();
+   BOOL success =
+-      ::QueryFullProcessImageNameA(::GetCurrentProcess(), PROCESS_NAME_NATIVE,
++      pfnQueryFullProcessImageName(::GetCurrentProcess(), PROCESS_NAME_NATIVE,
+                                    image_path.data(), &path_length);
+   if (!success && ::GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+     // Process name is potentially greater than MAX_PATH, try larger max size.
+@@ -35,7 +46,7 @@ SupportLevel GetAppBoundEncryptionSupportLevel() {
+     image_path.resize(UNICODE_STRING_MAX_CHARS);
+     path_length = image_path.size();
+     success =
+-        ::QueryFullProcessImageNameA(::GetCurrentProcess(), PROCESS_NAME_NATIVE,
++        pfnQueryFullProcessImageName(::GetCurrentProcess(), PROCESS_NAME_NATIVE,
+                                      image_path.data(), &path_length);
+   }
+   if (!success) {

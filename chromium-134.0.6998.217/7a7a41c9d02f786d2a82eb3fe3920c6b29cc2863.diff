@@ -1,0 +1,752 @@
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index 024122a6cf737..3b15044497b34 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -3418,6 +3418,7 @@ test("base_unittests") {
+       "win/com_init_balancer_unittest.cc",
+       "win/com_init_check_hook_unittest.cc",
+       "win/com_init_util_unittest.cc",
++      "win/core_winrt_util_unittest.cc",
+       "win/dark_mode_support_unittest.cc",
+       "win/dispatch_stub.cc",
+       "win/dispatch_stub.h",
+diff --git a/base/win/core_winrt_util.cc b/base/win/core_winrt_util.cc
+index 25f5885bf2f40..05896362771ba 100644
+--- a/base/win/core_winrt_util.cc
++++ b/base/win/core_winrt_util.cc
+@@ -4,16 +4,60 @@
+ 
+ #include "base/win/core_winrt_util.h"
+ 
+-namespace base::win {
++#include "base/threading/scoped_thread_priority.h"
++
++namespace {
++
++FARPROC LoadComBaseFunction(const char* function_name) {
++  static HMODULE const handle = []() {
++    // Mitigate the issues caused by loading DLLs on a background thread
++    // (http://crbug/973868).
++    SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
++    return ::LoadLibraryEx(L"combase.dll", nullptr,
++                           LOAD_LIBRARY_SEARCH_SYSTEM32);
++  }();
++  return handle ? ::GetProcAddress(handle, function_name) : nullptr;
++}
++
++decltype(&::RoActivateInstance) GetRoActivateInstanceFunction() {
++  static decltype(&::RoActivateInstance) const function =
++      reinterpret_cast<decltype(&::RoActivateInstance)>(
++          LoadComBaseFunction("RoActivateInstance"));
++  return function;
++}
++
++decltype(&::RoGetActivationFactory) GetRoGetActivationFactoryFunction() {
++  static decltype(&::RoGetActivationFactory) const function =
++      reinterpret_cast<decltype(&::RoGetActivationFactory)>(
++          LoadComBaseFunction("RoGetActivationFactory"));
++  return function;
++}
++
++}  // namespace
++
++namespace base {
++namespace win {
++
++bool ResolveCoreWinRTDelayload() {
++  // TODO(finnur): Add AssertIOAllowed once crbug.com/770193 is fixed.
++  return GetRoActivateInstanceFunction() && GetRoGetActivationFactoryFunction();
++}
+ 
+ HRESULT RoGetActivationFactory(HSTRING class_id,
+                                const IID& iid,
+                                void** out_factory) {
+-  return ::RoGetActivationFactory(class_id, iid, out_factory);
++  auto get_factory_func = GetRoGetActivationFactoryFunction();
++  if (!get_factory_func)
++    return E_FAIL;
++  return get_factory_func(class_id, iid, out_factory);
+ }
+ 
+ HRESULT RoActivateInstance(HSTRING class_id, IInspectable** instance) {
+-  return ::RoActivateInstance(class_id, instance);
++  auto activate_instance_func = GetRoActivateInstanceFunction();
++  if (!activate_instance_func)
++    return E_FAIL;
++  return activate_instance_func(class_id, instance);
+ }
+ 
+-}  // namespace base::win
++}  // namespace win
++}  // namespace base
+diff --git a/base/win/core_winrt_util.h b/base/win/core_winrt_util.h
+index 3a6e0c9f3774c..66bd991ff6b52 100644
+--- a/base/win/core_winrt_util.h
++++ b/base/win/core_winrt_util.h
+@@ -13,7 +13,14 @@
+ #include "base/base_export.h"
+ #include "base/win/scoped_hstring.h"
+ 
+-namespace base::win {
++namespace base {
++namespace win {
++
++// Provides access to Core WinRT functions which may not be available on
++// Windows 7. Loads functions dynamically at runtime to prevent library
++// dependencies.
++
++BASE_EXPORT bool ResolveCoreWinRTDelayload();
+ 
+ // The following stubs are provided for when component build is enabled, in
+ // order to avoid the propagation of delay-loading CoreWinRT to other modules.
+@@ -36,6 +43,7 @@ HRESULT GetActivationFactory(InterfaceType** factory) {
+                                            IID_PPV_ARGS(factory));
+ }
+ 
+-}  // namespace base::win
++}  // namespace win
++}  // namespace base
+ 
+ #endif  // BASE_WIN_CORE_WINRT_UTIL_H_
+diff --git a/base/win/core_winrt_util_unittest.cc b/base/win/core_winrt_util_unittest.cc
+new file mode 100644
+index 0000000000000..f4f768dca745e
+--- /dev/null
++++ b/base/win/core_winrt_util_unittest.cc
+@@ -0,0 +1,17 @@
++// Copyright 2017 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/win/core_winrt_util.h"
++
++#include "base/win/com_init_util.h"
++#include "base/win/scoped_com_initializer.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace base::win {
++
++TEST(CoreWinrtUtilTest, PreloadFunctions) {
++  EXPECT_TRUE(ResolveCoreWinRTDelayload());
++}
++
++}  // namespace base::win
+diff --git a/base/win/map_unittest.cc b/base/win/map_unittest.cc
+index a7efda3100a72..dc8b9ecf2c864 100644
+--- a/base/win/map_unittest.cc
++++ b/base/win/map_unittest.cc
+@@ -186,6 +186,10 @@ const wchar_t kTestValue[] = L"Test value";
+ const std::map<int, double, internal::Less> g_one{{1, 10.7}};
+ const std::map<int, double, internal::Less> g_two{{1, 10.7}, {2, 20.3}};
+ 
++bool ResolveCoreWinRT() {
++  return base::win::ResolveCoreWinRTDelayload();
++}
++
+ HRESULT GetPropertyValueStaticsActivationFactory(
+     IPropertyValueStatics** statics) {
+   return base::win::GetActivationFactory<
+@@ -495,6 +499,7 @@ TEST(MapTest, First) {
+ TEST(MapTest, Properties) {
+   // This test case validates Map against Windows property key system,
+   // which is used to store WinRT device properties.
++  ASSERT_TRUE(ResolveCoreWinRT());
+   ScopedWinrtInitializer winrt_initializer;
+   ASSERT_TRUE(winrt_initializer.Succeeded());
+ 
+diff --git a/base/win/win_util.cc b/base/win/win_util.cc
+index dcfa47b6d6fb5..e27452b2f2693 100644
+--- a/base/win/win_util.cc
++++ b/base/win/win_util.cc
+@@ -238,11 +238,15 @@ bool IsWindows10OrGreaterTabletMode(HWND hwnd) {
+ // it to always return UserInteractionMode_Touch which as per documentation
+ // indicates tablet mode.
+ bool IsWindows10TabletMode(HWND hwnd) {
++  if (!ResolveCoreWinRTDelayload()) {
++    return false;
++  }
++
+   ScopedHString view_settings_guid = ScopedHString::Create(
+       RuntimeClass_Windows_UI_ViewManagement_UIViewSettings);
+   Microsoft::WRL::ComPtr<IUIViewSettingsInterop> view_settings_interop;
+-  HRESULT hr = ::RoGetActivationFactory(view_settings_guid.get(),
+-                                        IID_PPV_ARGS(&view_settings_interop));
++  HRESULT hr = win::RoGetActivationFactory(
++      view_settings_guid.get(), IID_PPV_ARGS(&view_settings_interop));
+   if (FAILED(hr)) {
+     return false;
+   }
+diff --git a/base/win/winrt_storage_util_unittest.cc b/base/win/winrt_storage_util_unittest.cc
+index 5c54819e4b85a..8f3f64f29011a 100644
+--- a/base/win/winrt_storage_util_unittest.cc
++++ b/base/win/winrt_storage_util_unittest.cc
+@@ -21,6 +21,10 @@ namespace win {
+ TEST(WinrtStorageUtilTest, CreateBufferFromData) {
+   ScopedCOMInitializer com_initializer(ScopedCOMInitializer::kMTA);
+ 
++  if (!ResolveCoreWinRTDelayload()) {
++    return;
++  }
++
+   const std::vector<uint8_t> data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+   Microsoft::WRL::ComPtr<ABI::Windows::Storage::Streams::IBuffer> buffer;
+   ASSERT_HRESULT_SUCCEEDED(
+diff --git a/chrome/browser/device_reauth/win/authenticator_win.cc b/chrome/browser/device_reauth/win/authenticator_win.cc
+index 391ba0b3a9586..c8f89a7ab2623 100644
+--- a/chrome/browser/device_reauth/win/authenticator_win.cc
++++ b/chrome/browser/device_reauth/win/authenticator_win.cc
+@@ -89,6 +89,11 @@ void ReportCantCheckAvailability(
+ void GetBiometricAvailabilityFromWindows(
+     AvailabilityCallback callback,
+     scoped_refptr<base::SequencedTaskRunner> thread) {
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    ReportCantCheckAvailability(thread, std::move(callback));
++    return;
++  }
++
+   // Mitigate the issues caused by loading DLLs on a background thread
+   // (http://crbug/973868).
+   SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+@@ -203,6 +219,13 @@ void PerformWindowsHelloAuthenticationAsync(
+ void PerformWindowsHelloAuthenticationAsync(
+     base::OnceCallback<void(bool)> callback,
+     const std::u16string& message) {
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    RecordWindowsHelloAuthenticationResult(
++        AuthenticationResultStatusWin::kFailedToCreateFactory);
++    AuthenticateWithLegacyApi(message, std::move(callback));
++    return;
++  }
++
+   ComPtr<IUserConsentVerifierStatics> factory;
+   HRESULT hr = base::win::GetActivationFactory<
+       IUserConsentVerifierStatics,
+diff --git a/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc b/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc
+index e73e613ec959c..2eda43cdfb8fd 100644
+--- a/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc
++++ b/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc
+@@ -88,6 +86,9 @@ class WebAccountSupportFinder
+     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+     base::win::AssertComApartmentType(base::win::ComApartmentType::MTA);
+ 
++    if (!base::win::ResolveCoreWinRTDelayload())
++      return;  // Unsupported.
++
+     // Get the `WebAuthenticationCoreManager`.
+     ComPtr<IWebAuthenticationCoreManagerStatics> auth_manager;
+     HRESULT hresult = base::win::GetActivationFactory<
+diff --git a/chrome/browser/notifications/notification_platform_bridge_win.cc b/chrome/browser/notifications/notification_platform_bridge_win.cc
+index 5bb38415f8739..fe319e5e4c3a4 100644
+--- a/chrome/browser/notifications/notification_platform_bridge_win.cc
++++ b/chrome/browser/notifications/notification_platform_bridge_win.cc
+@@ -4,6 +4,9 @@
+ #include <string_view>
+ #include <utility>
+ #include <vector>
++
++#include <objbase.h>
++#include <wrl/event.h>
+ 
+ #include "base/base_paths_win.h"
+ #include "base/command_line.h"
+@@ -169,7 +166,8 @@ class NotificationPlatformBridgeWinImpl
+  public:
+   explicit NotificationPlatformBridgeWinImpl(
+       scoped_refptr<base::SequencedTaskRunner> notification_task_runner)
+-      : notification_task_runner_(std::move(notification_task_runner)),
++      : com_functions_initialized_(base::win::ResolveCoreWinRTDelayload()),
++        notification_task_runner_(std::move(notification_task_runner)),
+         image_retainer_(std::make_unique<NotificationImageRetainer>()) {
+     // Delete any remaining temp files in the image folder from the previous
+     // sessions.
+@@ -702,7 +700,8 @@ class NotificationPlatformBridgeWinImpl
+         InstallUtil::IsStartMenuShortcutWithActivatorGuidInstalled();
+ 
+     int status = static_cast<int>(SetReadyCallbackStatus::kSuccess);
+-    bool enabled = activator_registered && shortcut_installed;
++    bool enabled = com_functions_initialized_ && activator_registered &&
++                   shortcut_installed;
+ 
+     if (!enabled) {
+       if (!shortcut_installed) {
+@@ -713,6 +712,8 @@ class NotificationPlatformBridgeWinImpl
+         status |= static_cast<int>(
+             SetReadyCallbackStatus::kComServerMisconfiguration);
+       }
++      if (!com_functions_initialized_)
++        status |= static_cast<int>(SetReadyCallbackStatus::kComNotInitialized);
+     }
+ 
+     LogSetReadyCallbackStatus(static_cast<SetReadyCallbackStatus>(status));
+@@ -877,6 +878,9 @@ class NotificationPlatformBridgeWinImpl
+            NotificationLaunchId>
+       displayed_notifications_;
+ 
++  // Whether the required functions from combase.dll have been loaded.
++  const bool com_functions_initialized_;
++
+   // The task runner running notification related tasks.
+   scoped_refptr<base::SequencedTaskRunner> notification_task_runner_;
+ 
+diff --git a/chrome/browser/notifications/win/notification_metrics.h b/chrome/browser/notifications/win/notification_metrics.h
+index 4186f70cc01a5..c48ef8e74383a 100644
+--- a/chrome/browser/notifications/win/notification_metrics.h
++++ b/chrome/browser/notifications/win/notification_metrics.h
+@@ -137,8 +137,8 @@ enum class SetReadyCallbackStatus {
+   kSuccess = 0,
+   kShortcutMisconfiguration = 1 << 0,
+   kComServerMisconfiguration = 1 << 1,
+-  kComNotInitializedObsolete = 1 << 2,  // No longer possible w/ Win10+ only.
+-  kMaxValue = kComNotInitializedObsolete,
++  kComNotInitialized = 1 << 2,
++  kMaxValue = kComNotInitialized,
+ };
+ 
+ // These values are persisted to logs. Entries should not be renumbered and
+diff --git a/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc b/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc
+index 16a4a81845813..b93004a0646b5 100644
+--- a/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc
++++ b/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc
+@@ -9,6 +9,7 @@
+ #include <wrl/implements.h>
+ 
+ #include "base/win/com_init_util.h"
++#include "base/win/core_winrt_util.h"
+ #include "base/win/win_util.h"
+ #include "chrome/browser/webshare/win/fake_data_transfer_manager_interop.h"
+ #include "chrome/browser/webshare/win/show_share_ui_for_window_operation.h"
+diff --git a/chrome/browser/webshare/win/share_operation.cc b/chrome/browser/webshare/win/share_operation.cc
+index 5f7e0771fbce3..aa2b873d7c242 100644
+--- a/chrome/browser/webshare/win/share_operation.cc
++++ b/chrome/browser/webshare/win/share_operation.cc
+@@ -4,18 +4,6 @@
+ 
+ #include "chrome/browser/webshare/win/share_operation.h"
+ 
+-#include <shlobj.h>
+-#include <windows.applicationmodel.datatransfer.h>
+-#include <windows.foundation.collections.h>
+-#include <windows.foundation.h>
+-#include <windows.storage.h>
+-#include <windows.storage.streams.h>
+-#include <wininet.h>
+-#include <wrl/client.h>
+-#include <wrl/event.h>
+-
+-#include <utility>
+-
+ #include "base/functional/bind.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/win/core_winrt_util.h"
+@@ -38,6 +26,16 @@
+ #include "ui/views/win/hwnd_util.h"
+ #include "url/gurl.h"
+ 
++#include <shlobj.h>
++#include <windows.applicationmodel.datatransfer.h>
++#include <windows.foundation.collections.h>
++#include <windows.foundation.h>
++#include <windows.storage.h>
++#include <windows.storage.streams.h>
++#include <wininet.h>
++#include <wrl/client.h>
++#include <wrl/event.h>
++
+ using ABI::Windows::ApplicationModel::DataTransfer::IDataPackage;
+ using ABI::Windows::ApplicationModel::DataTransfer::IDataPackage2;
+ using ABI::Windows::ApplicationModel::DataTransfer::IDataPackagePropertySet;
+@@ -62,7 +60,10 @@ using Microsoft::WRL::Callback;
+ using Microsoft::WRL::ComPtr;
+ using Microsoft::WRL::Make;
+ 
+-namespace ABI::Windows::Foundation::Collections {
++namespace ABI {
++namespace Windows {
++namespace Foundation {
++namespace Collections {
+ 
+ // Define template specializations for the types used. These uuids were randomly
+ // generated.
+@@ -75,7 +76,10 @@ struct __declspec(uuid("30BE4864-5EE5-4111-916E-15126649F3C9"))
+     VectorChangedEventHandler<IStorageItem*>
+     : VectorChangedEventHandler_impl<IStorageItem*> {};
+ 
+-}  // namespace ABI::Windows::Foundation::Collections
++}  // namespace Collections
++}  // namespace Foundation
++}  // namespace Windows
++}  // namespace ABI
+ 
+ namespace webshare {
+ namespace {
+@@ -369,6 +373,12 @@ void ShareOperation::Run(blink::mojom::ShareService::ShareCallback callback) {
+   DCHECK(!callback_);
+   callback_ = std::move(callback);
+ 
++  // Ensure that the required WinRT functionality is available/loaded.
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    Complete(blink::mojom::ShareError::INTERNAL_ERROR);
++    return;
++  }
++
+   // If the corresponding web_contents have already been cleaned up, cancel
+   // the operation.
+   if (!web_contents_) {
+diff --git a/chrome/browser/webshare/win/share_operation.h b/chrome/browser/webshare/win/share_operation.h
+index e3c6fda208436..42ab3a253c29f 100644
+--- a/chrome/browser/webshare/win/share_operation.h
++++ b/chrome/browser/webshare/win/share_operation.h
+@@ -15,23 +15,29 @@
+ 
+ #include <wrl/client.h>
+ 
+-namespace ABI::Windows {
+-namespace ApplicationModel::DataTransfer {
++namespace ABI {
++namespace Windows {
++namespace ApplicationModel {
++namespace DataTransfer {
+ struct IDataPackage;
+ class IDataRequest;
+ class IDataRequestDeferral;
+ class IDataRequestedEventArgs;
+-}  // namespace ApplicationModel::DataTransfer
++}  // namespace DataTransfer
++}  // namespace ApplicationModel
+ namespace Storage {
+ class IStorageFile;
+ class IStorageItem;
+ }  // namespace Storage
+-}  // namespace ABI::Windows
++}  // namespace Windows
++}  // namespace ABI
+ 
+-namespace base::win {
++namespace base {
++namespace win {
+ template <typename T>
+ class Vector;
+-}  // namespace base::win
++}  // namespace win
++}  // namespace base
+ 
+ namespace content {
+ class WebContents;
+diff --git a/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc b/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
+index 15f2def437648..7805591b8bb59 100644
+--- a/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
++++ b/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
+@@ -40,6 +40,11 @@ HRESULT GetDataTransferManagerHandles(
+     HWND hwnd,
+     IDataTransferManagerInterop** data_transfer_manager_interop,
+     IDataTransferManager** data_transfer_manager) {
++  // If the required WinRT functionality is not available, fail the operation.
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    return E_FAIL;
++  }
++
+   // IDataTransferManagerInterop is semi-hidden behind a CloakedIid
+   // structure on the DataTransferManager, excluding it from things
+   // used by RoGetActivationFactory like GetIids(). Because of this,
+diff --git a/components/embedder_support/user_agent_utils_unittest.cc b/components/embedder_support/user_agent_utils_unittest.cc
+index b453f5dc66482..391232b2b781d 100644
+--- a/components/embedder_support/user_agent_utils_unittest.cc
++++ b/components/embedder_support/user_agent_utils_unittest.cc
+@@ -251,6 +251,7 @@ void CheckUserAgentStringOrdering(bool mobile_device) {
+ // On Windows, the client hint sec-ch-ua-platform-version should be
+ // the highest supported version of the UniversalApiContract.
+ void VerifyWinPlatformVersion(std::string version) {
++  ASSERT_TRUE(base::win::ResolveCoreWinRTDelayload());
+   base::win::ScopedWinrtInitializer scoped_winrt_initializer;
+   ASSERT_TRUE(scoped_winrt_initializer.Succeeded());
+ 
+diff --git a/components/system_media_controls/win/system_media_controls_win.cc b/components/system_media_controls/win/system_media_controls_win.cc
+index 8e6430f0832db..d3bb9c2ae6651 100644
+--- a/components/system_media_controls/win/system_media_controls_win.cc
++++ b/components/system_media_controls/win/system_media_controls_win.cc
+@@ -91,6 +91,10 @@ bool SystemMediaControlsWin::Initialize() {
+ 
+   attempted_to_initialize_ = true;
+ 
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    return false;
++  }
++
+   Microsoft::WRL::ComPtr<ISystemMediaTransportControlsInterop> interop;
+   HRESULT hr = base::win::GetActivationFactory<
+       ISystemMediaTransportControlsInterop,
+diff --git a/content/browser/installedapp/native_win_app_fetcher_impl.cc b/content/browser/installedapp/native_win_app_fetcher_impl.cc
+index e02f9dc5251cc..2717ea740f398 100644
+--- a/content/browser/installedapp/native_win_app_fetcher_impl.cc
++++ b/content/browser/installedapp/native_win_app_fetcher_impl.cc
+@@ -112,6 +112,10 @@ void FilterInstalledAppsForWin(
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   callback_ = std::move(callback);
+ 
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    return OnFailure();
++  }
++
+   ComPtr<IUriRuntimeClassFactory> url_factory;
+   HRESULT hr =
+       base::win::GetActivationFactory<IUriRuntimeClassFactory,
+diff --git a/device/bluetooth/bluetooth_adapter_winrt.cc b/device/bluetooth/bluetooth_adapter_winrt.cc
+index a2ba812053fa5..0fcc4ec97d2c1 100644
+--- a/device/bluetooth/bluetooth_adapter_winrt.cc
++++ b/device/bluetooth/bluetooth_adapter_winrt.cc
+@@ -666,6 +666,13 @@ void BluetoothAdapterWinrt::InitForTests(
+     ComPtr<IBluetoothAdapterStatics> bluetooth_adapter_statics,
+     ComPtr<IDeviceInformationStatics> device_information_statics,
+     ComPtr<IRadioStatics> radio_statics) {
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    CompleteInit(std::move(init_callback), std::move(bluetooth_adapter_statics),
++                 std::move(device_information_statics),
++                 std::move(radio_statics));
++    return;
++  }
++
+   auto statics = PerformSlowInitTasks();
+ 
+   // This allows any passed in values (which would be fakes) to replace
+@@ -689,6 +696,9 @@ void BluetoothAdapterWinrt::InitForTests(
+ BluetoothAdapterWinrt::StaticsInterfaces
+ BluetoothAdapterWinrt::PerformSlowInitTasks() {
+   base::win::AssertComApartmentType(base::win::ComApartmentType::MTA);
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    return BluetoothAdapterWinrt::StaticsInterfaces();
++  }
+   ComPtr<IBluetoothAdapterStatics> adapter_statics;
+   HRESULT hr = base::win::GetActivationFactory<
+       IBluetoothAdapterStatics,
+diff --git a/media/audio/win/audio_low_latency_input_win.cc b/media/audio/win/audio_low_latency_input_win.cc
+index c1a926f95eb4b..7b6737a99aa74 100644
+--- a/media/audio/win/audio_low_latency_input_win.cc
++++ b/media/audio/win/audio_low_latency_input_win.cc
+@@ -230,6 +230,12 @@ bool InitializeUWPSupport() {
+     // 10.0.10240.0.
+     DCHECK_GE(base::win::OSInfo::GetInstance()->version_number().build, 10240u);
+ 
++    // Provide access to Core WinRT/UWP functions.
++    if (!base::win::ResolveCoreWinRTDelayload()) {
++      // Failed loading functions from combase.dll.
++      DLOG(WARNING) << "Failed to initialize WinRT/UWP";
++      return false;
++    }
+     return true;
+   }();
+ 
+diff --git a/media/capture/video/win/video_capture_device_factory_win.cc b/media/capture/video/win/video_capture_device_factory_win.cc
+index 70ecdf71d0191..467081e86bc23 100644
+--- a/media/capture/video/win/video_capture_device_factory_win.cc
++++ b/media/capture/video/win/video_capture_device_factory_win.cc
+@@ -283,6 +283,15 @@ DevicesInfo::const_iterator FindNonDirectShowDeviceInfoByNameAndModel(
+       });
+ }
+ 
++bool IsEnclosureLocationSupported() {
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    DLOG(ERROR) << "Failed loading functions from combase.dll";
++    return false;
++  }
++
++  return true;
++}
++
+ void FindAndSetDefaultVideoCamera(
+     std::vector<VideoCaptureDeviceInfo>* devices_info) {
+   // When available, the default video camera should be external with
+@@ -556,17 +565,21 @@ void VideoCaptureDeviceFactoryWin::GetDevicesInfo(
+     devices_info = GetDevicesInfoDirectShow(devices_info);
+   }
+ 
+-  com_thread_.init_com_with_mta(true);
+-  com_thread_.Start();
+-  com_thread_data_ =
+-      base::MakeRefCounted<VideoCaptureDeviceFactoryWin::ComThreadData>(
+-          weak_ptr_factory_.GetWeakPtr(), com_thread_.task_runner(),
+-          base::SingleThreadTaskRunner::GetCurrentDefault());
+-  com_thread_.task_runner()->PostTask(
+-      FROM_HERE,
+-      base::BindOnce(
+-          &VideoCaptureDeviceFactoryWin::ComThreadData::EnumerateDevicesUWP,
+-          com_thread_data_, std::move(devices_info), std::move(callback)));
++  if (IsEnclosureLocationSupported()) {
++    com_thread_.init_com_with_mta(true);
++    com_thread_.Start();
++    com_thread_data_ =
++        base::MakeRefCounted<VideoCaptureDeviceFactoryWin::ComThreadData>(
++            weak_ptr_factory_.GetWeakPtr(), com_thread_.task_runner(),
++            base::SingleThreadTaskRunner::GetCurrentDefault());
++    com_thread_.task_runner()->PostTask(
++        FROM_HERE,
++        base::BindOnce(
++            &VideoCaptureDeviceFactoryWin::ComThreadData::EnumerateDevicesUWP,
++            com_thread_data_, std::move(devices_info), std::move(callback)));
++  } else {
++    DeviceInfoReady(std::move(devices_info), std::move(callback));
++  }
+ }
+ 
+ void VideoCaptureDeviceFactoryWin::ComThreadData::EnumerateDevicesUWP(
+diff --git a/media/midi/midi_manager_winrt.cc b/media/midi/midi_manager_winrt.cc
+index d5ce6175bffbf..b2f00aba1c8ef 100644
+--- a/media/midi/midi_manager_winrt.cc
++++ b/media/midi/midi_manager_winrt.cc
+@@ -822,6 +822,15 @@ void MidiManagerWinrt::InitializeOnComRunner() {
+ 
+   DCHECK(service()->task_service()->IsOnTaskRunner(kComTaskRunner));
+ 
++  bool preload_success = base::win::ResolveCoreWinRTDelayload();
++  if (!preload_success) {
++    service()->task_service()->PostBoundTask(
++        kDefaultTaskRunner,
++        base::BindOnce(&MidiManagerWinrt::CompleteInitialization,
++                       base::Unretained(this), Result::INITIALIZATION_ERROR));
++    return;
++  }
++
+   port_manager_in_ = std::make_unique<MidiInPortManager>(this);
+   port_manager_out_ = std::make_unique<MidiOutPortManager>(this);
+ 
+diff --git a/services/device/geolocation/win/location_provider_winrt.cc b/services/device/geolocation/win/location_provider_winrt.cc
+index 84e10fa127aa2..aa6ebca376b23 100644
+--- a/services/device/geolocation/win/location_provider_winrt.cc
++++ b/services/device/geolocation/win/location_provider_winrt.cc
+@@ -487,7 +487,8 @@ std::unique_ptr<LocationProvider> NewSystemLocationProvider(
+ std::unique_ptr<LocationProvider> NewSystemLocationProvider() {
+   // TODO: Remove IsSystemLocationSettingEnabled once
+   // system permission manager support for `LocationProviderWinrt` is ready.
+-  if (!IsSystemLocationSettingEnabled()) {
++  if (!base::win::ResolveCoreWinRTDelayload() ||
++      !IsSystemLocationSettingEnabled()) {
+     return nullptr;
+   }
+ 
+diff --git a/services/shape_detection/face_detection_provider_win.cc b/services/shape_detection/face_detection_provider_win.cc
+index 59e9eb36d95a5..19ce2ac8a54d2 100644
+--- a/services/shape_detection/face_detection_provider_win.cc
++++ b/services/shape_detection/face_detection_provider_win.cc
+@@ -49,6 +49,12 @@ BitmapPixelFormat GetPreferredPixelFormat(IFaceDetectorStatics* factory) {
+ void FaceDetectionProviderWin::CreateFaceDetection(
+     mojo::PendingReceiver<shape_detection::mojom::FaceDetection> receiver,
+     shape_detection::mojom::FaceDetectorOptionsPtr options) {
++  // Loads functions dynamically at runtime to prevent library dependencies.
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    DLOG(ERROR) << "Failed loading functions from combase.dll";
++    return;
++  }
++
+   ComPtr<IFaceDetectorStatics> factory;
+   HRESULT hr = GetActivationFactory<
+       IFaceDetectorStatics,
+diff --git a/services/shape_detection/text_detection_impl_win.cc b/services/shape_detection/text_detection_impl_win.cc
+index a442dced19ad6..e8191cfce84ac 100644
+--- a/services/shape_detection/text_detection_impl_win.cc
++++ b/services/shape_detection/text_detection_impl_win.cc
+@@ -42,6 +42,12 @@ using Microsoft::WRL::ComPtr;
+ // static
+ void TextDetectionImpl::Create(
+     mojo::PendingReceiver<mojom::TextDetection> receiver) {
++  // Loads functions dynamically at runtime to prevent library dependencies.
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    DLOG(ERROR) << "Failed loading functions from combase.dll";
++    return;
++  }
++
+   // Text Detection specification only supports Latin-1 text as documented in
+   // https://wicg.github.io/shape-detection-api/text.html#text-detection-api.
+   // TODO(junwei.fu): https://crbug.com/794097 consider supporting other Latin
+diff --git a/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc b/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc
+index e079f9ccd09d2..671fc2926347d 100644
+--- a/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc
++++ b/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc
+@@ -90,6 +90,9 @@ class OnScreenKeyboardDisplayManagerInputPane::VirtualKeyboardInputPane
+     DCHECK(!main_task_runner_->BelongsToCurrentThread());
+     if (input_pane2_)
+       return true;
++    if (!base::win::ResolveCoreWinRTDelayload()) {
++      return false;
++    }
+ 
+     base::win::AssertComApartmentType(base::win::ComApartmentType::STA);
+ 
+diff --git a/ui/display/win/uwp_text_scale_factor.cc b/ui/display/win/uwp_text_scale_factor.cc
+index f6867edea301e..5c4a70e7d8217 100644
+--- a/ui/display/win/uwp_text_scale_factor.cc
++++ b/ui/display/win/uwp_text_scale_factor.cc
+@@ -52,6 +52,12 @@ bool g_default_instance_cleaned_up = false;
+ bool CreateUiSettingsComObject(ComPtr<IUISettings2>& ptr) {
+   DCHECK(!ptr);
+ 
++  // Need to do this check before using WinRT functions.
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    DLOG(ERROR) << "Failed loading functions from combase.dll";
++    return false;
++  }
++
+   // Create the COM object.
+   auto hstring = base::win::ScopedHString::Create(
+       RuntimeClass_Windows_UI_ViewManagement_UISettings);
+diff --git a/ui/native_theme/caption_style_win.cc b/ui/native_theme/caption_style_win.cc
+index 2c27d56f29eaa..c8c432edd88a1 100644
+--- a/ui/native_theme/caption_style_win.cc
++++ b/ui/native_theme/caption_style_win.cc
+@@ -174,6 +174,12 @@ absl::optional<CaptionStyle> InitializeFromSystemSettings() {
+ std::optional<CaptionStyle> InitializeFromSystemSettings() {
+   TRACE_EVENT0("ui", "InitializeFromSystemSettings");
+ 
++  // Need to do this check before using WinRT functions.
++  bool can_use_scoped_hstring = base::win::ResolveCoreWinRTDelayload();
++
++  if (!can_use_scoped_hstring)
++    return std::nullopt;
++
+   base::win::ScopedHString closed_caption_properties_string =
+       base::win::ScopedHString::Create(
+           RuntimeClass_Windows_Media_ClosedCaptioning_ClosedCaptionProperties);
+diff --git a/ui/views/win/pen_id_handler.cc b/ui/views/win/pen_id_handler.cc
+index cf9d785f2bfbe..17c580b042871 100644
+--- a/ui/views/win/pen_id_handler.cc
++++ b/ui/views/win/pen_id_handler.cc
+@@ -37,6 +37,9 @@ class PenIdStatics {
+ class PenIdStatics {
+  public:
+   PenIdStatics() {
++    if (!base::win::ResolveCoreWinRTDelayload()) {
++      return;
++    }
+     SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+     base::win::AssertComInitialized();
+     base::win::RoGetActivationFactory(
+diff --git a/chrome/browser/metrics/key_credential_manager_support_reporter_win.cc b/chrome/browser/metrics/key_credential_manager_support_reporter_win.cc
+index 436bc47cadcb1..4c9e784d3371c 100644
+--- a/chrome/browser/metrics/key_credential_manager_support_reporter_win.cc
++++ b/chrome/browser/metrics/key_credential_manager_support_reporter_win.cc
+@@ -62,6 +62,12 @@ void AsyncOperationCallback(boolean outcome) {
+ void CheckAndReportIsSupported() {
+   SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+ 
++  // Loads functions dynamically at runtime to prevent library dependencies.
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    ReportIsSupportedOutcome(kActivationFactoryNotAvailable);
++    return;
++  }
++
+   ComPtr<IKeyCredentialManagerStatics> factory;
+   HRESULT hr = base::win::GetActivationFactory<
+       IKeyCredentialManagerStatics,
+diff --git a/device/fido/win/util.cc b/device/fido/win/util.cc
+index ce164c3cd36ec..f54981fcb54c3 100644
+--- a/device/fido/win/util.cc
++++ b/device/fido/win/util.cc
+@@ -49,6 +49,10 @@ void DeviceHasBiometricsAvailableInternal(
+                             BiometricAvailability::kAvailable);
+     return;
+   }
++  if (!base::win::ResolveCoreWinRTDelayload()) {
++    std::move(callback).Run(false);
++    return;
++  }
+ 
+   ComPtr<IUserConsentVerifierStatics> factory;
+   HRESULT hr = base::win::GetActivationFactory<

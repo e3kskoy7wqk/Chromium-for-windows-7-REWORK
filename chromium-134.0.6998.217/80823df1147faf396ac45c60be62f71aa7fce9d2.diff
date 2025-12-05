@@ -1,0 +1,256 @@
+diff --git a/chrome/browser/webshare/share_service_browsertest.cc b/chrome/browser/webshare/share_service_browsertest.cc
+index 56526b35a49cf..80d84bd2908ce 100644
+--- a/chrome/browser/webshare/share_service_browsertest.cc
++++ b/chrome/browser/webshare/share_service_browsertest.cc
+@@ -40,6 +40,14 @@ class ShareServiceBrowserTest : public InProcessBrowserTest {
+     feature_list_.InitAndEnableFeature(features::kWebShare);
+   }
+ 
++  void SetUp() override {
++#if BUILDFLAG(IS_WIN)
++    if (!webshare::ScopedShareOperationFakeComponents::IsSupportedEnvironment())
++      GTEST_SKIP();
++#endif
++    InProcessBrowserTest::SetUp();
++  }
++
+   void SetUpOnMainThread() override {
+     InProcessBrowserTest::SetUpOnMainThread();
+ #if BUILDFLAG(IS_CHROMEOS)
+diff --git a/chrome/browser/webshare/share_service_unittest.cc b/chrome/browser/webshare/share_service_unittest.cc
+index 62702376175f7..d7a16687704c7 100644
+--- a/chrome/browser/webshare/share_service_unittest.cc
++++ b/chrome/browser/webshare/share_service_unittest.cc
+@@ -62,6 +62,9 @@ class ShareServiceUnitTest : public ChromeRenderViewHostTestHarness {
+         base::BindRepeating(&ShareServiceUnitTest::AcceptShareRequest));
+ #endif
+ #if BUILDFLAG(IS_WIN)
++    if (!webshare::ScopedShareOperationFakeComponents::IsSupportedEnvironment())
++      GTEST_SKIP();
++
+     ASSERT_NO_FATAL_FAILURE(scoped_fake_components_.SetUp());
+ #endif
+   }
+diff --git a/chrome/browser/webshare/win/fake_data_transfer_manager.cc b/chrome/browser/webshare/win/fake_data_transfer_manager.cc
+index c3a30311c0a34..3965fd998f11c 100644
+--- a/chrome/browser/webshare/win/fake_data_transfer_manager.cc
++++ b/chrome/browser/webshare/win/fake_data_transfer_manager.cc
+@@ -12,6 +12,7 @@
+ #include "base/win/core_winrt_util.h"
+ #include "base/win/scoped_hstring.h"
+ #include "base/win/vector.h"
++#include "base/win/windows_version.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ using ABI::Windows::ApplicationModel::DataTransfer::DataPackage;
+@@ -402,6 +403,10 @@ class FakeDataRequestedEventArgs final
+ }  // namespace
+ 
+ // static
++bool FakeDataTransferManager::IsSupportedEnvironment() {
++  return base::win::GetVersion() >= base::win::Version::WIN10;
++}
++
+ FakeDataTransferManager::FakeDataTransferManager() {
+   post_data_requested_callback_ = base::DoNothing();
+ }
+diff --git a/chrome/browser/webshare/win/fake_data_transfer_manager.h b/chrome/browser/webshare/win/fake_data_transfer_manager.h
+index 02cc8804a7362..eb79a55d1e855 100644
+--- a/chrome/browser/webshare/win/fake_data_transfer_manager.h
++++ b/chrome/browser/webshare/win/fake_data_transfer_manager.h
+@@ -48,6 +48,8 @@ class __declspec(uuid("53CA4C00-6F19-40C1-A740-F66510E2DB40"))
+   using PostDataRequestedCallback =
+       base::RepeatingCallback<void(const DataRequestedContent&)>;
+ 
++  static bool IsSupportedEnvironment();
++
+   FakeDataTransferManager();
+   FakeDataTransferManager(const FakeDataTransferManager&) = delete;
+   FakeDataTransferManager& operator=(const FakeDataTransferManager&) = delete;
+diff --git a/chrome/browser/webshare/win/fake_data_transfer_manager_interop.cc b/chrome/browser/webshare/win/fake_data_transfer_manager_interop.cc
+index 050d65f23d719..b567168ac1dac 100644
+--- a/chrome/browser/webshare/win/fake_data_transfer_manager_interop.cc
++++ b/chrome/browser/webshare/win/fake_data_transfer_manager_interop.cc
+@@ -13,6 +13,11 @@
+ 
+ namespace webshare {
+ 
++// static
++bool FakeDataTransferManagerInterop::IsSupportedEnvironment() {
++  return FakeDataTransferManager::IsSupportedEnvironment();
++}
++
+ FakeDataTransferManagerInterop::FakeDataTransferManagerInterop() = default;
+ 
+ FakeDataTransferManagerInterop::~FakeDataTransferManagerInterop() {
+diff --git a/chrome/browser/webshare/win/fake_data_transfer_manager_interop.h b/chrome/browser/webshare/win/fake_data_transfer_manager_interop.h
+index a78f84c12e713..ec01e65c1c621 100644
+--- a/chrome/browser/webshare/win/fake_data_transfer_manager_interop.h
++++ b/chrome/browser/webshare/win/fake_data_transfer_manager_interop.h
+@@ -47,6 +47,8 @@ class FakeDataTransferManagerInterop final
+     SucceedWithoutAction
+   };
+ 
++  static bool IsSupportedEnvironment();
++
+   FakeDataTransferManagerInterop();
+   FakeDataTransferManagerInterop(const FakeDataTransferManagerInterop&) =
+       delete;
+diff --git a/chrome/browser/webshare/win/fake_data_transfer_manager_interop_unittest.cc b/chrome/browser/webshare/win/fake_data_transfer_manager_interop_unittest.cc
+index 7046ad2c26e0c..6ee684f9b8b8e 100644
+--- a/chrome/browser/webshare/win/fake_data_transfer_manager_interop_unittest.cc
++++ b/chrome/browser/webshare/win/fake_data_transfer_manager_interop_unittest.cc
+@@ -55,6 +55,8 @@ class DataRequestedTestCallback {
+ class FakeDataTransferManagerInteropTest : public ::testing::Test {
+  protected:
+   void SetUp() override {
++    if (!FakeDataTransferManagerInterop::IsSupportedEnvironment())
++      GTEST_SKIP();
+     fake_data_transfer_manager_interop_ =
+         Microsoft::WRL::Make<FakeDataTransferManagerInterop>();
+   }
+diff --git a/chrome/browser/webshare/win/fake_data_transfer_manager_unittest.cc b/chrome/browser/webshare/win/fake_data_transfer_manager_unittest.cc
+index 2f6c5a6d6a726..219322a3b0ff2 100644
+--- a/chrome/browser/webshare/win/fake_data_transfer_manager_unittest.cc
++++ b/chrome/browser/webshare/win/fake_data_transfer_manager_unittest.cc
+@@ -93,6 +93,9 @@ class DataRequestedTestCallback {
+ class FakeDataTransferManagerTest : public ::testing::Test {
+  protected:
+   void SetUp() override {
++    if (!FakeDataTransferManager::IsSupportedEnvironment())
++      GTEST_SKIP();
++
+     winrt_initializer_.emplace();
+     ASSERT_TRUE(winrt_initializer_->Succeeded());
+     fake_data_transfer_manager_ =
+diff --git a/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc b/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc
+index b93004a0646b5..a55d6e1397e63 100644
+--- a/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc
++++ b/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.cc
+@@ -38,6 +38,11 @@ static HRESULT FakeRoGetActivationFactory(HSTRING class_id,
+ 
+ }  // namespace
+ 
++// static
++bool ScopedFakeDataTransferManagerInterop::IsSupportedEnvironment() {
++  return FakeDataTransferManagerInterop::IsSupportedEnvironment();
++}
++
+ ScopedFakeDataTransferManagerInterop::ScopedFakeDataTransferManagerInterop() =
+     default;
+ 
+@@ -51,6 +56,7 @@ ScopedFakeDataTransferManagerInterop::~ScopedFakeDataTransferManagerInterop() {
+ 
+ void ScopedFakeDataTransferManagerInterop::SetUp() {
+   ASSERT_FALSE(set_up_);
++  ASSERT_TRUE(IsSupportedEnvironment());
+   base::win::AssertComInitialized();
+ 
+   instance_ = Microsoft::WRL::Make<FakeDataTransferManagerInterop>();
+diff --git a/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.h b/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.h
+index 92429b1a4ea20..87b9785cc1550 100644
+--- a/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.h
++++ b/chrome/browser/webshare/win/scoped_fake_data_transfer_manager_interop.h
+@@ -16,6 +16,8 @@ class FakeDataTransferManagerInterop;
+ // for the Share contract.
+ class ScopedFakeDataTransferManagerInterop {
+  public:
++  static bool IsSupportedEnvironment();
++
+   ScopedFakeDataTransferManagerInterop();
+   ScopedFakeDataTransferManagerInterop(
+       const ScopedFakeDataTransferManagerInterop&) = delete;
+diff --git a/chrome/browser/webshare/win/scoped_share_operation_fake_components.cc b/chrome/browser/webshare/win/scoped_share_operation_fake_components.cc
+index 99c8156f292a3..b5d80978704f9 100644
+--- a/chrome/browser/webshare/win/scoped_share_operation_fake_components.cc
++++ b/chrome/browser/webshare/win/scoped_share_operation_fake_components.cc
+@@ -54,6 +54,11 @@ static HRESULT FakeRoGetActivationFactory(HSTRING class_id,
+ 
+ }  // namespace
+ 
++// static
++bool ScopedShareOperationFakeComponents::IsSupportedEnvironment() {
++  return ScopedFakeDataTransferManagerInterop::IsSupportedEnvironment();
++}
++
+ ScopedShareOperationFakeComponents::ScopedShareOperationFakeComponents() =
+     default;
+ 
+@@ -66,6 +71,7 @@ ScopedShareOperationFakeComponents::~ScopedShareOperationFakeComponents() {
+ }
+ 
+ void ScopedShareOperationFakeComponents::SetUp() {
++  ASSERT_TRUE(IsSupportedEnvironment());
+   base::win::AssertComInitialized();
+ 
+   ASSERT_NO_FATAL_FAILURE(scoped_fake_data_transfer_manager_interop_.SetUp());
+diff --git a/chrome/browser/webshare/win/scoped_share_operation_fake_components.h b/chrome/browser/webshare/win/scoped_share_operation_fake_components.h
+index 9d29fdd62f2d9..67eae3070357c 100644
+--- a/chrome/browser/webshare/win/scoped_share_operation_fake_components.h
++++ b/chrome/browser/webshare/win/scoped_share_operation_fake_components.h
+@@ -21,6 +21,8 @@ class FakeUriRuntimeClassFactory;
+ // ShareOperation.
+ class ScopedShareOperationFakeComponents final {
+  public:
++  static bool IsSupportedEnvironment();
++
+   ScopedShareOperationFakeComponents();
+   ScopedShareOperationFakeComponents(
+       const ScopedShareOperationFakeComponents&) = delete;
+diff --git a/chrome/browser/webshare/win/share_operation_unittest.cc b/chrome/browser/webshare/win/share_operation_unittest.cc
+index b4aaa46ebef32..0937bf890684a 100644
+--- a/chrome/browser/webshare/win/share_operation_unittest.cc
++++ b/chrome/browser/webshare/win/share_operation_unittest.cc
+@@ -66,6 +66,9 @@ class ShareOperationUnitTest : public ChromeRenderViewHostTestHarness {
+   void SetUp() override {
+     ChromeRenderViewHostTestHarness::SetUp();
+ 
++    if (!ScopedShareOperationFakeComponents::IsSupportedEnvironment())
++      GTEST_SKIP();
++
+     ASSERT_NO_FATAL_FAILURE(scoped_fake_components_.SetUp());
+     ShareOperation::SetMaxFileBytesForTesting(kMaxSharedFileBytesForTest);
+   }
+@@ -465,4 +468,29 @@ TEST_F(ShareOperationUnitTest, FilesTotallingLargerThanSizeLimit) {
+             kMaxSharedFileBytesForTest + 1);
+ }
+ 
++class ShareOperationInUnsupportedEnvironmentUnitTest
++    : public ShareOperationUnitTest {
++ public:
++  void SetUp() override {
++    ChromeRenderViewHostTestHarness::SetUp();
++
++    if (ScopedShareOperationFakeComponents::IsSupportedEnvironment())
++      GTEST_SKIP();
++  }
++};
++
++TEST_F(ShareOperationInUnsupportedEnvironmentUnitTest, GracefullyFails) {
++  base::RunLoop run_loop;
++  std::vector<blink::mojom::SharedFilePtr> files;
++  ShareOperation operation{"shared title", "shared text",
++                           GURL("https://www.contoso.com"), std::move(files),
++                           web_contents()};
++  operation.Run(
++      base::BindLambdaForTesting([&run_loop](blink::mojom::ShareError error) {
++        ASSERT_EQ(error, blink::mojom::ShareError::INTERNAL_ERROR);
++        run_loop.Quit();
++      }));
++  run_loop.Run();
++}
++
+ }  // namespace webshare
+diff --git a/chrome/browser/webshare/win/show_share_ui_for_window_operation_unittest.cc b/chrome/browser/webshare/win/show_share_ui_for_window_operation_unittest.cc
+index 942a39827d812..a63c520c70148 100644
+--- a/chrome/browser/webshare/win/show_share_ui_for_window_operation_unittest.cc
++++ b/chrome/browser/webshare/win/show_share_ui_for_window_operation_unittest.cc
+@@ -41,6 +41,8 @@ class ShowShareUIForWindowOperationTest : public ::testing::Test {
+   enum TestCallbackState { NotRun = 0, RunWithoutValue, RunWithValue };
+ 
+   void SetUp() override {
++    if (!ScopedFakeDataTransferManagerInterop::IsSupportedEnvironment())
++      GTEST_SKIP();
+     ASSERT_NO_FATAL_FAILURE(scoped_interop_.SetUp());
+     operation_ = std::make_unique<ShowShareUIForWindowOperation>(hwnd_);
+     auto weak_ptr = weak_factory_.GetWeakPtr();

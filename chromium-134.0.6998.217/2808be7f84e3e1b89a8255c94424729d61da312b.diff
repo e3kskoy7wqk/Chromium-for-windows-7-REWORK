@@ -1,0 +1,24 @@
+diff --git a/base/process/process_win.cc b/base/process/process_win.cc
+index a92fe6d1a6556..78575993109f0 100644
+--- a/base/process/process_win.cc
++++ b/base/process/process_win.cc
+@@ -276,6 +276,10 @@ bool Process::SetProcessBackgrounded(bool value) {
+                                    : NORMAL_PRIORITY_CLASS;
+ 
+   auto* os_info = base::win::OSInfo::GetInstance();
++  static const auto set_process_information_fn =
++      reinterpret_cast<decltype(&::SetProcessInformation)>(::GetProcAddress(
++          ::GetModuleHandle(L"Kernel32.dll"), "SetProcessInformation"));
++  if (set_process_information_fn)
+   if (os_info->version() >= win::Version::WIN11) {
+     PROCESS_POWER_THROTTLING_STATE power_throttling;
+     RtlZeroMemory(&power_throttling, sizeof(power_throttling));
+@@ -293,7 +297,7 @@ bool Process::SetProcessBackgrounded(bool value) {
+       power_throttling.StateMask = 0;
+     }
+     bool ret =
+-        ::SetProcessInformation(Handle(), ProcessPowerThrottling,
++        set_process_information_fn(Handle(), ProcessPowerThrottling,
+                                 &power_throttling, sizeof(power_throttling));
+     if (ret == 0) {
+       DPLOG(ERROR) << "Setting process QoS policy fails";

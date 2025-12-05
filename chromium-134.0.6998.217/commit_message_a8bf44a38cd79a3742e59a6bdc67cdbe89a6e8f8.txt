@@ -1,0 +1,1 @@
+Remove all uses of SHFileOperation, and replace with supported APIs.    2019/4/16 3:15:09    a8bf44a38cd79a3742e59a6bdc67cdbe89a6e8f8

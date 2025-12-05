@@ -1,0 +1,21 @@
+diff --git a/base/process/process_win.cc b/base/process/process_win.cc
+index e2cc003bc4375..fed2e25ac5e4b 100644
+--- a/base/process/process_win.cc
++++ b/base/process/process_win.cc
+@@ -271,8 +271,15 @@ Process::Priority Process::GetPriority() const {
+       .ControlMask = 0ul,
+       .StateMask = 0ul,
+   };
++  typedef BOOL (WINAPI * tGetProcessInformation)(
++      _In_ HANDLE hProcess,
++      _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
++      _Out_writes_bytes_(ProcessInformationSize) LPVOID ProcessInformation,
++      _In_ DWORD ProcessInformationSize);
++  auto const fnGetProcessInformation = reinterpret_cast<tGetProcessInformation>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
+   const bool ret =
+-      ::GetProcessInformation(Handle(), ProcessPowerThrottling,
++      fnGetProcessInformation != 0 &&
++      fnGetProcessInformation(Handle(), ProcessPowerThrottling,
+                               &power_throttling, sizeof(power_throttling));
+ 
+   // Return Priority::kUserVisible if EcoQoS read & write supported and level

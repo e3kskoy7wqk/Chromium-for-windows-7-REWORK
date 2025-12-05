@@ -1,0 +1,131 @@
+diff --git a/gpu/config/gpu_preferences.h b/gpu/config/gpu_preferences.h
+index 5a41c0db73bc9..5c5fb832b6c14 100644
+--- a/gpu/config/gpu_preferences.h
++++ b/gpu/config/gpu_preferences.h
+@@ -106,6 +106,11 @@ struct GPU_EXPORT GpuPreferences {
+   // Enables support for outputting NV12 video frames. Windows only.
+   bool enable_nv12_dxgi_video = false;
+ 
++  // Enables MediaFoundationVideoEncoderAccelerator on Windows 7. Windows 7 does
++  // not support some of the attributes which may impact the performance or the
++  // quality of output. So this flag is disabled by default. Windows only.
++  bool enable_media_foundation_vea_on_windows7 = false;
++
+   // Disables the use of a 3D software rasterizer, for example, SwiftShader.
+   bool disable_software_rasterizer = false;
+ 
+diff --git a/gpu/config/gpu_preferences_unittest.cc b/gpu/config/gpu_preferences_unittest.cc
+index 9cce58263fc69..8138e045722aa 100644
+--- a/gpu/config/gpu_preferences_unittest.cc
++++ b/gpu/config/gpu_preferences_unittest.cc
+@@ -29,6 +29,8 @@ void CheckGpuPreferencesEqual(GpuPreferences left, GpuPreferences right) {
+   EXPECT_EQ(left.enable_zero_copy_dxgi_video,
+             right.enable_zero_copy_dxgi_video);
+   EXPECT_EQ(left.enable_nv12_dxgi_video, right.enable_nv12_dxgi_video);
++  EXPECT_EQ(left.enable_media_foundation_vea_on_windows7,
++            right.enable_media_foundation_vea_on_windows7);
+   EXPECT_EQ(left.disable_software_rasterizer,
+             right.disable_software_rasterizer);
+   EXPECT_EQ(left.log_gpu_control_list_decisions,
+@@ -140,6 +142,7 @@ TEST(GpuPreferencesTest, EncodeDecode) {
+     GPU_PREFERENCES_FIELD(enable_low_latency_dxva, false)
+     GPU_PREFERENCES_FIELD(enable_zero_copy_dxgi_video, true)
+     GPU_PREFERENCES_FIELD(enable_nv12_dxgi_video, true)
++    GPU_PREFERENCES_FIELD(enable_media_foundation_vea_on_windows7, true)
+     GPU_PREFERENCES_FIELD(disable_software_rasterizer, true)
+     GPU_PREFERENCES_FIELD(log_gpu_control_list_decisions, true)
+     GPU_PREFERENCES_FIELD(compile_shader_always_succeeds, true)
+@@ -234,6 +237,7 @@ TEST(GpuPreferencesTest, DISABLED_DecodePreferences) {
+   PRINT_BOOL(enable_low_latency_dxva);
+   PRINT_BOOL(enable_zero_copy_dxgi_video);
+   PRINT_BOOL(enable_nv12_dxgi_video);
++  PRINT_BOOL(enable_media_foundation_vea_on_windows7);
+   PRINT_BOOL(disable_software_rasterizer);
+   PRINT_BOOL(log_gpu_control_list_decisions);
+   PRINT_BOOL(compile_shader_always_succeeds);
+diff --git a/gpu/ipc/common/gpu_preferences.mojom b/gpu/ipc/common/gpu_preferences.mojom
+index 41dbfba9a7b42..fc036afc896e2 100644
+--- a/gpu/ipc/common/gpu_preferences.mojom
++++ b/gpu/ipc/common/gpu_preferences.mojom
+@@ -55,6 +55,7 @@ struct GpuPreferences {
+   bool enable_low_latency_dxva;
+   bool enable_zero_copy_dxgi_video;
+   bool enable_nv12_dxgi_video;
++  bool enable_media_foundation_vea_on_windows7;
+   bool disable_software_rasterizer;
+   bool log_gpu_control_list_decisions;
+ 
+diff --git a/gpu/ipc/common/gpu_preferences_mojom_traits.h b/gpu/ipc/common/gpu_preferences_mojom_traits.h
+index 4bcb75de8dde4..3aed0eee6e5cf 100644
+--- a/gpu/ipc/common/gpu_preferences_mojom_traits.h
++++ b/gpu/ipc/common/gpu_preferences_mojom_traits.h
+@@ -176,6 +176,8 @@ struct GPU_EXPORT
+     out->enable_low_latency_dxva = prefs.enable_low_latency_dxva();
+     out->enable_zero_copy_dxgi_video = prefs.enable_zero_copy_dxgi_video();
+     out->enable_nv12_dxgi_video = prefs.enable_nv12_dxgi_video();
++    out->enable_media_foundation_vea_on_windows7 =
++        prefs.enable_media_foundation_vea_on_windows7();
+     out->disable_software_rasterizer = prefs.disable_software_rasterizer();
+     out->log_gpu_control_list_decisions =
+         prefs.log_gpu_control_list_decisions();
+@@ -296,6 +298,10 @@ struct GPU_EXPORT
+   static bool enable_nv12_dxgi_video(const gpu::GpuPreferences& prefs) {
+     return prefs.enable_nv12_dxgi_video;
+   }
++  static bool enable_media_foundation_vea_on_windows7(
++      const gpu::GpuPreferences& prefs) {
++    return prefs.enable_media_foundation_vea_on_windows7;
++  }
+   static bool disable_software_rasterizer(const gpu::GpuPreferences& prefs) {
+     return prefs.disable_software_rasterizer;
+   }
+diff --git a/media/gpu/gpu_video_encode_accelerator_factory.cc b/media/gpu/gpu_video_encode_accelerator_factory.cc
+index 71d15a3456736..e367bd608dc9d 100644
+--- a/media/gpu/gpu_video_encode_accelerator_factory.cc
++++ b/media/gpu/gpu_video_encode_accelerator_factory.cc
+@@ -88,6 +85,8 @@ std::unique_ptr<VideoEncodeAccelerator> CreateVTVEA() {
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
++// Creates a MediaFoundationVEA for Win 7 or later. If |compatible_with_win7| is
++// true, VEA is limited to a subset of features that is compatible with Win 7.
+ std::unique_ptr<VideoEncodeAccelerator> CreateMediaFoundationVEA(
+     const gpu::GpuPreferences& gpu_preferences,
+     const gpu::GpuDriverBugWorkarounds& gpu_workarounds,
+diff --git a/remoting/codec/webrtc_video_encoder_gpu.cc b/remoting/codec/webrtc_video_encoder_gpu.cc
+index 70a2ca27b5aac..e54f20dee5b1c 100644
+--- a/remoting/codec/webrtc_video_encoder_gpu.cc
++++ b/remoting/codec/webrtc_video_encoder_gpu.cc
+@@ -58,6 +56,14 @@ constexpr VideoCodecProfile kH264Profile = VideoCodecProfile::H264PROFILE_MAIN;
+ 
+ constexpr int kH264MinimumTargetBitrateKbpsPerMegapixel = 1800;
+ 
++gpu::GpuPreferences CreateGpuPreferences() {
++  gpu::GpuPreferences gpu_preferences;
++#if BUILDFLAG(IS_WIN)
++  gpu_preferences.enable_media_foundation_vea_on_windows7 = true;
++#endif
++  return gpu_preferences;
++}
++
+ gpu::GpuDriverBugWorkarounds CreateGpuWorkarounds() {
+   gpu::GpuDriverBugWorkarounds gpu_workarounds;
+   return gpu_workarounds;
+@@ -370,7 +376,7 @@ void WebrtcVideoEncoderGpu::Core::BeginInitialization() {
+       media::VideoEncodeAccelerator::Config::ContentType::kDisplay);
+   video_encode_accelerator_ =
+       media::GpuVideoEncodeAcceleratorFactory::CreateVEA(
+-          config, this, gpu::GpuPreferences(), CreateGpuWorkarounds(),
++          config, this, CreateGpuPreferences(), CreateGpuWorkarounds(),
+           CreateGpuDevice());
+ 
+   if (!video_encode_accelerator_) {
+@@ -423,7 +429,7 @@ bool WebrtcVideoEncoderGpu::IsSupportedByH264(const Profile& profile) {
+ 
+   media::VideoEncodeAccelerator::SupportedProfiles profiles =
+       media::GpuVideoEncodeAcceleratorFactory::GetSupportedProfiles(
+-          gpu::GpuPreferences(), CreateGpuWorkarounds(), CreateGpuDevice());
++          CreateGpuPreferences(), CreateGpuWorkarounds(), CreateGpuDevice());
+   for (const auto& supported_profile : profiles) {
+     if (supported_profile.profile != kH264Profile) {
+       continue;

@@ -1,0 +1,753 @@
+diff --git a/chrome/chrome_elf/hook_util/hook_util.cc b/chrome/chrome_elf/hook_util/hook_util.cc
+index faed9bf346ae6..207f93c1fd6fa 100644
+--- a/chrome/chrome_elf/hook_util/hook_util.cc
++++ b/chrome/chrome_elf/hook_util/hook_util.cc
+@@ -11,6 +11,8 @@
+ #include <versionhelpers.h>  // windows.h must be before
+ 
+ #include "base/win/pe_image.h"
++#include "chrome/chrome_elf/nt_registry/nt_registry.h"  // utils
++#include "sandbox/win/src/service_resolver.h"
+ 
+ namespace {
+ 
+@@ -197,6 +198,43 @@ DWORD RemoveIATHook(void* intercept_function,
+ 
+ namespace elf_hook {
+ 
++//------------------------------------------------------------------------------
++// System Service hooking support
++//------------------------------------------------------------------------------
++
++sandbox::ServiceResolverThunk* HookSystemService(bool relaxed) {
++  // Create a thunk via the appropriate ServiceResolver instance.
++  sandbox::ServiceResolverThunk* thunk = nullptr;
++
++  // No hooking on unsupported OS versions.
++  if (!::IsWindows7OrGreater())
++    return thunk;
++
++  // Pseudo-handle, no need to close.
++  HANDLE current_process = ::GetCurrentProcess();
++
++#if defined(_WIN64)
++  // ServiceResolverThunk can handle all the formats in 64-bit (instead only
++  // handling one like it does in 32-bit versions).
++  thunk = new sandbox::ServiceResolverThunk(current_process, relaxed);
++#else
++  if (nt::IsCurrentProcWow64()) {
++    if (::IsWindows10OrGreater())
++      thunk = new sandbox::Wow64W10ResolverThunk(current_process, relaxed);
++    else if (::IsWindows8OrGreater())
++      thunk = new sandbox::Wow64W8ResolverThunk(current_process, relaxed);
++    else
++      thunk = new sandbox::Wow64ResolverThunk(current_process, relaxed);
++  } else if (::IsWindows8OrGreater()) {
++    thunk = new sandbox::Win8ResolverThunk(current_process, relaxed);
++  } else {
++    thunk = new sandbox::ServiceResolverThunk(current_process, relaxed);
++  }
++#endif
++
++  return thunk;
++}
++
+ //------------------------------------------------------------------------------
+ // Import Address Table hooking support
+ //------------------------------------------------------------------------------
+diff --git a/chrome/chrome_elf/hook_util/hook_util.h b/chrome/chrome_elf/hook_util/hook_util.h
+index 9070b9d93a6f0..687042ec330c7 100644
+--- a/chrome/chrome_elf/hook_util/hook_util.h
++++ b/chrome/chrome_elf/hook_util/hook_util.h
+@@ -7,8 +7,20 @@
+ 
+ #include <windows.h>
+ 
++namespace sandbox {
++class ServiceResolverThunk;
++}
++
+ namespace elf_hook {
+ 
++//------------------------------------------------------------------------------
++// System Service hooking support
++//------------------------------------------------------------------------------
++
++// Creates a |ServiceResolverThunk| based on the OS version. Ownership of the
++// resulting thunk is passed to the caller.
++sandbox::ServiceResolverThunk* HookSystemService(bool relaxed);
++
+ //------------------------------------------------------------------------------
+ // Import Address Table hooking support
+ //------------------------------------------------------------------------------
+diff --git a/chrome/chrome_elf/third_party_dlls/hook.cc b/chrome/chrome_elf/third_party_dlls/hook.cc
+index fd7e38cda18fd..6501e3b808660 100644
+--- a/chrome/chrome_elf/third_party_dlls/hook.cc
++++ b/chrome/chrome_elf/third_party_dlls/hook.cc
+@@ -13,11 +13,15 @@
+ 
+ #include <atomic>
+ #include <limits>
++#include <memory>
+ #include <string>
+ 
++#include <versionhelpers.h>  // windows.h must be before
++
+ #include "base/compiler_specific.h"
+ #include "chrome/chrome_elf/crash/crash_helper.h"
+ #include "chrome/chrome_elf/hook_util/hook_util.h"
++#include "chrome/chrome_elf/nt_registry/nt_registry.h"  // utils
+ #include "chrome/chrome_elf/pe_image_safe/pe_image_safe.h"
+ #include "chrome/chrome_elf/sha1/sha1.h"
+ #include "chrome/chrome_elf/third_party_dlls/hardcoded_blocklist.h"
+@@ -415,11 +416,14 @@ ThirdPartyStatus ApplyHook() {
+   assert(!g_hook_active);
+ 
+   // Prep system-service thunk via the appropriate ServiceResolver instance.
+-  sandbox::ServiceResolverThunk thunk(::GetCurrentProcess(), /*relaxed=*/false);
+-  assert(sizeof(g_thunk_storage) >= thunk.GetThunkSize());
++  std::unique_ptr<sandbox::ServiceResolverThunk> thunk(
++      elf_hook::HookSystemService(false));
++  if (!thunk)
++    return ThirdPartyStatus::kHookUnsupportedOs;
++  assert(sizeof(g_thunk_storage) >= thunk->GetThunkSize());
+ 
+   // Set target process to self.
+-  thunk.AllowLocalPatches();
++  thunk->AllowLocalPatches();
+ 
+   // Mark the thunk storage as readable and writeable, since we
+   // are ready to write to it now.
+@@ -436,7 +440,7 @@ ThirdPartyStatus ApplyHook() {
+ 
+   // Setup() applies the system-service patch, and stores a copy of the original
+   // system service coded in |g_thunk_storage|.
+-  NTSTATUS ntstatus = thunk.Setup(
++  NTSTATUS ntstatus = thunk->Setup(
+       ::GetModuleHandle(kNtdllName), reinterpret_cast<void*>(&__ImageBase),
+       "NtMapViewOfSection", nullptr, entry_point, g_thunk_storage,
+       sizeof(g_thunk_storage), nullptr);
+diff --git a/sandbox/win/src/interception.cc b/sandbox/win/src/interception.cc
+index a6fdb99719b9f..ec9dfc0590cb7 100644
+--- a/sandbox/win/src/interception.cc
++++ b/sandbox/win/src/interception.cc
+@@ -18,6 +18,7 @@
+ #include "base/rand_util.h"
+ #include "base/scoped_native_library.h"
+ #include "base/win/pe_image.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/interception_internal.h"
+ #include "sandbox/win/src/interceptors.h"
+ #include "sandbox/win/src/internal_types.h"
+@@ -431,7 +432,25 @@ ResultCode InterceptionManager::PatchClientFunctions(
+   patch.dll_data.num_thunks = 0;
+   patch.dll_data.used_bytes = offsetof(DllInterceptionData, thunks);
+ 
+-  ServiceResolverThunk thunk(child_->Process(), /*relaxed=*/true);
++  std::unique_ptr<ServiceResolverThunk> thunk;
++#if defined(_WIN64)
++  thunk = std::make_unique<ServiceResolverThunk>(child_->Process(), true);
++#else
++  base::win::OSInfo* os_info = base::win::OSInfo::GetInstance();
++  base::win::Version real_os_version = os_info->Kernel32Version();
++  if (os_info->IsWowX86OnAMD64()) {
++    if (real_os_version >= base::win::Version::WIN10)
++      thunk.reset(new Wow64W10ResolverThunk(child_->Process(), true));
++    else if (real_os_version >= base::win::Version::WIN8)
++      thunk.reset(new Wow64W8ResolverThunk(child_->Process(), true));
++    else
++      thunk.reset(new Wow64ResolverThunk(child_->Process(), true));
++  } else if (real_os_version >= base::win::Version::WIN8) {
++    thunk.reset(new Win8ResolverThunk(child_->Process(), true));
++  } else {
++    thunk.reset(new ServiceResolverThunk(child_->Process(), true));
++  }
++#endif
+ 
+   patch.originals = {};
+   for (const auto& interception : interceptions_) {
+@@ -441,7 +460,7 @@ ResultCode InterceptionManager::PatchClientFunctions(
+     if (INTERCEPTION_SERVICE_CALL != interception.type)
+       return base::unexpected(SBOX_ERROR_BAD_PARAMS);
+ 
+-    NTSTATUS ret = thunk.Setup(
++    NTSTATUS ret = thunk->Setup(
+         ntdll_base, nullptr, interception.function.c_str(),
+         interception.interceptor.c_str(), interception.interceptor_address,
+         &thunks->thunks[patch.dll_data.num_thunks],
+diff --git a/sandbox/win/src/service_resolver.h b/sandbox/win/src/service_resolver.h
+index 2cfdb409e7f7c..d385810f9ae1a 100644
+--- a/sandbox/win/src/service_resolver.h
++++ b/sandbox/win/src/service_resolver.h
+@@ -53,49 +53,45 @@ class [[clang::lto_visibility_public]] ServiceResolverThunk
+   size_t GetThunkSize() const override;
+ 
+   // Call this to set up ntdll_base_ which will allow for local patches.
+-  void AllowLocalPatches();
++  virtual void AllowLocalPatches();
+ 
+   // Verifies that the function specified by |target_name| in |target_module| is
+   // a service and copies the data from that function into |thunk_storage|. If
+   // |storage_bytes| is too small, then the method fails.
+-  NTSTATUS CopyThunk(const void* target_module,
+-                     const char* target_name,
+-                     BYTE* thunk_storage,
+-                     size_t storage_bytes,
+-                     size_t* storage_used);
++  virtual NTSTATUS CopyThunk(const void* target_module,
++                             const char* target_name,
++                             BYTE* thunk_storage,
++                             size_t storage_bytes,
++                             size_t* storage_used);
+ 
+-  // Checks if a target was patched correctly for a jump. This is only for use
+-  // in testing in 32-bit builds. Will always return true on 64-bit builds. Set
+-  // |thunk_storage| to the same pointer passed to Setup().
+-  bool VerifyJumpTargetForTesting(void* thunk_storage) const;
+-
+- private:
++ protected:
+   // The unit test will use this member to allow local patch on a buffer.
+   HMODULE ntdll_base_;
+ 
+   // Handle of the child process.
+   HANDLE process_;
+ 
+   // Writes |length| bytes from the provided |buffer| into the address space of
+   // |child_process|, at the specified |address|, preserving the original write
+   // protection attributes. Returns true on success.
+   static bool WriteProtectedChildMemory(HANDLE child_process,
+                                         void* address,
+                                         const void* buffer,
+                                         size_t length);
+ 
++ private:
+   // Returns true if the code pointer by target_ corresponds to the expected
+   // type of function. Saves that code on the first part of the thunk pointed
+   // by local_thunk (should be directly accessible from the parent).
+-  bool IsFunctionAService(void* local_thunk) const;
++  virtual bool IsFunctionAService(void* local_thunk) const;
+ 
+   // Performs the actual patch of target_.
+   // local_thunk must be already fully initialized, and the first part must
+   // contain the original code. The real type of this buffer is ServiceFullThunk
+   // (yes, private). remote_thunk (real type ServiceFullThunk), must be
+   // allocated on the child, and will contain the thunk data, after this call.
+-  // Returns the appropriate status code.
+-  NTSTATUS PerformPatch(void* local_thunk, void* remote_thunk);
++  // Returns the apropriate status code.
++  virtual NTSTATUS PerformPatch(void* local_thunk, void* remote_thunk);
+ 
+   // Provides basically the same functionality as IsFunctionAService but it
+   // continues even if it does not recognize the function code. remote_thunk
+@@ -99,6 +95,74 @@ class [[clang::lto_visibility_public]] ServiceResolverThunk
+   ULONG relative_jump_;
+ };
+ 
++// This is the concrete resolver used to perform service-call type functions
++// inside ntdll.dll on WOW64 (32 bit ntdll on 64 bit Vista).
++class Wow64ResolverThunk : public ServiceResolverThunk {
++ public:
++  // The service resolver needs a child process to write to.
++  Wow64ResolverThunk(HANDLE process, bool relaxed)
++      : ServiceResolverThunk(process, relaxed) {}
++
++  Wow64ResolverThunk(const Wow64ResolverThunk&) = delete;
++  Wow64ResolverThunk& operator=(const Wow64ResolverThunk&) = delete;
++
++  ~Wow64ResolverThunk() override {}
++
++ private:
++  bool IsFunctionAService(void* local_thunk) const override;
++};
++
++// This is the concrete resolver used to perform service-call type functions
++// inside ntdll.dll on WOW64 for Windows 8.
++class Wow64W8ResolverThunk : public ServiceResolverThunk {
++ public:
++  // The service resolver needs a child process to write to.
++  Wow64W8ResolverThunk(HANDLE process, bool relaxed)
++      : ServiceResolverThunk(process, relaxed) {}
++
++  Wow64W8ResolverThunk(const Wow64W8ResolverThunk&) = delete;
++  Wow64W8ResolverThunk& operator=(const Wow64W8ResolverThunk&) = delete;
++
++  ~Wow64W8ResolverThunk() override {}
++
++ private:
++  bool IsFunctionAService(void* local_thunk) const override;
++};
++
++// This is the concrete resolver used to perform service-call type functions
++// inside ntdll.dll on Windows 8.
++class Win8ResolverThunk : public ServiceResolverThunk {
++ public:
++  // The service resolver needs a child process to write to.
++  Win8ResolverThunk(HANDLE process, bool relaxed)
++      : ServiceResolverThunk(process, relaxed) {}
++
++  Win8ResolverThunk(const Win8ResolverThunk&) = delete;
++  Win8ResolverThunk& operator=(const Win8ResolverThunk&) = delete;
++
++  ~Win8ResolverThunk() override {}
++
++ private:
++  bool IsFunctionAService(void* local_thunk) const override;
++};
++
++// This is the concrete resolver used to perform service-call type functions
++// inside ntdll.dll on WOW64 for Windows 10.
++class Wow64W10ResolverThunk : public ServiceResolverThunk {
++ public:
++  // The service resolver needs a child process to write to.
++  Wow64W10ResolverThunk(HANDLE process, bool relaxed)
++      : ServiceResolverThunk(process, relaxed) {}
++
++  Wow64W10ResolverThunk(const Wow64W10ResolverThunk&) = delete;
++  Wow64W10ResolverThunk& operator=(const Wow64W10ResolverThunk&) = delete;
++
++  ~Wow64W10ResolverThunk() override {}
++
++ private:
++  bool IsFunctionAService(void* local_thunk) const override;
++};
++
+ }  // namespace sandbox
+ 
+ #endif  // SANDBOX_WIN_SRC_SERVICE_RESOLVER_H_
+diff --git a/sandbox/win/src/service_resolver_32.cc b/sandbox/win/src/service_resolver_32.cc
+index f0eba39cf6642..9631dc1b5e67f 100644
+--- a/sandbox/win/src/service_resolver_32.cc
++++ b/sandbox/win/src/service_resolver_32.cc
+@@ -17,16 +17,43 @@ namespace {
+ const BYTE kMovEax = 0xB8;
+ const BYTE kMovEdx = 0xBA;
+ const USHORT kMovEdxEsp = 0xD48B;
++const USHORT kCallPtrEdx = 0x12FF;
+ const USHORT kCallEdx = 0xD2FF;
+ const BYTE kCallEip = 0xE8;
+ const BYTE kRet = 0xC2;
+ const BYTE kRet2 = 0xC3;
+ const USHORT kJmpEdx = 0xE2FF;
++const USHORT kXorEcx = 0xC933;
++const ULONG kLeaEdx = 0x0424548D;
++const ULONG kCallFs1 = 0xC015FF64;
++const USHORT kCallFs2 = 0;
++const BYTE kCallFs3 = 0;
++const BYTE kAddEsp1 = 0x83;
++const USHORT kAddEsp2 = 0x4C4;
+ const BYTE kJmp32 = 0xE9;
+ const USHORT kSysenter = 0x340F;
+ 
+-// Service code for 32 bit Windows. Introduced in Windows 8.
+-struct ServiceEntry32 {
++// Service code for 32 bit systems.
++// NOTE: on win2003 "call dword ptr [edx]" is "call edx".
++struct ServiceEntry {
++  // This struct contains roughly the following code:
++  // 00 mov     eax,25h
++  // 05 mov     edx,offset SharedUserData!SystemCallStub (7ffe0300)
++  // 0a call    dword ptr [edx]
++  // 0c ret     2Ch
++  // 0f nop
++  BYTE mov_eax;         // = B8
++  ULONG service_id;
++  BYTE mov_edx;         // = BA
++  ULONG stub;
++  USHORT call_ptr_edx;  // = FF 12
++  BYTE ret;             // = C2
++  USHORT num_params;
++  BYTE nop;
++};
++
++// Service code for 32 bit Windows 8.
++struct ServiceEntryW8 {
+   // This struct contains the following code:
+   // 00 b825000000      mov     eax,25h
+   // 05 e803000000      call    eip+3
+@@ -47,13 +74,60 @@ struct ServiceEntry32 {
+   USHORT nop;
+ };
+ 
+-// Service code for a 32 bit process under Wow64. Introduced in Windows 10.
+-// Also used for the patching process.
+-struct ServiceEntryWow64 {
++// Service code for a 32 bit process running on a 64 bit os.
++struct Wow64Entry {
++  // This struct may contain one of two versions of code:
++  // 1. For XP, Vista and 2K3:
++  // 00 b825000000      mov     eax, 25h
++  // 05 33c9            xor     ecx, ecx
++  // 07 8d542404        lea     edx, [esp + 4]
++  // 0b 64ff15c0000000  call    dword ptr fs:[0C0h]
++  // 12 c22c00          ret     2Ch
++  //
++  // 2. For Windows 7:
++  // 00 b825000000      mov     eax, 25h
++  // 05 33c9            xor     ecx, ecx
++  // 07 8d542404        lea     edx, [esp + 4]
++  // 0b 64ff15c0000000  call    dword ptr fs:[0C0h]
++  // 12 83c404          add     esp, 4
++  // 15 c22c00          ret     2Ch
++  //
++  // So we base the structure on the bigger one:
++  BYTE mov_eax;         // = B8
++  ULONG service_id;
++  USHORT xor_ecx;       // = 33 C9
++  ULONG lea_edx;        // = 8D 54 24 04
++  ULONG call_fs1;       // = 64 FF 15 C0
++  USHORT call_fs2;      // = 00 00
++  BYTE call_fs3;        // = 00
++  BYTE add_esp1;        // = 83             or ret
++  USHORT add_esp2;      // = C4 04          or num_params
++  BYTE ret;             // = C2
++  USHORT num_params;
++};
++
++// Service code for a 32 bit process running on 64 bit Windows 8.
++struct Wow64EntryW8 {
++  // 00 b825000000      mov     eax, 25h
++  // 05 64ff15c0000000  call    dword ptr fs:[0C0h]
++  // 0b c22c00          ret     2Ch
++  // 0f 90              nop
++  BYTE mov_eax;         // = B8
++  ULONG service_id;
++  ULONG call_fs1;       // = 64 FF 15 C0
++  USHORT call_fs2;      // = 00 00
++  BYTE call_fs3;        // = 00
++  BYTE ret;             // = C2
++  USHORT num_params;
++  BYTE nop;
++};
++
++// Service code for a 32 bit process running on 64 bit Windows 10.
++struct Wow64EntryW10 {
+   // 00 b828000000      mov     eax, 28h
+   // 05 bab0d54877      mov     edx, 7748D5B0h
+   // 09 ffd2            call    edx
+-  // 0c c22800          ret     28h
++  // 0b c22800          ret     28h
+   BYTE mov_eax;         // = B8
+   ULONG service_id;
+   BYTE mov_edx;         // = BA
+@@ -61,86 +135,27 @@ struct ServiceEntryWow64 {
+   USHORT call_edx;      // = FF D2
+   BYTE ret;             // = C2
+   USHORT num_params;
+-  BYTE nop;
+ };
+ 
+ // Make sure that relaxed patching works as expected.
+-const size_t kMinServiceSize = offsetof(ServiceEntryWow64, ret);
+-// Maximum size of the entry, was the size of the Windows Vista WoW64 entry.
+-// Keep this fixed for compatibility reasons.
+-const size_t kMaxServiceSize = 24;
+-static_assert(sizeof(ServiceEntry32) >= kMinServiceSize,
+-              "wrong minimum service length");
+-static_assert(sizeof(ServiceEntry32) < kMaxServiceSize,
+-              "wrong maximum service length");
+-static_assert(sizeof(ServiceEntryWow64) >= kMinServiceSize,
+-              "wrong minimum service length");
+-static_assert(sizeof(ServiceEntryWow64) < kMaxServiceSize,
+-              "wrong maximum service length");
++const size_t kMinServiceSize = offsetof(ServiceEntry, ret);
++static_assert(sizeof(ServiceEntryW8) >= kMinServiceSize,
++              "wrong service length");
++static_assert(sizeof(Wow64Entry) >= kMinServiceSize, "wrong service length");
++static_assert(sizeof(Wow64EntryW8) >= kMinServiceSize, "wrong service length");
+ 
+ struct ServiceFullThunk {
+   union {
+-    ServiceEntryWow64 original;
+-    // Pad the entry to the maximum size.
+-    char dummy[kMaxServiceSize];
++    ServiceEntry original;
++    ServiceEntryW8 original_w8;
++    Wow64Entry wow_64;
++    Wow64EntryW8 wow_64_w8;
+   };
+   int internal_thunk;  // Dummy member to the beginning of the internal thunk.
+ };
+ 
+ #pragma pack(pop)
+ 
+-bool IsWow64Process() {
+-  // We don't need to use IsWow64Process2 as this returns the expected result
+-  // when running in the ARM64 x86 emulator.
+-  BOOL is_wow64 = FALSE;
+-  return ::IsWow64Process(::GetCurrentProcess(), &is_wow64) && is_wow64;
+-}
+-
+-bool IsFunctionAService32(HANDLE process, void* target, void* local_thunk) {
+-  ServiceEntry32 function_code;
+-  SIZE_T read;
+-  if (!::ReadProcessMemory(process, target, &function_code,
+-                           sizeof(function_code), &read)) {
+-    return false;
+-  }
+-
+-  if (sizeof(function_code) != read)
+-    return false;
+-
+-  if (kMovEax != function_code.mov_eax || kCallEip != function_code.call_eip ||
+-      function_code.call_offset != 3 || kRet != function_code.ret_p ||
+-      kMovEdxEsp != function_code.mov_edx_esp ||
+-      kSysenter != function_code.sysenter || kRet2 != function_code.ret) {
+-    return false;
+-  }
+-
+-  // Save the verified code
+-  memcpy(local_thunk, &function_code, sizeof(function_code));
+-
+-  return true;
+-}
+-
+-bool IsFunctionAServiceWow64(HANDLE process, void* target, void* local_thunk) {
+-  ServiceEntryWow64 function_code;
+-  SIZE_T read;
+-  if (!::ReadProcessMemory(process, target, &function_code,
+-                           sizeof(function_code), &read)) {
+-    return false;
+-  }
+-
+-  if (sizeof(function_code) != read)
+-    return false;
+-
+-  if (kMovEax != function_code.mov_eax || kMovEdx != function_code.mov_edx ||
+-      kCallEdx != function_code.call_edx || kRet != function_code.ret) {
+-    return false;
+-  }
+-
+-  // Save the verified code
+-  memcpy(local_thunk, &function_code, sizeof(function_code));
+-  return true;
+-}
+-
+ }  // namespace
+ 
+ namespace sandbox {
+@@ -209,14 +224,69 @@ NTSTATUS ServiceResolverThunk::CopyThunk(const void* target_module,
+ }
+ 
+ bool ServiceResolverThunk::IsFunctionAService(void* local_thunk) const {
+-  static bool is_wow64 = IsWow64Process();
+-  return is_wow64 ? IsFunctionAServiceWow64(process_, target_, local_thunk)
+-                  : IsFunctionAService32(process_, target_, local_thunk);
++  ServiceEntry function_code;
++  SIZE_T read;
++  if (!::ReadProcessMemory(process_, target_, &function_code,
++                           sizeof(function_code), &read)) {
++    return false;
++  }
++
++  if (sizeof(function_code) != read)
++    return false;
++
++  if (kMovEax != function_code.mov_eax || kMovEdx != function_code.mov_edx ||
++      (kCallPtrEdx != function_code.call_ptr_edx &&
++       kCallEdx != function_code.call_ptr_edx) ||
++      kRet != function_code.ret) {
++    return false;
++  }
++
++  // Find the system call pointer if we don't already have it.
++  if (kCallEdx != function_code.call_ptr_edx) {
++    DWORD ki_system_call;
++    if (!::ReadProcessMemory(process_,
++                             reinterpret_cast<const void*>(function_code.stub),
++                             &ki_system_call, sizeof(ki_system_call), &read)) {
++      return false;
++    }
++
++    if (sizeof(ki_system_call) != read)
++      return false;
++
++    HMODULE module_1, module_2;
++    // last check, call_stub should point to a KiXXSystemCall function on ntdll
++    if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                           reinterpret_cast<const wchar_t*>(ki_system_call),
++                           &module_1)) {
++      return false;
++    }
++
++    if (ntdll_base_) {
++      // This path is only taken when running the unit tests. We want to be
++      // able to patch a buffer in memory, so target_ is not inside ntdll.
++      module_2 = ntdll_base_;
++    } else {
++      if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++                                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                             reinterpret_cast<const wchar_t*>(target_),
++                             &module_2))
++        return false;
++    }
++
++    if (module_1 != module_2)
++      return false;
++  }
++
++  // Save the verified code
++  memcpy(local_thunk, &function_code, sizeof(function_code));
++
++  return true;
+ }
+ 
+ NTSTATUS ServiceResolverThunk::PerformPatch(void* local_thunk,
+                                             void* remote_thunk) {
+-  ServiceEntryWow64 intercepted_code;
++  ServiceEntry intercepted_code;
+   size_t bytes_to_write = sizeof(intercepted_code);
+   ServiceFullThunk* full_local_thunk =
+       reinterpret_cast<ServiceFullThunk*>(local_thunk);
+@@ -229,15 +299,15 @@ NTSTATUS ServiceResolverThunk::PerformPatch(void* local_thunk,
+   intercepted_code.mov_eax = kMovEax;
+   intercepted_code.service_id = full_local_thunk->original.service_id;
+   intercepted_code.mov_edx = kMovEdx;
+-  intercepted_code.mov_edx_param =
++  intercepted_code.stub =
+       reinterpret_cast<ULONG>(&full_remote_thunk->internal_thunk);
+-  intercepted_code.call_edx = kJmpEdx;
++  intercepted_code.call_ptr_edx = kJmpEdx;
+   bytes_to_write = kMinServiceSize;
+ 
+   if (relative_jump_) {
+     intercepted_code.mov_eax = kJmp32;
+     intercepted_code.service_id = relative_jump_;
+-    bytes_to_write = offsetof(ServiceEntryWow64, mov_edx);
++    bytes_to_write = offsetof(ServiceEntry, mov_edx);
+   }
+ 
+   // setup the thunk
+@@ -273,7 +343,7 @@ NTSTATUS ServiceResolverThunk::PerformPatch(void* local_thunk,
+ 
+ bool ServiceResolverThunk::SaveOriginalFunction(void* local_thunk,
+                                                 void* remote_thunk) {
+-  ServiceEntryWow64 function_code;
++  ServiceEntry function_code;
+   SIZE_T read;
+   if (!::ReadProcessMemory(process_, target_, &function_code,
+                            sizeof(function_code), &read)) {
+@@ -309,18 +379,100 @@ bool ServiceResolverThunk::SaveOriginalFunction(void* local_thunk,
+   return true;
+ }
+ 
+-bool ServiceResolverThunk::VerifyJumpTargetForTesting(
+-    void* thunk_storage) const {
+-  const size_t kJmp32Size = 5;
+-  ServiceEntryWow64* patched = static_cast<ServiceEntryWow64*>(target_);
+-  if (kJmp32 != patched->mov_eax) {
++bool Wow64ResolverThunk::IsFunctionAService(void* local_thunk) const {
++  Wow64Entry function_code;
++  SIZE_T read;
++  if (!::ReadProcessMemory(process_, target_, &function_code,
++                           sizeof(function_code), &read)) {
++    return false;
++  }
++
++  if (sizeof(function_code) != read)
++    return false;
++
++  if (kMovEax != function_code.mov_eax || kXorEcx != function_code.xor_ecx ||
++      kLeaEdx != function_code.lea_edx || kCallFs1 != function_code.call_fs1 ||
++      kCallFs2 != function_code.call_fs2 ||
++      kCallFs3 != function_code.call_fs3) {
++    return false;
++  }
++
++  if ((kAddEsp1 == function_code.add_esp1 &&
++       kAddEsp2 == function_code.add_esp2 && kRet == function_code.ret) ||
++      kRet == function_code.add_esp1) {
++    // Save the verified code
++    memcpy(local_thunk, &function_code, sizeof(function_code));
++    return true;
++  }
++
++  return false;
++}
++
++bool Wow64W8ResolverThunk::IsFunctionAService(void* local_thunk) const {
++  Wow64EntryW8 function_code;
++  SIZE_T read;
++  if (!::ReadProcessMemory(process_, target_, &function_code,
++                           sizeof(function_code), &read)) {
+     return false;
+   }
+ 
+-  ULONG source_addr = reinterpret_cast<ULONG>(target_);
+-  ULONG target_addr = reinterpret_cast<ULONG>(thunk_storage);
+-  return target_addr + kMaxServiceSize - kJmp32Size - source_addr ==
+-         patched->service_id;
++  if (sizeof(function_code) != read)
++    return false;
++
++  if (kMovEax != function_code.mov_eax || kCallFs1 != function_code.call_fs1 ||
++      kCallFs2 != function_code.call_fs2 ||
++      kCallFs3 != function_code.call_fs3 || kRet != function_code.ret) {
++    return false;
++  }
++
++  // Save the verified code
++  memcpy(local_thunk, &function_code, sizeof(function_code));
++  return true;
++}
++
++bool Win8ResolverThunk::IsFunctionAService(void* local_thunk) const {
++  ServiceEntryW8 function_code;
++  SIZE_T read;
++  if (!::ReadProcessMemory(process_, target_, &function_code,
++                           sizeof(function_code), &read)) {
++    return false;
++  }
++
++  if (sizeof(function_code) != read)
++    return false;
++
++  if (kMovEax != function_code.mov_eax || kCallEip != function_code.call_eip ||
++      function_code.call_offset != 3 || kRet != function_code.ret_p ||
++      kMovEdxEsp != function_code.mov_edx_esp ||
++      kSysenter != function_code.sysenter || kRet2 != function_code.ret) {
++    return false;
++  }
++
++  // Save the verified code
++  memcpy(local_thunk, &function_code, sizeof(function_code));
++
++  return true;
++}
++
++bool Wow64W10ResolverThunk::IsFunctionAService(void* local_thunk) const {
++  Wow64EntryW10 function_code;
++  SIZE_T read;
++  if (!::ReadProcessMemory(process_, target_, &function_code,
++                           sizeof(function_code), &read)) {
++    return false;
++  }
++
++  if (sizeof(function_code) != read)
++    return false;
++
++  if (kMovEax != function_code.mov_eax || kMovEdx != function_code.mov_edx ||
++      kCallEdx != function_code.call_edx || kRet != function_code.ret) {
++    return false;
++  }
++
++  // Save the verified code
++  memcpy(local_thunk, &function_code, sizeof(function_code));
++  return true;
+ }
+ 
+ }  // namespace sandbox
+diff --git a/sandbox/win/src/service_resolver_64.cc b/sandbox/win/src/service_resolver_64.cc
+index 33b91d04ad114..38e451da143a3 100644
+--- a/sandbox/win/src/service_resolver_64.cc
++++ b/sandbox/win/src/service_resolver_64.cc
+@@ -282,8 +282,4 @@ NTSTATUS ServiceResolverThunk::PerformPatch(void* local_thunk,
+   return STATUS_SUCCESS;
+ }
+ 
+-bool ServiceResolverThunk::VerifyJumpTargetForTesting(void*) const {
+-  return true;
+-}
+-
+ }  // namespace sandbox

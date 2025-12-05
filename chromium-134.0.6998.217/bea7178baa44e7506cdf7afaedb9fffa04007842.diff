@@ -1,0 +1,218 @@
+diff --git a/ui/base/ime/win/tsf_input_scope.cc b/ui/base/ime/win/tsf_input_scope.cc
+index d8025efae6e47..e2932190581a3 100644
+--- a/ui/base/ime/win/tsf_input_scope.cc
++++ b/ui/base/ime/win/tsf_input_scope.cc
+@@ -165,6 +165,10 @@ void InitializeTsfForInputScopes() {
+   if (!g_get_proc_done) {
+     g_get_proc_done = true;
+ 
++    // For stability reasons, we do not support Windows XP.
++    if (base::win::GetVersion() < base::win::Version::VISTA)
++      return;
++
+     HMODULE module = NULL;
+     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, L"msctf.dll",
+         &module)) {
+diff --git a/ui/base/l10n/l10n_util.cc b/ui/base/l10n/l10n_util.cc
+index fdfc14ef542f6..3be0c694b8407 100644
+--- a/ui/base/l10n/l10n_util.cc
++++ b/ui/base/l10n/l10n_util.cc
+@@ -28,6 +28,7 @@
+ #include "base/strings/string_util.h"
+ #include "base/strings/sys_string_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "third_party/icu/source/common/unicode/rbbi.h"
+ #include "third_party/icu/source/common/unicode/uloc.h"
+@@ -51,6 +52,23 @@
+ 
+ namespace {
+ 
++bool IsFontPresent(const wchar_t* font_name) {
++  HFONT hfont = CreateFont(12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++                           font_name);
++  if (hfont == NULL)
++    return false;
++  HDC dc = GetDC(0);
++  HGDIOBJ oldFont = static_cast<HFONT>(SelectObject(dc, hfont));
++  WCHAR actual_font_name[LF_FACESIZE];
++  int size_ret = GetTextFace(dc, LF_FACESIZE, actual_font_name);
++  SelectObject(dc, oldFont);
++  DeleteObject(hfont);
++  ReleaseDC(0, dc);
++  // We don't have to worry about East Asian fonts with locale-dependent
++  // names here.
++  return (size_ret != 0) && wcscmp(font_name, actual_font_name) == 0;
++}
++
+ constexpr auto kAcceptLanguageList = base::MakeFixedFlatSet<std::string_view>({
+     "af",  // Afrikaans
+     "ak",  // Twi
+@@ -270,6 +270,13 @@ bool IsLocaleAvailable(const std::string& locale) {
+   // under a system locale Chrome is not localized to (e.g. Farsi on Linux),
+   // but it'd slow down the start up time a little bit for locales Chrome is
+   // localized to. So, we don't call it here.
++  // Block Amharic on Windows XP unless 'Abyssinica SIL' font is present.
++  // On Win XP, no Ethiopic/Amahric font is availabel out of box. We hard-coded
++  // 'Abyssinica SIL' in the resource bundle to use in the UI. Check
++  // for its presence to determine whether or not to support Amharic UI on XP.
++  if (!(base::win::GetVersion() >= base::win::Version::VISTA ||
++      !base::EqualsCaseInsensitiveASCII(locale, "am") ||
++      IsFontPresent(L"Abyssinica SIL")))return false;
+   return ui::ResourceBundle::LocaleDataPakExists(locale);
+ }
+ 
+@@ -309,6 +306,13 @@ struct AvailableLocalesTraits
+       // and to which Chrome is not localized.
+       if (IsLocalePartiallyPopulated(locale_name))
+         continue;
++  // Block Amharic on Windows XP unless 'Abyssinica SIL' font is present.
++  // On Win XP, no Ethiopic/Amahric font is availabel out of box. We hard-coded
++  // 'Abyssinica SIL' in the resource bundle to use in the UI. Check
++  // for its presence to determine whether or not to support Amharic UI on XP.
++  if (!(base::win::GetVersion() >= base::win::Version::VISTA ||
++      !base::EqualsCaseInsensitiveASCII(locale_name, "am") ||
++      IsFontPresent(L"Abyssinica SIL"))) continue;
+       // Normalize underscores to hyphens because that's what our locale files
+       // use.
+       std::replace(locale_name.begin(), locale_name.end(), '_', '-');
+diff --git a/ui/base/l10n/l10n_util_win.cc b/ui/base/l10n/l10n_util_win.cc
+index 8acfde020eea0..01bbacc66e24f 100644
+--- a/ui/base/l10n/l10n_util_win.cc
++++ b/ui/base/l10n/l10n_util_win.cc
+@@ -15,6 +15,7 @@
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/win/i18n.h"
++#include "base/win/windows_version.h"
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/display/display.h"
+ #include "ui/display/win/dpi.h"
+@@ -99,10 +123,20 @@ bool NeedOverrideDefaultUIFont(base::string16* override_font_family,
+   // Indian locales (ml, bn, hi) for which/ the default Windows fonts are too
+   // small to be legible.  For those locales, IDS_UI_FONT_FAMILY is set to an
+   // actual font family to use, while for other locales, it's set to "default".
+-  std::wstring ui_font_family = GetWideString(IDS_UI_FONT_FAMILY);
++
++  // XP and Vista or later have different font size issues and
++  // we need separate ui font specifications.
++  int ui_font_family_id = IDS_UI_FONT_FAMILY;
++  int ui_font_size_scaler_id = IDS_UI_FONT_SIZE_SCALER;
++  if (base::win::GetVersion() < base::win::Version::VISTA) {
++    ui_font_family_id = IDS_UI_FONT_FAMILY_XP;
++    ui_font_size_scaler_id = IDS_UI_FONT_SIZE_SCALER_XP;
++  }
++
++  std::wstring ui_font_family = GetWideString(ui_font_family_id);
+   if (!ui_font_family.empty()) {
+     int scaler;
+-    if (base::StringToInt(l10n_util::GetStringUTF16(IDS_UI_FONT_SIZE_SCALER),
++    if (base::StringToInt(l10n_util::GetStringUTF16(ui_font_size_scaler_id),
+                           &scaler)) {
+       if (const bool is_custom = ui_font_family != L"default";
+           is_custom || scaler != 100) {
+diff --git a/ui/base/webui/web_ui_util.cc b/ui/base/webui/web_ui_util.cc
+index e6a9c5c23df8b..8b04a37c6d2bb 100644
+--- a/ui/base/webui/web_ui_util.cc
++++ b/ui/base/webui/web_ui_util.cc
+@@ -160,7 +160,12 @@ void AppendWebUiCssTextDefaults(std::string* html) {
+ }
+ 
+ std::string GetFontFamily() {
+-  std::string font_family = l10n_util::GetStringUTF8(IDS_WEB_FONT_FAMILY);
++  std::string font_family = l10n_util::GetStringUTF8(
++#if BUILDFLAG(IS_WIN)
++      base::win::GetVersion() < base::win::Version::VISTA ?
++          IDS_WEB_FONT_FAMILY_XP :
++#endif
++          IDS_WEB_FONT_FAMILY);
+ 
+ #if BUILDFLAG(IS_LINUX)
+   std::string font_name = ui::ResourceBundle::GetSharedInstance()
+@@ -173,7 +178,12 @@ std::string GetFontFamily() {
+ }
+ 
+ std::string GetFontSize() {
+-  return l10n_util::GetStringUTF8(IDS_WEB_FONT_SIZE);
++  return l10n_util::GetStringUTF8(
++#if BUILDFLAG(IS_WIN)
++      base::win::GetVersion() < base::win::Version::VISTA ?
++          IDS_WEB_FONT_SIZE_XP :
++#endif
++          IDS_WEB_FONT_SIZE);
+ }
+ 
+ std::string GetTextDirection() {
+diff --git a/ui/gfx/animation/animation_win.cc b/ui/gfx/animation/animation_win.cc
+index ead2e07a3a70d..b8a7d2880a7b5 100644
+--- a/ui/gfx/animation/animation_win.cc
++++ b/ui/gfx/animation/animation_win.cc
+@@ -4,14 +4,18 @@
+ 
+ #include "base/win/win_util.h"
+ 
++#include "base/win/windows_version.h"
++
+ namespace gfx {
+ 
+ // static
+ bool Animation::ShouldRenderRichAnimationImpl() {
+-  BOOL result;
+-  // Get "Turn off all unnecessary animations" value.
+-  if (::SystemParametersInfo(SPI_GETCLIENTAREAANIMATION, 0, &result, 0)) {
+-    return !!result;
++  if (base::win::GetVersion() >= base::win::Version::VISTA) {
++    BOOL result;
++    // Get "Turn off all unnecessary animations" value.
++    if (::SystemParametersInfo(SPI_GETCLIENTAREAANIMATION, 0, &result, 0)) {
++      return !!result;
++    }
+   }
+   return !base::win::IsCurrentSessionRemote();
+ }
+diff --git a/ui/strings/app_locale_settings.grd b/ui/strings/app_locale_settings.grd
+index 3417591ad8888..a6de88ab52320 100644
+--- a/ui/strings/app_locale_settings.grd
++++ b/ui/strings/app_locale_settings.grd
+@@ -148,6 +148,10 @@
+         <message name="IDS_UI_FONT_FAMILY" use_name_for_id="true">
+           default
+         </message>
++        <!-- For Windows XP -->
++        <message name="IDS_UI_FONT_FAMILY_XP" use_name_for_id="true">
++          default
++        </message>
+ 
+         <!-- To get the actual UI font size for native UI components
+              (e.g. menu), the system UI font size is scaled with this value/100.
+@@ -155,15 +159,29 @@
+         <message name="IDS_UI_FONT_SIZE_SCALER" use_name_for_id="true">
+           100
+         </message>
++        <!-- For Windows XP -->
++        <message name="IDS_UI_FONT_SIZE_SCALER_XP" use_name_for_id="true">
++          100
++        </message>
+ 
+         <!-- The font used in Web UI (e.g. History). -->
+         <message name="IDS_WEB_FONT_FAMILY" use_name_for_id="true">
+           'Segoe UI', Tahoma, sans-serif
+         </message>
++        <!-- The font used in Web UI on Windows XP (e.g. History). -->
++        <message name="IDS_WEB_FONT_FAMILY_XP" use_name_for_id="true">
++          Tahoma, sans-serif
++        </message>
++
+         <!-- The relative font size in % used in Web UI (e.g. History).  -->
+         <message name="IDS_WEB_FONT_SIZE" use_name_for_id="true">
+           75%
+         </message>
++        <!-- The relative font size in % used in web-style native pages
++        on Windows earlier than Vista (e.g. History).  -->
++        <message name="IDS_WEB_FONT_SIZE_XP" use_name_for_id="true">
++          75%
++        </message>
+       </if>
+       <if expr="is_macosx">
+         <!-- The font used in Web UI (e.g. History). -->
