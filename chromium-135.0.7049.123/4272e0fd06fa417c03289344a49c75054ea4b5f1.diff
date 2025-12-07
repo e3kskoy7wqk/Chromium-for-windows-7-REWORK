@@ -1,0 +1,86 @@
+diff --git a/content/browser/gpu/gpu_process_host.cc b/content/browser/gpu/gpu_process_host.cc
+index 8c1824b1f030e..cfe6fab6ba196 100644
+--- a/content/browser/gpu/gpu_process_host.cc
++++ b/content/browser/gpu/gpu_process_host.cc
+@@ -78,6 +78,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/threading/thread.h"
+ #include "base/trace_event/trace_event.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "components/discardable_memory/service/discardable_shared_memory_manager.h"
+ #include "components/tracing/common/tracing_switches.h"
+@@ -259,26 +260,32 @@ class GpuSandboxedProcessLauncherDelegate
+   bool InitializeConfig(sandbox::TargetConfig* config) override {
+     DCHECK(!config->IsConfigured());
+ 
+-      sandbox::ResultCode result = config->SetTokenLevel(
+-          sandbox::USER_RESTRICTED_SAME_ACCESS, sandbox::USER_LIMITED);
+-    if (result != sandbox::SBOX_ALL_OK) {
+-      return false;
+-    }
+-
+-      // UI restrictions break when we access Windows from outside our job.
+-      // However, we don't want a proxy window in this process because it can
+-      // introduce deadlocks where the renderer blocks on the gpu, which in
+-      // turn blocks on the browser UI thread. So, instead we forgo a window
+-      // message pump entirely and just add job restrictions to prevent child
+-      // processes.
+-    result = sandbox::policy::SandboxWin::SetJobLevel(
+-        sandbox::mojom::Sandbox::kGpu, sandbox::JobLevel::kLimitedUser,
+-        JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_DESKTOP |
+-            JOB_OBJECT_UILIMIT_EXITWINDOWS | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+-        config);
+-    if (result != sandbox::SBOX_ALL_OK) {
+-      return false;
+-    }
++    sandbox::ResultCode result;
++    if (base::win::GetVersion() > base::win::Version::XP) {
++        result = config->SetTokenLevel(
++            sandbox::USER_RESTRICTED_SAME_ACCESS, sandbox::USER_LIMITED);
++        if (result != sandbox::SBOX_ALL_OK)
++          return false;
++
++        // UI restrictions break when we access Windows from outside our job.
++        // However, we don't want a proxy window in this process because it can
++        // introduce deadlocks where the renderer blocks on the gpu, which in
++        // turn blocks on the browser UI thread. So, instead we forgo a window
++        // message pump entirely and just add job restrictions to prevent child
++        // processes.
++        result = sandbox::policy::SandboxWin::SetJobLevel(
++            sandbox::mojom::Sandbox::kGpu, sandbox::JobLevel::kLimitedUser,
++            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_DESKTOP |
++                JOB_OBJECT_UILIMIT_EXITWINDOWS |
++                JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
++            config);
++        if (result != sandbox::SBOX_ALL_OK)
++          return false;
++    } else {
++      sandbox::policy::SandboxWin::SetJobLevel(sandbox::mojom::Sandbox::kGpu, sandbox::JobLevel::kUnprotected, 0, config);
++      config->SetTokenLevel(sandbox::USER_UNPROTECTED,
++                            sandbox::USER_LIMITED);
++    }
+ 
+     // Check if we are running on the winlogon desktop and set a delayed
+     // integrity in this case. This is needed because a low integrity gpu
+diff --git a/sandbox/policy/win/sandbox_win.cc b/sandbox/policy/win/sandbox_win.cc
+index 54e31d3656965..323e57edae0f5 100644
+--- a/sandbox/policy/win/sandbox_win.cc
++++ b/sandbox/policy/win/sandbox_win.cc
+@@ -409,8 +409,14 @@ sandbox::ResultCode AddPolicyForSandboxedProcess(
+   if (result != SBOX_ALL_OK)
+     return result;
+ 
+-  // The initial token has to be restricted if the main token is restricted.
+-  result = config->SetTokenLevel(USER_RESTRICTED_SAME_ACCESS, USER_LOCKDOWN);
++  sandbox::TokenLevel initial_token = sandbox::USER_UNPROTECTED;
++  if (base::win::GetVersion() > base::win::Version::XP) {
++    // On 2003/Vista the initial token has to be restricted if the main
++    // token is restricted.
++    initial_token = sandbox::USER_RESTRICTED_SAME_ACCESS;
++  }
++
++  result = config->SetTokenLevel(initial_token, sandbox::USER_LOCKDOWN);
+   if (result != SBOX_ALL_OK)
+     return result;
+ 

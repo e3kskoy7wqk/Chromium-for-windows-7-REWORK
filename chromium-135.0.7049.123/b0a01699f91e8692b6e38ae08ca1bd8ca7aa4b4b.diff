@@ -1,0 +1,52 @@
+diff --git a/chrome/browser/resources/settings/a11y_page/a11y_page.ts b/chrome/browser/resources/settings/a11y_page/a11y_page.ts
+index 9e18c4b636a2b..3f7b097bf34b4 100644
+--- a/chrome/browser/resources/settings/a11y_page/a11y_page.ts
++++ b/chrome/browser/resources/settings/a11y_page/a11y_page.ts
+@@ -147,9 +147,14 @@ export class SettingsA11yPageElement extends SettingsA11yPageElementBase {
+         type: Boolean,
+         value() {
+           let opensExternally = false;
+-          // <if expr="is_macosx or is_win">
++          // <if expr="is_macosx">
+           opensExternally = true;
+           // </if>
++
++          // <if expr="is_win">
++          opensExternally = loadTimeData.getBoolean('isWindows10OrNewer');
++          // </if>
++
+           return opensExternally;
+         },
+       },
+diff --git a/chrome/browser/resources/settings/route.ts b/chrome/browser/resources/settings/route.ts
+index b8937e3140cf6..c801b3c1d1e99 100644
+--- a/chrome/browser/resources/settings/route.ts
++++ b/chrome/browser/resources/settings/route.ts
+@@ -269,6 +269,12 @@ function createRoutes(): SettingsRoutes {
+     r.CAPTIONS = r.ACCESSIBILITY.createChild('/captions');
+     // </if>
+ 
++    // <if expr="is_win">
++    if (!loadTimeData.getBoolean('isWindows10OrNewer')) {
++      r.CAPTIONS = r.ACCESSIBILITY.createChild('/captions');
++    }
++    // </if>
++
+     // <if expr="not chromeos_ash">
+     r.SYSTEM = r.ADVANCED.createSection(
+         '/system', 'system', loadTimeData.getString('systemPageTitle'));
+diff --git a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+index f5bbd0b22e340..8fe72571cea77 100644
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -287,6 +287,10 @@ void AddA11yStrings(content::WebUIDataSource* html_source) {
+   };
+   html_source->AddLocalizedStrings(kLocalizedStrings);
+ 
++#if BUILDFLAG(IS_WIN)
++  html_source->AddBoolean("isWindows10OrNewer", true);
++#endif
++
+   html_source->AddBoolean(
+       "isGuest",
+ #if BUILDFLAG(IS_CHROMEOS)

@@ -1,0 +1,225 @@
+diff --git a/sandbox/win/src/broker_services.cc b/sandbox/win/src/broker_services.cc
+index 399542bd2c18c..5c7af7930582b 100644
+--- a/sandbox/win/src/broker_services.cc
++++ b/sandbox/win/src/broker_services.cc
+@@ -538,9 +538,6 @@ ResultCode BrokerServicesBase::SpawnTarget(const wchar_t* exe_path,
+     startup_info->SetAppContainer(container);
+   }
+ 
+-  // TODO(crbug.com/1428756) remove all calls to HasJob in follow-up CLs.
+-  DCHECK(policy_base->HasJob());
+-
+   if (policy_base->HasJob())
+     startup_info->AddJobToAssociate(policy_base->GetJobHandle());
+ 
+diff --git a/sandbox/win/src/job.cc b/sandbox/win/src/job.cc
+index 2dc76c19df5ba..6e1cccd11abab 100644
+--- a/sandbox/win/src/job.cc
++++ b/sandbox/win/src/job.cc
+@@ -64,6 +64,9 @@ DWORD Job::Init(JobLevel security_level,
+           JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+       break;
+     }
++    case JobLevel::kNone: {
++      return ERROR_BAD_ARGUMENTS;
++    }
+   }
+ 
+   if (!::SetInformationJobObject(job_handle_.get(),
+diff --git a/sandbox/win/src/job_unittest.cc b/sandbox/win/src/job_unittest.cc
+index 7a90da8c0a6bc..62142702240c8 100644
+--- a/sandbox/win/src/job_unittest.cc
++++ b/sandbox/win/src/job_unittest.cc
+@@ -93,6 +93,11 @@ TEST(JobTest, SecurityLevel) {
+   Job job_unprotected;
+   ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+             job_unprotected.Init(JobLevel::kUnprotected, 0, 0));
++
++  // JobLevel::kNone means we run without a job object so Init should fail.
++  Job job_none;
++  ASSERT_EQ(static_cast<DWORD>(ERROR_BAD_ARGUMENTS),
++            job_none.Init(JobLevel::kNone, 0, 0));
+ }
+ 
+ }  // namespace sandbox
+diff --git a/sandbox/win/src/policy_target_test.cc b/sandbox/win/src/policy_target_test.cc
+index 8cf9e26b13086..969c4bac96478 100644
+--- a/sandbox/win/src/policy_target_test.cc
++++ b/sandbox/win/src/policy_target_test.cc
+@@ -223,6 +223,15 @@ TEST(PolicyTargetTest, OpenProcess) {
+       << "Opens a process";
+ }
+ 
++TEST(PolicyTargetTest, PolicyBaseNoJobLifetime) {
++  TestRunner runner(JobLevel::kNone, USER_RESTRICTED_SAME_ACCESS,
++                    USER_LOCKDOWN);
++  // TargetPolicy and its SharedMemIPCServer should continue to exist until
++  // the child process dies.
++  EXPECT_EQ(SBOX_TEST_SUCCEEDED, runner.RunTest(L"PolicyTargetTest_thread"))
++      << "Opens the current thread";
++}
++
+ // Sets the desktop for the current thread to be one with a null DACL, then
+ // launches a sandboxed app. Validates that the sandboxed app has access to the
+ // desktop.
+diff --git a/sandbox/win/src/process_policy_test.cc b/sandbox/win/src/process_policy_test.cc
+index 6f6a3974fbb01..7cfbc00568bb9 100644
+--- a/sandbox/win/src/process_policy_test.cc
++++ b/sandbox/win/src/process_policy_test.cc
+@@ -116,7 +116,7 @@ TEST(ProcessPolicyTest, OpenToken) {
+ // This tests that the CreateThread works with CSRSS not locked down.
+ // In other words, that the interception passes through OK.
+ TEST(ProcessPolicyTest, TestCreateThreadWithCsrss) {
+-  TestRunner runner(JobLevel::kUnprotected, USER_INTERACTIVE, USER_INTERACTIVE);
++  TestRunner runner(JobLevel::kNone, USER_INTERACTIVE, USER_INTERACTIVE);
+   runner.SetDisableCsrss(false);
+   EXPECT_EQ(SBOX_TEST_SUCCEEDED, runner.RunTest(L"Process_CreateThread"));
+ }
+@@ -124,7 +124,7 @@ TEST(ProcessPolicyTest, TestCreateThreadWithCsrss) {
+ // This tests that the CreateThread works with CSRSS locked down.
+ // In other words, that the interception correctly works.
+ TEST(ProcessPolicyTest, TestCreateThreadWithoutCsrss) {
+-  TestRunner runner(JobLevel::kUnprotected, USER_INTERACTIVE, USER_INTERACTIVE);
++  TestRunner runner(JobLevel::kNone, USER_INTERACTIVE, USER_INTERACTIVE);
+   EXPECT_EQ(SBOX_TEST_SUCCEEDED, runner.RunTest(L"Process_CreateThread"));
+ }
+ 
+diff --git a/sandbox/win/src/restricted_token_test.cc b/sandbox/win/src/restricted_token_test.cc
+index 3e28a34247271..0823910e2e75b 100644
+--- a/sandbox/win/src/restricted_token_test.cc
++++ b/sandbox/win/src/restricted_token_test.cc
+@@ -24,7 +24,7 @@ namespace {
+ int RunOpenProcessTest(bool unsandboxed,
+                        bool lockdown_dacl,
+                        DWORD access_mask) {
+-  TestRunner runner(JobLevel::kUnprotected, USER_RESTRICTED_SAME_ACCESS,
++  TestRunner runner(JobLevel::kNone, USER_RESTRICTED_SAME_ACCESS,
+                     USER_LOCKDOWN);
+   auto* config = runner.GetPolicy()->GetConfig();
+   config->SetDelayedIntegrityLevel(INTEGRITY_LEVEL_UNTRUSTED);
+@@ -37,7 +37,7 @@ int RunOpenProcessTest(bool unsandboxed,
+   // This spins up a renderer level process, we don't care about the result.
+   runner.RunTest(L"IntegrationTestsTest_args 1");
+ 
+-  TestRunner runner2(JobLevel::kUnprotected, USER_RESTRICTED_SAME_ACCESS,
++  TestRunner runner2(JobLevel::kNone, USER_RESTRICTED_SAME_ACCESS,
+                      USER_LIMITED);
+   auto* config2 = runner2.GetPolicy()->GetConfig();
+   config2->SetDelayedIntegrityLevel(INTEGRITY_LEVEL_LOW);
+@@ -54,8 +54,7 @@ int RunOpenProcessTest(bool unsandboxed,
+ int RunRestrictedOpenProcessTest(bool unsandboxed,
+                                  bool lockdown_dacl,
+                                  DWORD access_mask) {
+-  TestRunner runner(JobLevel::kUnprotected, USER_RESTRICTED_SAME_ACCESS,
+-                    USER_LIMITED);
++  TestRunner runner(JobLevel::kNone, USER_RESTRICTED_SAME_ACCESS, USER_LIMITED);
+   auto* config = runner.GetPolicy()->GetConfig();
+   config->SetDelayedIntegrityLevel(INTEGRITY_LEVEL_LOW);
+   ResultCode result = config->SetIntegrityLevel(INTEGRITY_LEVEL_LOW);
+@@ -70,7 +69,7 @@ int RunRestrictedOpenProcessTest(bool unsandboxed,
+   // This spins up a GPU level process, we don't care about the result.
+   runner.RunTest(L"IntegrationTestsTest_args 1");
+ 
+-  TestRunner runner2(JobLevel::kUnprotected, USER_RESTRICTED_SAME_ACCESS,
++  TestRunner runner2(JobLevel::kNone, USER_RESTRICTED_SAME_ACCESS,
+                      USER_LIMITED);
+   auto* config2 = runner2.GetPolicy()->GetConfig();
+   config2->SetDelayedIntegrityLevel(INTEGRITY_LEVEL_LOW);
+@@ -85,8 +84,7 @@ int RunRestrictedOpenProcessTest(bool unsandboxed,
+ }
+ 
+ int RunRestrictedSelfOpenProcessTest(bool add_random_sid, DWORD access_mask) {
+-  TestRunner runner(JobLevel::kUnprotected, USER_RESTRICTED_SAME_ACCESS,
+-                    USER_LIMITED);
++  TestRunner runner(JobLevel::kNone, USER_RESTRICTED_SAME_ACCESS, USER_LIMITED);
+   auto* config = runner.GetPolicy()->GetConfig();
+   config->SetDelayedIntegrityLevel(INTEGRITY_LEVEL_LOW);
+   ResultCode result = config->SetIntegrityLevel(INTEGRITY_LEVEL_LOW);
+@@ -175,7 +173,7 @@ TEST(RestrictedTokenTest, OpenLowPrivilegedProcess) {
+ }
+ 
+ TEST(RestrictedTokenTest, CheckNonAdminRestricted) {
+-  TestRunner runner(JobLevel::kUnprotected, USER_RESTRICTED_SAME_ACCESS,
++  TestRunner runner(JobLevel::kNone, USER_RESTRICTED_SAME_ACCESS,
+                     USER_RESTRICTED_NON_ADMIN);
+   EXPECT_EQ(SBOX_TEST_SUCCEEDED,
+             runner.RunTest(L"RestrictedTokenTest_IsRestricted"));
+diff --git a/sandbox/win/src/sandbox_policy_base.cc b/sandbox/win/src/sandbox_policy_base.cc
+index 3d84e71dad022..232e279e7d236 100644
+--- a/sandbox/win/src/sandbox_policy_base.cc
++++ b/sandbox/win/src/sandbox_policy_base.cc
+@@ -381,6 +381,9 @@ TokenLevel ConfigBase::GetLockdownTokenLevel() const {
+ }
+ 
+ ResultCode ConfigBase::SetJobLevel(JobLevel job_level, uint32_t ui_exceptions) {
++  if (memory_limit_ && job_level == JobLevel::kNone) {
++    return SBOX_ERROR_BAD_PARAMS;
++  }
+   job_level_ = job_level;
+   ui_exceptions_ = ui_exceptions;
+   return SBOX_ALL_OK;
+@@ -503,6 +506,9 @@ ResultCode PolicyBase::InitJob() {
+   if (job_.IsValid())
+     return SBOX_ERROR_BAD_PARAMS;
+ 
++  if (config()->GetJobLevel() == JobLevel::kNone)
++    return SBOX_ALL_OK;
++
+   // Create the Windows job object.
+   DWORD result = job_.Init(config()->GetJobLevel(), config()->ui_exceptions(),
+                            config()->memory_limit());
+diff --git a/sandbox/win/src/sandbox_policy_diagnostic.cc b/sandbox/win/src/sandbox_policy_diagnostic.cc
+index e5984c0ec2d8d..e8c2e9b37ae7f 100644
+--- a/sandbox/win/src/sandbox_policy_diagnostic.cc
++++ b/sandbox/win/src/sandbox_policy_diagnostic.cc
+@@ -82,6 +82,8 @@ std::string GetJobLevelInEnglish(JobLevel job) {
+       return "Interactive";
+     case JobLevel::kUnprotected:
+       return "Unprotected";
++    case JobLevel::kNone:
++      return "None";
+   }
+ }
+ 
+diff --git a/sandbox/win/src/sandbox_policy_diagnostic.h b/sandbox/win/src/sandbox_policy_diagnostic.h
+index e0f5d21f4a4f3..496d35fccb72b 100644
+--- a/sandbox/win/src/sandbox_policy_diagnostic.h
++++ b/sandbox/win/src/sandbox_policy_diagnostic.h
+@@ -43,7 +43,7 @@ class PolicyDiagnostic final : public PolicyInfo {
+   std::unique_ptr<std::string> json_string_;
+   uint32_t process_id_;
+   TokenLevel lockdown_level_ = USER_LAST;
+-  JobLevel job_level_ = JobLevel::kUnprotected;
++  JobLevel job_level_ = JobLevel::kNone;
+   IntegrityLevel desired_integrity_level_ = INTEGRITY_LEVEL_LAST;
+   MitigationFlags desired_mitigations_ = 0;
+   std::optional<base::win::Sid> app_container_sid_;
+diff --git a/sandbox/win/src/security_level.h b/sandbox/win/src/security_level.h
+index 60e42e97d6f48..a028062b178ec 100644
+--- a/sandbox/win/src/security_level.h
++++ b/sandbox/win/src/security_level.h
+@@ -95,6 +95,9 @@ enum TokenLevel {
+ //  JobLevel        |General                            |Quota               |
+ //                  |restrictions                       |restrictions        |
+ // -----------------|---------------------------------- |--------------------|
++// kNone            | No job is assigned to the         | None               |
++//                  | sandboxed process.                |                    |
++// -----------------|---------------------------------- |--------------------|
+ // kUnprotected     | None                              | *Kill on Job close.|
+ // -----------------|---------------------------------- |--------------------|
+ // kInteractive     | *Forbid system-wide changes using |                    |
+@@ -120,7 +123,13 @@ enum TokenLevel {
+ // In the context of the above table, 'user handles' refers to the handles of
+ // windows, bitmaps, menus, etc. Files, treads and registry handles are kernel
+ // handles and are not affected by the job level settings.
+-enum class JobLevel { kLockdown = 0, kLimitedUser, kInteractive, kUnprotected };
++enum class JobLevel {
++  kLockdown = 0,
++  kLimitedUser,
++  kInteractive,
++  kUnprotected,
++  kNone
++};
+ 
+ // These flags correspond to various process-level mitigations (eg. ASLR and
+ // DEP). Most are implemented via UpdateProcThreadAttribute() plus flags for

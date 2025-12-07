@@ -1,0 +1,102 @@
+diff --git a/net/cert/cert_verify_proc.cc b/net/cert/cert_verify_proc.cc
+index a2f85c1f63a60..f02b3b61bfb96 100644
+--- a/net/cert/cert_verify_proc.cc
++++ b/net/cert/cert_verify_proc.cc
+@@ -363,6 +363,8 @@ void RecordTrustAnchorHistogram(const HashValueVector& spki_hashes,
+     return false;
+   }
+ 
++  verify_result->has_sha1_leaf = verify_result->has_sha1;
++
+   // Fill in hash algorithms for the intermediate cerificates, excluding the
+   // final one (which is presumably the trust anchor; may be incorrect for
+   // partial chains).
+@@ -558,9 +560,16 @@ int CertVerifyProc::Verify(X509Certificate* cert,
+     verify_result->cert_status |= CERT_STATUS_SHA1_SIGNATURE_PRESENT;
+ 
+   // Flag certificates using weak signature algorithms.
+-  bool sha1_allowed = (flags & VERIFY_ENABLE_SHA1_LOCAL_ANCHORS) &&
+-                      !verify_result->is_issued_by_known_root;
+-  if (!sha1_allowed && verify_result->has_sha1) {
++
++  // Current SHA-1 behaviour:
++  // - Reject all SHA-1
++  // - ... unless it's not publicly trusted and SHA-1 is allowed
++  bool current_sha1_issue =
++      (verify_result->is_issued_by_known_root ||
++       !(flags & VERIFY_ENABLE_SHA1_LOCAL_ANCHORS)) &&
++      (verify_result->has_sha1_leaf || verify_result->has_sha1);
++
++  if (current_sha1_issue) {
+     verify_result->cert_status |= CERT_STATUS_WEAK_SIGNATURE_ALGORITHM;
+     // Avoid replacing a more serious error, such as an OS/library failure,
+     // by ensuring that if verification failed, it failed with a certificate
+diff --git a/net/cert/cert_verify_proc.h b/net/cert/cert_verify_proc.h
+index 8921962fba558..fa36028302632 100644
+--- a/net/cert/cert_verify_proc.h
++++ b/net/cert/cert_verify_proc.h
+@@ -166,6 +166,7 @@ class NET_EXPORT CertVerifyProc
+   //
+   // * ocsp_result
+   // * has_sha1
++  // * has_sha1_leaf
+   //
+   // which will be filled in by |Verify()|. If an error code is returned,
+   // |verify_result->cert_status| should be non-zero, indicating an
+diff --git a/net/cert/cert_verify_result.cc b/net/cert/cert_verify_result.cc
+index 5a383188cba20..13d00cde1a812 100644
+--- a/net/cert/cert_verify_result.cc
++++ b/net/cert/cert_verify_result.cc
+@@ -49,6 +50,7 @@ void CertVerifyResult::Reset() {
+   verified_cert = nullptr;
+   cert_status = 0;
+   has_sha1 = false;
++  has_sha1_leaf = false;
+   is_issued_by_known_root = false;
+ 
+   public_key_hashes.clear();
+diff --git a/net/cert/cert_verify_result.h b/net/cert/cert_verify_result.h
+index ec3308a132bed..3f1b6805e5dcf 100644
+--- a/net/cert/cert_verify_result.h
++++ b/net/cert/cert_verify_result.h
+@@ -76,6 +76,7 @@ class NET_EXPORT CertVerifyResult : public base::SupportsUserData {
+   // Hash algorithms used by the certificate chain, excluding the trust
+   // anchor.
+   bool has_sha1;
++  bool has_sha1_leaf;
+ 
+   // If the certificate was successfully verified then this contains the
+   // hashes for all of the SubjectPublicKeyInfos of the chain (target,
+diff --git a/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc b/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc
+index 0df90b6474765..9c036573225f3 100644
+--- a/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc
++++ b/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc
+@@ -63,6 +63,8 @@ void PrintCertVerifyResult(const net::CertVerifyResult& result) {
+   PrintCertStatus(result.cert_status);
+   if (result.has_sha1)
+     std::cout << "has_sha1\n";
++  if (result.has_sha1_leaf)
++    std::cout << "has_sha1_leaf\n";
+   if (result.is_issued_by_known_root)
+     std::cout << "is_issued_by_known_root\n";
+ 
+diff --git a/services/network/public/cpp/net_ipc_param_traits.cc b/services/network/public/cpp/net_ipc_param_traits.cc
+index 25e991bbd61b5..d0ddf17a01c0c 100644
+--- a/services/network/public/cpp/net_ipc_param_traits.cc
++++ b/services/network/public/cpp/net_ipc_param_traits.cc
+@@ -43,6 +43,7 @@ void ParamTraits<net::CertVerifyResult>::Write(base::Pickle* m,
+   WriteParam(m, p.verified_cert);
+   WriteParam(m, p.cert_status);
+   WriteParam(m, p.has_sha1);
++  WriteParam(m, p.has_sha1_leaf);
+   WriteParam(m, p.public_key_hashes);
+   WriteParam(m, p.is_issued_by_known_root);
+   WriteParam(m, p.ocsp_result);
+@@ -57,6 +58,7 @@ bool ParamTraits<net::CertVerifyResult>::Read(const base::Pickle* m,
+   return ReadParam(m, iter, &r->verified_cert) &&
+          ReadParam(m, iter, &r->cert_status) &&
+          ReadParam(m, iter, &r->has_sha1) &&
++         ReadParam(m, iter, &r->has_sha1_leaf) &&
+          ReadParam(m, iter, &r->public_key_hashes) &&
+          ReadParam(m, iter, &r->is_issued_by_known_root) &&
+          ReadParam(m, iter, &r->ocsp_result) && ReadParam(m, iter, &r->scts) &&

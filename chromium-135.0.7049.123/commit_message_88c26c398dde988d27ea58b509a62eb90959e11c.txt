@@ -1,0 +1,1 @@
+win7dep: remove support for Win7 in Win TraceLogging code    2023/2/7 0:42:23    88c26c398dde988d27ea58b509a62eb90959e11c

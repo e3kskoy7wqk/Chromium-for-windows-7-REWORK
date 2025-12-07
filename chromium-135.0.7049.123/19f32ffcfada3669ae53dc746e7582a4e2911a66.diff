@@ -1,0 +1,288 @@
+diff --git a/chrome/browser/shell_integration.cc b/chrome/browser/shell_integration.cc
+index 923e394d844a8..588c58314f11d 100644
+--- a/chrome/browser/shell_integration.cc
++++ b/chrome/browser/shell_integration.cc
+@@ -279,11 +279,17 @@ void DefaultBrowserWorker::SetAsDefaultImpl(
+     case SET_DEFAULT_INTERACTIVE:
+ #if BUILDFLAG(IS_WIN)
+       if (interactive_permitted_) {
+-        win::SetAsDefaultBrowserUsingSystemSettings(
+-            std::move(on_finished_callback));
+-        // Early return because the function above takes care of calling
+-        // `on_finished_callback`.
+-        return;
++        switch (ShellUtil::GetInteractiveSetDefaultMode()) {
++          case ShellUtil::INTENT_PICKER:
++            win::SetAsDefaultBrowserUsingIntentPicker();
++            break;
++          case ShellUtil::SYSTEM_SETTINGS:
++            win::SetAsDefaultBrowserUsingSystemSettings(
++                std::move(on_finished_callback));
++            // Early return because the function above takes care of calling
++            // |on_finished_callback|.
++            return;
++        }
+       }
+ #endif  // BUILDFLAG(IS_WIN)
+       break;
+@@ -366,11 +372,17 @@ void DefaultSchemeClientWorker::SetAsDefaultImpl(
+     case SET_DEFAULT_INTERACTIVE:
+ #if BUILDFLAG(IS_WIN)
+       if (interactive_permitted_) {
+-        win::SetAsDefaultClientForSchemeUsingSystemSettings(
+-            scheme_, std::move(on_finished_callback));
+-        // Early return because the function above takes care of calling
+-        // `on_finished_callback`.
+-        return;
++        switch (ShellUtil::GetInteractiveSetDefaultMode()) {
++          case ShellUtil::INTENT_PICKER:
++            win::SetAsDefaultClientForSchemeUsingIntentPicker(scheme_);
++            break;
++          case ShellUtil::SYSTEM_SETTINGS:
++            win::SetAsDefaultClientForSchemeUsingSystemSettings(
++                scheme_, std::move(on_finished_callback));
++            // Early return because the function above takes care of calling
++            // |on_finished_callback|.
++            return;
++        }
+       }
+ #endif  // BUILDFLAG(IS_WIN)
+       break;
+diff --git a/chrome/browser/shell_integration_win.cc b/chrome/browser/shell_integration_win.cc
+index 329e53208fd8c..254459af53f2e 100644
+--- a/chrome/browser/shell_integration_win.cc
++++ b/chrome/browser/shell_integration_win.cc
+@@ -804,6 +804,25 @@ DefaultWebClientState IsDefaultClientForScheme(const std::string& scheme) {
+ 
+ namespace win {
+ 
++bool SetAsDefaultBrowserUsingIntentPicker() {
++  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
++                                                base::BlockingType::MAY_BLOCK);
++
++  base::FilePath chrome_exe;
++  if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
++    NOTREACHED() << "Error getting app exe path";
++    return false;
++  }
++
++  if (!ShellUtil::ShowMakeChromeDefaultSystemUI(chrome_exe)) {
++    LOG(ERROR) << "Failed to launch the set-default-browser Windows UI.";
++    return false;
++  }
++
++  VLOG(1) << "Set-default-browser Windows UI completed.";
++  return true;
++}
++
+ void SetAsDefaultBrowserUsingSystemSettings(
+     base::OnceClosure on_finished_callback) {
+   base::FilePath chrome_exe;
+@@ -829,6 +848,27 @@ void SetAsDefaultBrowserUsingSystemSettings(
+                                std::move(on_finished_callback)));
+ }
+ 
++bool SetAsDefaultClientForSchemeUsingIntentPicker(const std::string& scheme) {
++  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
++                                                base::BlockingType::MAY_BLOCK);
++
++  base::FilePath chrome_exe;
++  if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
++    NOTREACHED() << "Error getting app exe path";
++    return false;
++  }
++
++  std::wstring wscheme(base::UTF8ToWide(scheme));
++  if (!ShellUtil::ShowMakeChromeDefaultProtocolClientSystemUI(chrome_exe,
++                                                              wscheme)) {
++    LOG(ERROR) << "Failed to launch the set-default-client Windows UI.";
++    return false;
++  }
++
++  VLOG(1) << "Set-default-client Windows UI completed.";
++  return true;
++}
++
+ void SetAsDefaultClientForSchemeUsingSystemSettings(
+     const std::string& scheme,
+     base::OnceClosure on_finished_callback) {
+diff --git a/chrome/browser/shell_integration_win.h b/chrome/browser/shell_integration_win.h
+index 4ab7f43c908b8..8e455c779bf61 100644
+--- a/chrome/browser/shell_integration_win.h
++++ b/chrome/browser/shell_integration_win.h
+@@ -22,12 +22,28 @@ namespace shell_integration::win {
+ struct ShortcutProperties;
+ enum class ShortcutOperation;
+ 
++// Initiates an OS shell flow which (if followed by the user) should set
++// Chrome as the default browser. Returns false if the flow cannot be
++// initialized, if it is not supported (introduced for Windows 8) or if the
++// user cancels the operation. This is a blocking call and requires a FILE
++// thread. If Chrome is already default browser, no interactive dialog will be
++// shown and this method returns true.
++bool SetAsDefaultBrowserUsingIntentPicker();
++
+ // Initiates the interaction with the system settings for the default browser.
+ // The function takes care of making sure |on_finished_callback| will get called
+ // exactly once when the interaction is finished.
+ void SetAsDefaultBrowserUsingSystemSettings(
+     base::OnceClosure on_finished_callback);
+ 
++// Initiates an OS shell flow which (if followed by the user) should set
++// Chrome as the default handler for |scheme|. Returns false if the flow
++// cannot be initialized, if it is not supported (introduced for Windows 8)
++// or if the user cancels the operation. This is a blocking call and requires
++// a FILE thread. If Chrome is already default for |scheme|, no interactive
++// dialog will be shown and this method returns true.
++bool SetAsDefaultClientForSchemeUsingIntentPicker(const std::string& scheme);
++
+ // Initiates the interaction with the system settings for the default handler of
+ // |scheme|. The function takes care of making sure |on_finished_callback|
+ // will get called exactly once when the interaction is finished.
+diff --git a/chrome/installer/util/shell_util.cc b/chrome/installer/util/shell_util.cc
+index 395c9a4daad81..f3745e8f22775 100644
+--- a/chrome/installer/util/shell_util.cc
++++ b/chrome/installer/util/shell_util.cc
+@@ -12,6 +12,7 @@
+ 
+ #include <shellapi.h>
+ #include <shlobj.h>
++#include <windows.h>
+ #include <wrl/client.h>
+ 
+ #include <algorithm>
+@@ -67,6 +68,7 @@
+ #include "chrome/installer/util/l10n_string_util.h"
+ #include "chrome/installer/util/registry_entry.h"
+ #include "chrome/installer/util/registry_util.h"
++#include "chrome/installer/util/scoped_user_protocol_entry.h"
+ #include "chrome/installer/util/taskbar_util.h"
+ #include "chrome/installer/util/util_constants.h"
+ #include "chrome/installer/util/work_item.h"
+@@ -713,6 +715,26 @@ bool ElevateAndRegisterChrome(
+   return false;
+ }
+ 
++// Launches the Windows 7 and Windows 8 dialog for picking the application to
++// handle the given protocol. Most importantly, this is used to set the default
++// handler for http (and, implicitly with it, https). In that case it is also
++// known as the 'how do you want to open webpages' dialog.
++// It is required that Chrome be already *registered* for the given protocol.
++bool LaunchSelectDefaultProtocolHandlerDialog(const wchar_t* protocol) {
++  DCHECK(protocol);
++  OPENASINFO open_as_info = {};
++  open_as_info.pcszFile = protocol;
++  open_as_info.oaifInFlags =
++      OAIF_URL_PROTOCOL | OAIF_FORCE_REGISTRATION | OAIF_REGISTER_EXT;
++  HRESULT hr = SHOpenWithDialog(nullptr, &open_as_info);
++  DLOG_IF(WARNING, FAILED(hr)) << "Failed to set as default " << protocol
++                               << " handler; hr=0x" << std::hex << hr;
++  if (FAILED(hr))
++    return false;
++  SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
++  return true;
++}
++
+ // Returns true if |chrome_exe| has been registered with |suffix| for |mode|.
+ // |confirmation_level| is the level of verification desired as described in
+ // the RegistrationConfirmationLevel enum above.
+@@ -2199,6 +2221,17 @@ bool ShellUtil::CanMakeChromeDefaultUnattended() {
+   return base::win::GetVersion() < base::win::Version::WIN8;
+ }
+ 
++// static
++ShellUtil::InteractiveSetDefaultMode ShellUtil::GetInteractiveSetDefaultMode() {
++  DCHECK(!CanMakeChromeDefaultUnattended());
++  // TODO(crbug.com/1385856): Remove all code associated with INTENT_PICKER,
++  // including InteractiveSetDefaultMode and GetInteractiveSetDefaultMode().
++  if (base::win::GetVersion() >= base::win::Version::WIN10)
++    return InteractiveSetDefaultMode::SYSTEM_SETTINGS;
++
++  return InteractiveSetDefaultMode::INTENT_PICKER;
++}
++
+ bool ShellUtil::MakeChromeDefault(int shell_change,
+                                   const base::FilePath& chrome_exe,
+                                   bool elevate_if_not_admin) {
+@@ -2366,8 +2399,26 @@ bool ShellUtil::ShowMakeChromeDefaultSystemUI(
+                                    nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+     }
+     if (!is_win11_or_greater || !succeeded) {
+-    // Launch the Windows Apps Settings dialog.
+-    succeeded = base::win::LaunchDefaultAppsSettingsModernDialog(L"http");
++    switch (GetInteractiveSetDefaultMode()) {
++      case INTENT_PICKER: {
++        // On Windows 8, you can't set yourself as the default handler
++        // programmatically. In other words IApplicationAssociationRegistration
++        // has been rendered useless. What you can do is to launch
++        // "Set Program Associations" section of the "Default Programs"
++        // control panel, which is a mess, or pop the concise "How you want to
++        // open webpages?" dialog.  We choose the latter.
++        ScopedUserProtocolEntry user_protocol_entry(L"http");
++        succeeded = LaunchSelectDefaultProtocolHandlerDialog(L"http");
++      } break;
++      case SYSTEM_SETTINGS:
++        // On Windows 10, you can't even launch the associations dialog.
++        // So we launch the settings dialog. Quoting from MSDN: "The Open With
++        // dialog box can no longer be used to change the default program used
++        // to open a file extension. You can only use SHOpenWithDialog to open
++        // a single file."
++        succeeded = base::win::LaunchDefaultAppsSettingsModernDialog(L"http");
++        break;
++    }
+     }
+   }
+   if (succeeded && is_default)
+@@ -2439,9 +2490,25 @@ bool ShellUtil::ShowMakeChromeDefaultProtocolClientSystemUI(
+   bool is_default =
+       (GetChromeDefaultProtocolClientState(protocol) == IS_DEFAULT);
+   if (!is_default) {
+-    // Launch the Windows settings dialog.
+-    succeeded =
+-        base::win::LaunchDefaultAppsSettingsModernDialog(protocol.c_str());
++    switch (GetInteractiveSetDefaultMode()) {
++      case INTENT_PICKER: {
++        // On Windows 8, you can't set yourself as the default handler
++        // programmatically. In other words IApplicationAssociationRegistration
++        // has been rendered useless. What you can do is to launch
++        // "Set Program Associations" section of the "Default Programs"
++        // control panel, which is a mess, or pop the concise "How you want to
++        // open
++        // links of this type (protocol)?" dialog.  We choose the latter.
++        ScopedUserProtocolEntry user_protocol_entry(protocol.c_str());
++        succeeded = LaunchSelectDefaultProtocolHandlerDialog(protocol.c_str());
++      } break;
++      case SYSTEM_SETTINGS:
++        // On Windows 10, you can't even launch the associations dialog.
++        // So we launch the settings dialog.
++        succeeded =
++            base::win::LaunchDefaultAppsSettingsModernDialog(protocol.c_str());
++        break;
++    }
+     is_default = (succeeded &&
+                   GetChromeDefaultProtocolClientState(protocol) == IS_DEFAULT);
+   }
+diff --git a/chrome/installer/util/shell_util.h b/chrome/installer/util/shell_util.h
+index 46fb4516fa7be..91532504dc6b5 100644
+--- a/chrome/installer/util/shell_util.h
++++ b/chrome/installer/util/shell_util.h
+@@ -495,6 +495,19 @@ class ShellUtil {
+   // Windows prior to Windows 8.
+   static bool CanMakeChromeDefaultUnattended();
+ 
++  enum InteractiveSetDefaultMode {
++    // The intent picker is opened with the different choices available to the
++    // user.
++    INTENT_PICKER,
++    // The Windows default apps settings page is opened with the current default
++    // app focused.
++    SYSTEM_SETTINGS,
++  };
++
++  // Returns the interactive mode that should be used to set the default browser
++  // or default protocol client on Windows 8+.
++  static InteractiveSetDefaultMode GetInteractiveSetDefaultMode();
++
+   // Returns the DefaultState of Chrome for HTTP and HTTPS and updates the
+   // default browser beacons as appropriate.
+   static DefaultState GetChromeDefaultState();

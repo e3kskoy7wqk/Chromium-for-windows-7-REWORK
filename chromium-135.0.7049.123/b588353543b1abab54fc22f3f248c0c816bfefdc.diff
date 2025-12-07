@@ -1,0 +1,21 @@
+diff --git a/third_party/webrtc/modules/desktop_capture/win/full_screen_win_application_handler.cc b/third_party/webrtc/modules/desktop_capture/win/full_screen_win_application_handler.cc
+index 0b7e3fc437..366bc6e419 100644
+--- a/third_party/webrtc/modules/desktop_capture/win/full_screen_win_application_handler.cc
++++ b/third_party/webrtc/modules/desktop_capture/win/full_screen_win_application_handler.cc
+@@ -17,6 +17,7 @@
+ #include "rtc_base/arraysize.h"
+ #include "rtc_base/logging.h"  // For RTC_LOG_GLE
+ #include "rtc_base/string_utils.h"
++#include <psapi.h>
+ 
+ namespace webrtc {
+ namespace {
+@@ -179,7 +180,7 @@ std::wstring GetPathByWindowId(HWND window_id) {
+   DWORD path_len = MAX_PATH;
+   WCHAR path[MAX_PATH];
+   std::wstring result;
+-  if (::QueryFullProcessImageNameW(process, 0, path, &path_len))
++  if (::GetModuleFileNameEx(process, 0, path, path_len))
+     result = std::wstring(path, path_len);
+   else
+     RTC_LOG_GLE(LS_ERROR) << "QueryFullProcessImageName failed.";
