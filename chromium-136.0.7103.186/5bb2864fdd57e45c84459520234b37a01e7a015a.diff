@@ -1,0 +1,54 @@
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index faff925929707..9d66490cdb555 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -750,7 +750,6 @@ config("compiler_cpu_abi") {
+     if (current_cpu == "x64") {
+       cflags += [
+         "-m64",
+-        "-msse3",
+       ]
+       ldflags += [ "-m64" ]
+     } else if (current_cpu == "x86") {
+@@ -758,8 +757,9 @@ config("compiler_cpu_abi") {
+       ldflags += [ "-m32" ]
+       if (!is_nacl) {
+         cflags += [
++          "-msse2",
+           "-mfpmath=sse",
+-          "-msse3",
++          "-mmmx",
+         ]
+       }
+     } else if (current_cpu == "arm") {
+diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
+index 9ad01d025b32e..7e1cea5dbb04d 100644
+--- a/build/config/win/BUILD.gn
++++ b/build/config/win/BUILD.gn
+@@ -118,13 +118,6 @@ config("compiler") {
+       assert(false, "unknown current_cpu " + current_cpu)
+     }
+ 
+-    # Chrome currently requires SSE3. Clang supports targeting any Intel
+-    # microarchitecture. MSVC only supports a subset of architectures, and the
+-    # next step after SSE2 will be AVX.
+-    if (current_cpu == "x86" || current_cpu == "x64") {
+-      cflags += [ "-msse3" ]
+-    }
+-
+     # Enable ANSI escape codes if something emulating them is around (cmd.exe
+     # doesn't understand ANSI escape codes by default). Make sure to not enable
+     # this if remoteexec is in use, because this will lower cache hits.
+diff --git a/chrome/installer/setup/setup_util.cc b/chrome/installer/setup/setup_util.cc
+index fbf3bd37babf2..347427d69bebe 100644
+--- a/chrome/installer/setup/setup_util.cc
++++ b/chrome/installer/setup/setup_util.cc
+@@ -429,7 +429,7 @@ bool ContainsUnsupportedSwitch(const base::CommandLine& cmd_line) {
+ 
+ bool IsProcessorSupported() {
+ #if defined(ARCH_CPU_X86_FAMILY)
+-  return base::CPU().has_sse3();
++  return base::CPU().has_sse2();
+ #elif defined(ARCH_CPU_ARM64)
+   return true;
+ #else

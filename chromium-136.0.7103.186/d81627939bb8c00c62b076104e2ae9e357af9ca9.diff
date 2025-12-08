@@ -1,0 +1,930 @@
+diff --git a/base/win/registry.cc b/base/win/registry.cc
+index 7b9dcb90e627e..c33cda7211238 100644
+--- a/base/win/registry.cc
++++ b/base/win/registry.cc
+@@ -268,6 +268,14 @@ base::expected<DWORD, LONG> RegKey::GetValueCount() const {
+   return base::unexpected(result);
+ }
+ 
++FILETIME RegKey::GetLastWriteTime() const {
++  FILETIME last_write_time;
++  LONG result = RegQueryInfoKey(key_, nullptr, nullptr, nullptr, nullptr,
++                                nullptr, nullptr, nullptr, nullptr, nullptr,
++                                nullptr, &last_write_time);
++  return (result == ERROR_SUCCESS) ? last_write_time : FILETIME{};
++}
++
+ LONG RegKey::GetValueNameAt(DWORD index, std::wstring* name) const {
+   wchar_t buf[256];
+   DWORD bufsize = std::size(buf);
+diff --git a/base/win/registry.h b/base/win/registry.h
+index ea7be2a307505..860c1dd8f71e0 100644
+--- a/base/win/registry.h
++++ b/base/win/registry.h
+@@ -85,6 +85,9 @@ class BASE_EXPORT RegKey {
+   // cannot be determined.
+   base::expected<DWORD, LONG> GetValueCount() const;
+ 
++  // Returns the last write time or 0 on failure.
++  FILETIME GetLastWriteTime() const;
++
+   // Determines the nth value's name.
+   LONG GetValueNameAt(DWORD index, std::wstring* name) const;
+ 
+diff --git a/chrome/browser/shell_integration_win.cc b/chrome/browser/shell_integration_win.cc
+index a340a972c17ad..0d7ee6d8688a6 100644
+--- a/chrome/browser/shell_integration_win.cc
++++ b/chrome/browser/shell_integration_win.cc
+@@ -18,6 +18,7 @@
+ #include <vector>
+ 
+ #include "base/command_line.h"
++#include "base/feature_list.h"
+ #include "base/files/file_enumerator.h"
+ #include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+@@ -58,6 +59,14 @@ namespace shell_integration {
+ 
+ namespace {
+ 
++BASE_FEATURE(kWin10UnattendedDefaultExportDerived,
++             "Win10UnattendedDefaultExportDerived",
++             base::FEATURE_DISABLED_BY_DEFAULT);
++
++bool CanSetAsDefaultDirectly() {
++  return base::FeatureList::IsEnabled(kWin10UnattendedDefaultExportDerived);
++}
++
+ // Helper function for GetAppId to generates profile id
+ // from profile path. "profile_id" is composed of sanitized basenames of
+ // user data dir and profile dir joined by a ".".
+@@ -644,8 +653,12 @@ bool SetAsDefaultBrowser() {
+   }
+ 
+   // From UI currently we only allow setting default browser for current user.
+-  if (!ShellUtil::MakeChromeDefault(ShellUtil::CURRENT_USER, chrome_exe,
+-                                    true /* elevate_if_not_admin */)) {
++  if (!(CanSetAsDefaultDirectly()
++            ? ShellUtil::MakeChromeDefaultDirectly(
++                  ShellUtil::CURRENT_USER, chrome_exe,
++                  true /* elevate_if_not_admin */)
++            : ShellUtil::MakeChromeDefault(ShellUtil::CURRENT_USER, chrome_exe,
++                                           true /* elevate_if_not_admin */))) {
+     LOG(ERROR) << "Chrome could not be set as default browser.";
+     return false;
+   }
+@@ -732,6 +745,10 @@ DefaultWebClientSetPermission GetPlatformSpecificDefaultWebClientSetPermission(
+   if (ShellUtil::CanMakeChromeDefaultUnattended()) {
+     return SET_DEFAULT_UNATTENDED;
+   }
++  if (method == WebClientSetMethod::kDefaultBrowser &&
++      CanSetAsDefaultDirectly()) {
++    return SET_DEFAULT_UNATTENDED;
++  }
+   // Setting the default web client generally requires user interaction in
+   // Windows 8+ with permitted exceptions above.
+   return SET_DEFAULT_INTERACTIVE;
+diff --git a/chrome/installer/util/BUILD.gn b/chrome/installer/util/BUILD.gn
+index a743a4e9b1fea..eec8f3b69d89a 100644
+--- a/chrome/installer/util/BUILD.gn
++++ b/chrome/installer/util/BUILD.gn
+@@ -375,4 +375,16 @@ if (is_win) {
+       "//chrome/test/data/installer/",
+     ]
+   }
++
++  source_set("interactive_ui_tests") {
++    testonly = true
++    sources = [ "shell_util_interactive_uitest.cc" ]
++    deps = [
++      ":with_no_strings",
++      "//base",
++      "//base/test:test_support",
++      "//build:branding_buildflags",
++      "//testing/gtest",
++    ]
++  }
+ }  # is_win
+diff --git a/chrome/installer/util/shell_util.cc b/chrome/installer/util/shell_util.cc
+index 7f20d494956cd..b4bba76c7f345 100644
+--- a/chrome/installer/util/shell_util.cc
++++ b/chrome/installer/util/shell_util.cc
+@@ -21,6 +21,7 @@
+ #include <string>
+ #include <utility>
+ 
++#include "base/base64.h"
+ #include "base/command_line.h"
+ #include "base/containers/span.h"
+ #include "base/files/file_enumerator.h"
+@@ -30,6 +31,7 @@
+ #include "base/hash/md5.h"
+ #include "base/lazy_instance.h"
+ #include "base/logging.h"
++#include "base/metrics/histogram_functions.h"
+ #include "base/path_service.h"
+ #include "base/strings/cstring_view.h"
+ #include "base/strings/strcat.h"
+@@ -41,10 +43,13 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/synchronization/atomic_flag.h"
+ #include "base/values.h"
++#include "base/win/access_token.h"
+ #include "base/win/default_apps_util.h"
++#include "base/win/pe_image.h"
+ #include "base/win/registry.h"
+ #include "base/win/scoped_co_mem.h"
+ #include "base/win/shortcut.h"
++#include "base/win/sid.h"
+ #include "base/win/win_util.h"
+ #include "base/win/windows_version.h"
+ #include "chrome/common/chrome_constants.h"
+@@ -91,6 +96,8 @@ enum RegistrationConfirmationLevel {
+ 
+ const wchar_t kReinstallCommand[] = L"ReinstallCommand";
+ 
++constexpr wchar_t kRegHash[] = L"Hash";
++
+ const wchar_t kRegProgId[] = L"ProgId";
+ 
+ const wchar_t kFilePathSeparator[] = L"\\";
+@@ -1498,6 +1505,215 @@ bool DeleteFileExtensionsForProgId(const std::wstring& prog_id) {
+   return ShellUtil::DeleteApplicationClass(prog_id);
+ }
+ 
++std::wstring GetSID() {
++  std::wstring result;
++  std::optional<base::win::AccessToken> current_process =
++      base::win::AccessToken::FromProcess(GetCurrentProcess(), false);
++  if (!current_process)
++    return result;
++
++  std::optional<std::wstring> sid = current_process->User().ToSddlString();
++  if (!sid)
++    return result;
++
++  result = std::move(*sid);
++  return result;
++}
++
++std::wstring GetCurrentDateTimeForHashing() {
++  SYSTEMTIME system_time;
++  ::GetSystemTime(&system_time);
++  // The user choice hash function uses the registry write time as an input into
++  // the hash function. Considering only time down to the minute significantly
++  // increases the chance that the computed hash and registry write time are the
++  // same. If the registry write occurs near a minute boundary, the hash will
++  // likely need to be recomputed and rewritten.
++  system_time.wSecond = 0;
++  system_time.wMilliseconds = 0;
++  FILETIME file_time;
++  ::SystemTimeToFileTime(&system_time, &file_time);
++  return base::ASCIIToWide(base::StringPrintf(
++      "%08lx%08lx", file_time.dwHighDateTime, file_time.dwLowDateTime));
++}
++
++// The user choice hash function uses a shell32 wide string as a salt. This
++// function attempts to extract that string.
++std::wstring GetShellUserChoiceSalt() {
++  std::wstring result;
++  HMODULE shell32 = GetModuleHandle(L"shell32.dll");
++  if (!shell32)
++    return result;
++
++  base::win::PEImage shell32_image(shell32);
++  IMAGE_SECTION_HEADER* data_section_header =
++      shell32_image.GetImageSectionHeaderByName(".rdata");
++  if (!data_section_header)
++    data_section_header = shell32_image.GetImageSectionHeaderByName(".text");
++
++  if (!data_section_header)
++    return result;
++
++  base::span<const uint8_t> data_section(
++      reinterpret_cast<const uint8_t*>(
++          shell32_image.RVAToAddr(data_section_header->VirtualAddress)),
++      data_section_header->SizeOfRawData);
++  static constexpr std::wstring_view kSaltSubstring(
++      L"User Choice set via Windows User Experience");
++  base::span<const uint8_t> subsalt_span(
++      reinterpret_cast<const uint8_t*>(kSaltSubstring.data()),
++      kSaltSubstring.size() * sizeof(decltype(kSaltSubstring)::value_type));
++  auto salt_start = std::ranges::search(data_section, subsalt_span).begin();
++  if (salt_start == data_section.end())
++    return result;
++
++  static constexpr wchar_t kBracket = L'}';
++  base::span<const uint8_t> bracket_span(
++      reinterpret_cast<const uint8_t*>(&kBracket), sizeof(kBracket));
++  // The salt string is currently not expected to be longer than 256 bytes.
++  // It could be shorter, and so the bracket helps find the end of the string.
++  auto salt_end_limited = salt_start + 256;
++  auto salt_end =
++      std::search(salt_start + subsalt_span.size(), salt_end_limited,
++                  bracket_span.begin(), bracket_span.end());
++  if (salt_end == salt_end_limited)
++    return result;
++
++  const size_t string_size = salt_end - salt_start + sizeof(kBracket);
++  result.assign(reinterpret_cast<const wchar_t*>(&*salt_start),
++                string_size / sizeof(wchar_t));
++  return result;
++}
++
++std::array<uint32_t, 4> ComputeHash(base::span<const uint8_t> input) {
++  const size_t items = input.size() / sizeof(uint32_t);
++  const size_t items_block_aligned = items - (items & 1);
++  base::span<const uint32_t> input_32(
++      reinterpret_cast<const uint32_t*>(input.data()), items_block_aligned);
++
++  base::MD5Digest md5_digest;
++  MD5Sum(input, &md5_digest);
++  uint32_t md5[2];
++  memcpy(md5, md5_digest.a.data(), sizeof(md5));
++
++  std::array<uint32_t, 4> result{};
++
++  const uint32_t md5_0 = (md5[0] | 1) + 0x69FB0000;
++  const uint32_t md5_1 = (md5[1] | 1) + 0x13DB0000;
++  const uint32_t md5_2 = md5[0] | 1;
++  const uint32_t md5_3 = md5[1] | 1;
++  size_t length = input_32.size();
++  uint32_t part_1 = 0;
++  uint32_t part_2 = 0;
++  for (size_t pos = 0; pos < length; ++pos) {
++    if (pos & 1) {
++      const uint32_t prev_part_1 = part_1;
++      part_1 = input_32[pos] + prev_part_1;
++      part_1 = part_1 * md5_1 - 0x3CE8EC25 * (part_1 >> 16);
++      part_1 = 0x59C3AF2D * part_1 - 0x2232E0F1 * (part_1 >> 16);
++      result[0] = 0x1EC90001 * part_1 + 0x35BD1EC9 * (part_1 >> 16);
++      result[1] = result[0] + prev_part_1 + result[1];
++
++      const uint32_t prev_part_2 = part_2;
++      part_2 = input_32[pos] + prev_part_2;
++      part_2 = md5_3 * part_2;
++      part_2 = 0x16F50000 * part_2 + 0xA27416F5 * (part_2 >> 16);
++      part_2 = 0x96FF0000 * part_2 + 0xD38396FF * (part_2 >> 16);
++      part_2 = 0x2B890000 * part_2 + 0x7C932B89 * (part_2 >> 16);
++      result[2] = 0x9F690000 * part_2 + 0xBFA49F69 * (part_2 >> 16);
++      result[3] = result[2] + prev_part_2 + result[3];
++    } else {
++      part_1 = input_32[pos] + result[0];
++      part_1 = part_1 * md5_0 - 0x10FA9605 * (part_1 >> 16);
++      part_1 = 0x79F8A395 * part_1 + 0x689B6B9F * (part_1 >> 16);
++      part_1 = 0xEA970001 * part_1 - 0x3C101569 * (part_1 >> 16);
++      part_2 = md5_2 * (input_32[pos] + result[2]);
++      part_2 = 0xB1110000 * part_2 + 0xCF98B111 * (part_2 >> 16);
++      part_2 = 0x5B9F0000 * part_2 + 0x87085B9F * (part_2 >> 16);
++      part_2 = 0xB96D0000 * part_2 + 0x12CEB96D * (part_2 >> 16);
++      part_2 = 0x1D830000 * part_2 + 0x257E1D83 * (part_2 >> 16);
++    }
++  }
++
++  return result;
++}
++
++std::wstring ComputeUserChoiceHash(const std::wstring& extension,
++                                   const std::wstring& sid,
++                                   const std::wstring& prog_id,
++                                   const std::wstring& datetime,
++                                   const std::wstring& salt) {
++  std::wstring hash_input = base::ToLowerASCII(
++      base::StrCat({extension, sid, prog_id, datetime, salt}));
++  base::span<const uint8_t> hash_input_span(
++      reinterpret_cast<const uint8_t*>(hash_input.c_str()),
++      sizeof(decltype(hash_input)::value_type) * (hash_input.size() + 1));
++  std::array<uint32_t, 4> result = ComputeHash(hash_input_span);
++  uint32_t input[] = {result[0] ^ result[2], result[1] ^ result[3]};
++  return base::UTF8ToWide(base::Base64Encode(
++      base::span<uint8_t>(reinterpret_cast<uint8_t*>(input), sizeof(input))));
++}
++
++bool IsUserChoiceHashValid(const base::win::RegKey& user_choice_reg_key,
++                           const std::wstring& extension,
++                           const std::wstring& sid,
++                           const std::wstring& prog_id,
++                           const std::wstring& salt) {
++  // Manually validate the hash instead of using
++  // IApplicationAssociationRegistration because
++  // IApplicationAssociationRegistration may trigger a UI notification and reset
++  // all of the defaults upon encountering an invalid hash.
++  FILETIME last_write_time = user_choice_reg_key.GetLastWriteTime();
++  SYSTEMTIME last_write_system_time;
++  ::FileTimeToSystemTime(&last_write_time, &last_write_system_time);
++  // The hash computation aligns the time to minute boundaries.
++  last_write_system_time.wSecond = 0;
++  last_write_system_time.wMilliseconds = 0;
++  ::SystemTimeToFileTime(&last_write_system_time, &last_write_time);
++  std::wstring last_write_time_string = base::ASCIIToWide(
++      base::StringPrintf("%08lx%08lx", last_write_time.dwHighDateTime,
++                         last_write_time.dwLowDateTime));
++  std::wstring current_hash;
++  if (user_choice_reg_key.ReadValue(kRegHash, &current_hash) != ERROR_SUCCESS)
++    return false;
++
++  std::wstring expected_hash = ComputeUserChoiceHash(
++      extension, sid, prog_id, last_write_time_string, salt);
++  return current_hash == expected_hash;
++}
++
++bool WriteUserChoiceValues(base::win::RegKey& user_choice_reg_key,
++                           const std::wstring& extension,
++                           const std::wstring& sid,
++                           const std::wstring& prog_id,
++                           const std::wstring& salt) {
++  // Allow 5 retries in the event the hash is computed near a minute boundary.
++  for (int i = 0; i < 5; ++i) {
++    std::wstring datetime = GetCurrentDateTimeForHashing();
++    std::wstring hash =
++        ComputeUserChoiceHash(extension, sid, prog_id, datetime, salt);
++    user_choice_reg_key.WriteValue(kRegHash, hash.c_str());
++    user_choice_reg_key.WriteValue(kRegProgId, prog_id.c_str());
++    if (IsUserChoiceHashValid(user_choice_reg_key, extension, sid, prog_id,
++                              salt)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++enum class DirectSettingAttemptResult {
++  kSucceeded = 0,
++  kFailedSID = 1,
++  kFailedSalt = 2,
++  kFailedRegistrySet = 3,
++  kMaxValue = kFailedRegistrySet,
++};
++
++void ReportDirectSettingResult(DirectSettingAttemptResult result) {
++  base::UmaHistogramEnumeration("Windows.MakeChromeDefaultDirectly.Result",
++                                result);
++}
++
+ }  // namespace
+ 
+ const wchar_t* ShellUtil::kRegAppProtocolHandlers = L"\\AppProtocolHandlers";
+@@ -2048,6 +2264,79 @@ bool ShellUtil::MakeChromeDefault(int shell_change,
+   return ret;
+ }
+ 
++bool ShellUtil::MakeChromeDefaultDirectly(int shell_change,
++                                          const base::FilePath& chrome_exe,
++                                          bool elevate_if_not_admin) {
++  DCHECK(!(shell_change & SYSTEM_LEVEL) || IsUserAnAdmin());
++
++  if (!install_static::SupportsSetAsDefaultBrowser())
++    return false;
++
++  if (!RegisterChromeBrowser(chrome_exe, std::wstring(),
++                             elevate_if_not_admin)) {
++    return false;
++  }
++
++  std::wstring suffix;
++  if (!GetInstallationSpecificSuffix(chrome_exe, &suffix))
++    return false;
++
++  std::wstring prog_id = GetBrowserProgId(suffix);
++
++  std::wstring sid = GetSID();
++  if (sid.empty()) {
++    ReportDirectSettingResult(DirectSettingAttemptResult::kFailedSID);
++    return false;
++  }
++
++  std::wstring shell_salt = GetShellUserChoiceSalt();
++  if (shell_salt.empty()) {
++    ReportDirectSettingResult(DirectSettingAttemptResult::kFailedSalt);
++    return false;
++  }
++
++  base::win::RegKey url_associations_key(
++      HKEY_CURRENT_USER,
++      L"SOFTWARE\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations",
++      KEY_READ | KEY_WRITE);
++  for (size_t i = 0; kBrowserProtocolAssociations[i] != nullptr; ++i) {
++    std::wstring subkey_path(
++        base::StrCat({kBrowserProtocolAssociations[i], L"\\UserChoice"}));
++    // Deleting the key works around the deny set value ACL on UserChoice.
++    url_associations_key.DeleteKey(subkey_path.c_str());
++    base::win::RegKey key(url_associations_key.Handle(), subkey_path.c_str(),
++                          KEY_READ | KEY_WRITE);
++    if (!WriteUserChoiceValues(key, kBrowserProtocolAssociations[i], sid,
++                               prog_id, shell_salt)) {
++      ReportDirectSettingResult(DirectSettingAttemptResult::kFailedRegistrySet);
++      return false;
++    }
++  }
++
++  base::win::RegKey file_extensions_key(
++      HKEY_CURRENT_USER,
++      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts",
++      KEY_READ | KEY_WRITE);
++  for (size_t i = 0; kDefaultFileAssociations[i] != nullptr; ++i) {
++    std::wstring subkey_path(
++        base::StrCat({kDefaultFileAssociations[i], L"\\UserChoice"}));
++    // Deleting the key works around the deny set value ACL on UserChoice.
++    file_extensions_key.DeleteKey(subkey_path.c_str());
++    base::win::RegKey key(file_extensions_key.Handle(), subkey_path.c_str(),
++                          KEY_READ | KEY_WRITE);
++    if (!WriteUserChoiceValues(key, kDefaultFileAssociations[i], sid, prog_id,
++                               shell_salt)) {
++      ReportDirectSettingResult(DirectSettingAttemptResult::kFailedRegistrySet);
++      return false;
++    }
++  }
++
++  ::SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
++
++  ReportDirectSettingResult(DirectSettingAttemptResult::kSucceeded);
++  return true;
++}
++
+ // static
+ bool ShellUtil::LaunchUninstallAppsSettings() {
+   static constexpr wchar_t kControlPanelAppModelId[] =
+@@ -2700,3 +2989,32 @@ bool ShellUtil::AddRegistryEntries(
+   }
+   return true;
+ }
++
++// static
++std::array<uint32_t, 4> ShellUtil::ComputeHashForTesting(
++    base::span<const uint8_t> input) {
++  return ComputeHash(input);
++}
++
++// static
++std::wstring ShellUtil::ComputeUserChoiceHashForTesting(
++    const std::wstring& extension,
++    const std::wstring& sid,
++    const std::wstring& prog_id,
++    const std::wstring& datetime) {
++  std::wstring shell_salt = GetShellUserChoiceSalt();
++  if (shell_salt.empty())
++    return std::wstring();
++
++  return ComputeUserChoiceHash(extension, sid, prog_id, datetime, shell_salt);
++}
++
++// static
++std::wstring ShellUtil::GetCurrentProgIdForTesting(
++    const base::FilePath& chrome_exe) {
++  std::wstring suffix;
++  if (!GetInstallationSpecificSuffix(chrome_exe, &suffix))
++    return std::wstring();
++
++  return GetBrowserProgId(suffix);
++}
+diff --git a/chrome/installer/util/shell_util.h b/chrome/installer/util/shell_util.h
+index 9a5cd40ff31c6..46fb4516fa7be 100644
+--- a/chrome/installer/util/shell_util.h
++++ b/chrome/installer/util/shell_util.h
+@@ -23,6 +24,7 @@
+ 
+ #include "base/check.h"
+ #include "base/containers/flat_map.h"
++#include "base/containers/span.h"
+ #include "base/files/file_path.h"
+ #include "base/memory/ref_counted.h"
+ #include "base/strings/cstring_view.h"
+@@ -518,16 +520,34 @@ class ShellUtil {
+   // TODO(benwells): Attempt to undo any changes that were successfully made.
+   // http://crbug.com/83970
+   //
+-  // shell_change: Defined whether to register as default browser at system
++  // shell_change: Defines whether to register as default browser at system
+   //               level or user level. If value has ShellChange::SYSTEM_LEVEL
+   //               we should be running as admin user.
+   // chrome_exe: The chrome.exe path to register as default browser.
+-  // elevate_if_not_admin: On Vista if user is not admin, try to elevate for
++  // elevate_if_not_admin: On Win7 if user is not admin, try to elevate for
+   //                       Chrome registration.
+   static bool MakeChromeDefault(int shell_change,
+                                 const base::FilePath& chrome_exe,
+                                 bool elevate_if_not_admin);
+ 
++  // Make Chrome the default browser on Windows 10. This function works by going
++  // through the url protocols and file associations that are related to general
++  // browsing, e.g. http, https, .html etc., and directly setting the relevant
++  // registry entries for each. If any of these fails the operation will return
++  // false to indicate failure, which is consistent with the return value of
++  // shell_integration::GetDefaultBrowser. This function will also return false
++  // if it can't set the default directly on the current platform.
++  //
++  // shell_change: Defines whether to register as default browser at system
++  //               level or user level. If value has ShellChange::SYSTEM_LEVEL
++  //               we should be running as admin user.
++  // chrome_exe: The chrome.exe path to register as default browser.
++  // elevate_if_not_admin: If user is not admin, try to elevate for
++  //                       Chrome registration.
++  static bool MakeChromeDefaultDirectly(int shell_change,
++                                        const base::FilePath& chrome_exe,
++                                        bool elevate_if_not_admin);
++
+   // Opens the Apps & Features page in the Windows settings in branded builds.
+   //
+   // This function DCHECKS that it is only called on Windows 10 or higher.
+@@ -839,6 +859,18 @@ class ShellUtil {
+       HKEY root,
+       const std::vector<std::unique_ptr<RegistryEntry>>& entries,
+       bool best_effort_no_rollback = false);
++
++  static std::array<uint32_t, 4> ComputeHashForTesting(
++      base::span<const uint8_t> input);
++
++  static std::wstring ComputeUserChoiceHashForTesting(
++      const std::wstring& extension,
++      const std::wstring& sid,
++      const std::wstring& prog_id,
++      const std::wstring& datetime);
++
++  static std::wstring GetCurrentProgIdForTesting(
++      const base::FilePath& chrome_exe);
+ };
+ 
+ #endif  // CHROME_INSTALLER_UTIL_SHELL_UTIL_H_
+diff --git a/chrome/installer/util/shell_util_interactive_uitest.cc b/chrome/installer/util/shell_util_interactive_uitest.cc
+new file mode 100644
+index 0000000000000..e78ae0abbdacb
+--- /dev/null
++++ b/chrome/installer/util/shell_util_interactive_uitest.cc
+@@ -0,0 +1,196 @@
++// Copyright 2022 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/installer/util/shell_util.h"
++
++#include <shobjidl.h>
++#include <stddef.h>
++#include <wrl/client.h>
++
++#include <string>
++
++#include "base/files/scoped_temp_dir.h"
++#include "base/memory/raw_ref.h"
++#include "base/strings/strcat.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/test/test_reg_util_win.h"
++#include "base/types/pass_key.h"
++#include "base/uuid.h"
++#include "base/win/com_init_util.h"
++#include "base/win/registry.h"
++#include "base/win/scoped_co_mem.h"
++#include "build/branding_buildflags.h"
++#include "chrome/installer/util/util_constants.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/abseil-cpp/absl/types/optional.h"
++
++namespace {
++
++std::wstring GetCurrentDefault(
++    IApplicationAssociationRegistration* registration,
++    const wchar_t* query,
++    ASSOCIATIONTYPE query_type,
++    ASSOCIATIONLEVEL query_level) {
++  base::win::ScopedCoMem<wchar_t> current_app;
++  if (FAILED(registration->QueryCurrentDefault(query, query_type, query_level,
++                                               &current_app))) {
++    return std::wstring();
++  }
++  return current_app.get();
++}
++
++// Copies one registry key to another location, preserving the destination and
++// restoring it at destruction.
++class ScopedCopyRegKey {
++ public:
++  // absl::optional requires a public constructor, so the constructor requires
++  // a passkey to ensure callers use Create() to create this object.
++  using ConstructorPassKey = base::PassKey<ScopedCopyRegKey>;
++
++  // Copies |from|\|key| to |to|\|key|, preserving |to|\|key| and restoring it
++  // at destruction. Returns nullopt upon failure of preserving |to|. |to| must
++  // outlive this object.
++  static absl::optional<ScopedCopyRegKey> Create(const base::win::RegKey& from,
++                                                 base::win::RegKey& to,
++                                                 const std::wstring& key) {
++    absl::optional<ScopedCopyRegKey> copy_regkey;
++    std::wstring temp_key_name;
++    base::win::RegKey exists_key(to.Handle(), key.c_str(), KEY_READ);
++    if (exists_key.Valid()) {
++      temp_key_name = base::StrCat(
++          {L"Temp-", base::ASCIIToWide(
++                         base::Uuid::GenerateRandomV4().AsLowercaseString())});
++      LONG result =
++          RegRenameKey(to.Handle(), key.c_str(), temp_key_name.c_str());
++      if (result != ERROR_SUCCESS) {
++        ADD_FAILURE() << "Registry Initial Rename Failed " << result;
++        return copy_regkey;
++      }
++    }
++
++    base::win::RegKey orig_key(from.Handle(), key.c_str(), KEY_READ);
++    base::win::RegKey dest_key(to.Handle(), key.c_str(), KEY_WRITE);
++    CopyRecursively(orig_key, dest_key);
++    copy_regkey.emplace(to, key, temp_key_name, ConstructorPassKey());
++    return copy_regkey;
++  }
++
++  // |to| must outlive this object.
++  ScopedCopyRegKey(base::win::RegKey& to,
++                   const std::wstring& key,
++                   const std::wstring& temp_key_name,
++                   ConstructorPassKey passkey)
++      : to_(to), key_(key), temp_key_name_(temp_key_name) {}
++
++  ~ScopedCopyRegKey() {
++    to_->DeleteKey(key_.c_str());
++
++    if (!temp_key_name_.empty()) {
++      LONG result =
++          RegRenameKey(to_->Handle(), temp_key_name_.c_str(), key_.c_str());
++      if (result != ERROR_SUCCESS)
++        ADD_FAILURE() << "Registry Restore Rename Failed " << result;
++    }
++  }
++
++ private:
++  static void CopyRecursively(const base::win::RegKey& from,
++                              base::win::RegKey& to) {
++    for (base::win::RegistryValueIterator value_iter(from.Handle(), L"");
++         value_iter.Valid(); ++value_iter) {
++      to.WriteValue(value_iter.Name(), value_iter.Value(),
++                    value_iter.ValueSize(), value_iter.Type());
++    }
++
++    for (base::win::RegistryKeyIterator key_iter(from.Handle(), L"");
++         key_iter.Valid(); ++key_iter) {
++      const wchar_t* subkey_name = key_iter.Name();
++      base::win::RegKey orig_key(from.Handle(), subkey_name, KEY_READ);
++      base::win::RegKey dest_key(to.Handle(), subkey_name, KEY_WRITE);
++      CopyRecursively(orig_key, dest_key);
++    }
++  }
++
++  // This RegKey must outlive this class.
++  const raw_ref<base::win::RegKey> to_;
++  const std::wstring key_;
++  const std::wstring temp_key_name_;
++};
++
++}  // namespace
++
++TEST(ShellUtilInteractiveTest, MakeChromeDefaultDirectly) {
++  base::win::AssertComInitialized();
++
++  base::ScopedTempDir temp_dir;
++  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
++  // Saving the underlying HKCU\Software\Classes to forward reads from HKCR.
++  base::win::RegKey original_hkcu_classes(
++      HKEY_CURRENT_USER, L"Software\\Classes", KEY_READ | KEY_WRITE);
++  registry_util::RegistryOverrideManager registry_overrides;
++  ASSERT_NO_FATAL_FAILURE(
++      registry_overrides.OverrideRegistry(HKEY_CURRENT_USER));
++
++  Microsoft::WRL::ComPtr<IApplicationAssociationRegistration> registration;
++  ASSERT_HRESULT_SUCCEEDED(
++      ::CoCreateInstance(CLSID_ApplicationAssociationRegistration, nullptr,
++                         CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&registration)));
++
++  // IApplicationAssociationRegistration::SetAppAsDefault only works for
++  // "MSEdgeHTM" for http, https, .htm, and .html on Win10+ and serves as a
++  // convenient initial environment setup for this test.
++  //
++  // However, some environments may not have MSEdgeHTM available, so the checks
++  // below simply check that the current default isn't the prog id for testing,
++  // which is sufficient for this test.
++  ASSERT_HRESULT_SUCCEEDED(
++      registration->SetAppAsDefault(L"MSEdgeHTM", L"http", AT_URLPROTOCOL));
++  ASSERT_HRESULT_SUCCEEDED(
++      registration->SetAppAsDefault(L"MSEdgeHTM", L"https", AT_URLPROTOCOL));
++  ASSERT_HRESULT_SUCCEEDED(
++      registration->SetAppAsDefault(L"MSEdgeHTM", L".htm", AT_FILEEXTENSION));
++  ASSERT_HRESULT_SUCCEEDED(
++      registration->SetAppAsDefault(L"MSEdgeHTM", L".html", AT_FILEEXTENSION));
++
++  base::FilePath chrome_exe(temp_dir.GetPath().Append(installer::kChromeExe));
++  std::wstring prog_id = ShellUtil::GetCurrentProgIdForTesting(chrome_exe);
++
++  ASSERT_NE(prog_id, GetCurrentDefault(registration.Get(), L"http",
++                                       AT_URLPROTOCOL, AL_EFFECTIVE));
++  ASSERT_NE(prog_id, GetCurrentDefault(registration.Get(), L"https",
++                                       AT_URLPROTOCOL, AL_EFFECTIVE));
++  ASSERT_NE(prog_id, GetCurrentDefault(registration.Get(), L".htm",
++                                       AT_FILEEXTENSION, AL_EFFECTIVE));
++  ASSERT_NE(prog_id, GetCurrentDefault(registration.Get(), L".html",
++                                       AT_FILEEXTENSION, AL_EFFECTIVE));
++
++#if BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
++  ASSERT_FALSE(ShellUtil::MakeChromeDefaultDirectly(ShellUtil::CURRENT_USER,
++                                                    chrome_exe, false));
++#else
++  ASSERT_TRUE(ShellUtil::MakeChromeDefaultDirectly(ShellUtil::CURRENT_USER,
++                                                   chrome_exe, false));
++#endif
++
++  // The following may query HKEY_CLASSES_ROOT for the progid, which merges
++  // HKEY_CURERNT_USER and HKEY_LOCAL_MACHINE on the backend and bypasses the
++  // RegistryOverrideManager redirect. This test will copy selected regkeys
++  // to the underlying HKCU if necessary for correct functionality.
++  base::win::RegKey redirected_hkcu_classes(HKEY_CURRENT_USER,
++                                            L"Software\\Classes", KEY_READ);
++  absl::optional<ScopedCopyRegKey> copy_regkey = ScopedCopyRegKey::Create(
++      redirected_hkcu_classes, original_hkcu_classes, prog_id.c_str());
++  ASSERT_TRUE(copy_regkey);
++
++  // If the expectations fail below, the default browser mechanism has changed
++  // and will need to be reexamined.
++  EXPECT_EQ(prog_id, GetCurrentDefault(registration.Get(), L"http",
++                                       AT_URLPROTOCOL, AL_EFFECTIVE));
++  EXPECT_EQ(prog_id, GetCurrentDefault(registration.Get(), L"https",
++                                       AT_URLPROTOCOL, AL_EFFECTIVE));
++  EXPECT_EQ(prog_id, GetCurrentDefault(registration.Get(), L".htm",
++                                       AT_FILEEXTENSION, AL_EFFECTIVE));
++  EXPECT_EQ(prog_id, GetCurrentDefault(registration.Get(), L".html",
++                                       AT_FILEEXTENSION, AL_EFFECTIVE));
++}
+diff --git a/chrome/installer/util/shell_util_unittest.cc b/chrome/installer/util/shell_util_unittest.cc
+index b2762801c52df..7457d5d1b83fa 100644
+--- a/chrome/installer/util/shell_util_unittest.cc
++++ b/chrome/installer/util/shell_util_unittest.cc
+@@ -28,6 +28,7 @@
+ #include "chrome/install_static/install_util.h"
+ #include "chrome/installer/util/install_util.h"
+ #include "chrome/installer/util/util_constants.h"
++#include "testing/gmock/include/gmock/gmock.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace {
+@@ -1524,3 +1525,87 @@ TEST(ShellUtilTest, GetOldUserSpecificRegistrySuffix) {
+   ASSERT_GE(size, 1U);
+   ASSERT_STREQ(user_name, suffix.substr(1).c_str());
+ }
++
++TEST(ShellUtilTest, HashComputationTest) {
++  // Random selection of data to validate hash behavior.
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++                  0xad, 0x02, 0x99, 0xd7, 0xe6, 0xae, 0x58, 0xb2}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0x09dea6a1, 0x4a8fc186, 0xbc7c90a4, 0xca06d9a3}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++                  0xdf, 0x5e, 0xaa, 0x78, 0xb2, 0xad, 0x92, 0x2f, 0x2a, 0xdc,
++                  0xcd, 0xaf, 0xda, 0xd3, 0x4e, 0x86}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0xaf9b175d, 0xcc68a9ce, 0x8f9f7b8b, 0x895cd714}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++                  0xdc, 0x94, 0xa7, 0x6f, 0x94, 0xd7, 0x6c, 0xf6, 0xca, 0x95,
++                  0xc7, 0xf3, 0x54, 0x39, 0xb1, 0xac, 0xb3, 0xa2, 0x7a, 0xa7,
++                  0x6f, 0xbe, 0xb3, 0xe1, 0xbd, 0x42, 0x22, 0xe3}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0xec3767a8, 0x1e115388, 0x94e1a5fc, 0x9217bd7c}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(
++                  std::vector<uint8_t>{0x2e, 0x64, 0x7e, 0x26, 0xab, 0xec, 0xe5,
++                                       0xb4, 0x54, 0x16, 0xb1, 0xa2}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0xc5b56876, 0x472a21c8, 0x642c79f7, 0x7214ae18}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(
++                  std::vector<uint8_t>{0x15, 0xb2, 0xc1, 0x91, 0x5f, 0x8f, 0x12,
++                                       0xad, 0xd4, 0x4c, 0xa7, 0x30}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0xae9a26cd, 0x82769b2e, 0x85ef1ecd, 0x6c94e1a4}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++                  0x9f, 0xf3, 0xdc, 0x20, 0xef, 0xbb, 0x28, 0x29, 0x58, 0x0b,
++                  0xc0, 0xb3, 0x40, 0xa5, 0x30, 0xb2, 0x32, 0x1c, 0x54, 0xf2}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0xe9765ccb, 0x828b33ad, 0x619d1e26, 0x6e3645c9}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++                  0x45, 0xb4, 0xe8, 0x81, 0x65, 0x6f, 0x6c, 0x76}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0x33c1d050, 0x79fdc457, 0xe677ddba, 0x2eb1dcee}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++                  0x04, 0xbb, 0xd6, 0x1a, 0x8d, 0x40, 0xa6, 0xfd,
++                  0x79, 0x80, 0x26, 0xc0, 0xfc, 0x8b, 0x4e, 0xc4,
++                  0x60, 0x0b, 0x44, 0x0e, 0x27, 0x71, 0x0f, 0x57}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0x355884a8, 0x0760d56d, 0xd602215c, 0xe5792b0c}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++                  0x4a, 0xca, 0x02, 0x1f, 0xd4, 0xf0, 0xfd, 0x2c, 0x88, 0x09,
++                  0xee, 0xf6, 0xeb, 0xd9, 0xf4, 0x8b}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{
++                  0xe11db6db, 0x3c2728d2, 0xc65e3481, 0x10d6e545}));
++  EXPECT_THAT(
++      ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{
++          0x9c, 0x05, 0x18, 0x01, 0xb0, 0x92, 0x8c, 0xec, 0x67, 0x6a, 0xd1,
++          0x81, 0xed, 0x6a, 0xb6, 0xf8, 0xad, 0xb0, 0x41, 0xf4, 0x21, 0x34,
++          0x30, 0xca, 0x7f, 0x51, 0x47, 0xc4, 0x1c, 0xcf, 0x06, 0x91}),
++      ::testing::ContainerEq(std::array<uint32_t, 4>{0xec0c887c, 0x36538d64,
++                                                     0x302c1cdf, 0x0fe7c73d}));
++
++  // Invalid data that should hash to zeros.
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{}));
++  EXPECT_THAT(
++      ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{0x00, 0x01}),
++      ::testing::ContainerEq(std::array<uint32_t, 4>{}));
++  EXPECT_THAT(
++      ShellUtil::ComputeHashForTesting(std::vector<uint8_t>{0x00, 0x01, 0x02}),
++      ::testing::ContainerEq(std::array<uint32_t, 4>{}));
++  EXPECT_THAT(ShellUtil::ComputeHashForTesting(
++                  std::vector<uint8_t>{0x00, 0x01, 0x02, 0x03}),
++              ::testing::ContainerEq(std::array<uint32_t, 4>{}));
++}
++
++TEST(ShellUtilTest, UserChoiceHashComputationTest) {
++  // If these tests fail, investigate if the salt changed or if the hash
++  // function changed.
++  EXPECT_EQ(
++      L"EYe0ErlvGho=",
++      ShellUtil::ComputeUserChoiceHashForTesting(
++          L".htm", L"S-1-5-21-2745944652-1798522384-4190209206-1001",
++          L"ChromiumHTM.77HL62E3NQOIRZILVHSWMGHIQE", L"01d88bf3ee5fd000"));
++  EXPECT_EQ(
++      L"w4oUasKJq/Y=",
++      ShellUtil::ComputeUserChoiceHashForTesting(
++          L".html", L"S-1-5-21-2745944652-1798522384-4190209206-1001",
++          L"ChromiumHTM.77HL62E3NQOIRZILVHSWMGHIQE", L"01d88bf3ee5fd000"));
++}
+diff --git a/chrome/test/BUILD.gn b/chrome/test/BUILD.gn
+index 12cfeba973a50..aa3087425e009 100644
+--- a/chrome/test/BUILD.gn
++++ b/chrome/test/BUILD.gn
+@@ -10878,6 +10878,7 @@ if (!is_android && !is_chromeos_device) {
+         "//chrome/browser/os_crypt:test_support",
+         "//chrome/elevation_service:public_headers",
+         "//chrome/install_static:install_static_util",
++        "//chrome/installer/util:interactive_ui_tests",
+         "//chrome/installer/util:strings",
+         "//chrome/windows_services/service_program/test_support",
+         "//third_party/isimpledom",
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index 194d9929d844a..affa4398763b6 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -19604,6 +19604,24 @@
+             ]
+         }
+     ],
++    "Win10UnattendedDefault": [
++        {
++            "platforms": [
++                "windows"
++            ],
++            "experiments": [
++                {
++                    "name": "Default"
++                },
++                {
++                    "name": "Enabled",
++                    "enable_features": [
++                        "Win10UnattendedDefault"
++                    ]
++                }
++            ]
++        }
++    ],
+     "UiaProviderWin": [
+         {
+             "platforms": [
+diff --git a/tools/metrics/histograms/metadata/ui/enums.xml b/tools/metrics/histograms/metadata/ui/enums.xml
+index 4f28b94d60644..ae4544c2abd9e 100644
+--- a/tools/metrics/histograms/metadata/ui/enums.xml
++++ b/tools/metrics/histograms/metadata/ui/enums.xml
+@@ -26603,6 +26603,13 @@ Called by update_debug_scenarios.py.-->
+   <int value="3" label="Other Mode is Default"/>
+ </enum>
+ 
++<enum name="DefaultDirectAttemptResult">
++  <int value="0" label="Succeeded"/>
++  <int value="1" label="Failed at getting the SID"/>
++  <int value="2" label="Failed at finding the salt"/>
++  <int value="3" label="Failed at setting the registry value"/>
++</enum>
++
+ <enum name="OpenLinkAs">
+   <int value="0" label="Open Link as Profile displayed."/>
+   <int value="1" label="Open Link as Profile clicked."/>
+diff --git a/tools/metrics/histograms/metadata/windows/histograms.xml b/tools/metrics/histograms/metadata/windows/histograms.xml
+index 03e30ea9ba434..3c54c6d50721d 100644
+--- a/tools/metrics/histograms/metadata/windows/histograms.xml
++++ b/tools/metrics/histograms/metadata/windows/histograms.xml
+@@ -171,6 +171,17 @@ chromium-metrics-reviews@google.com.
+   </summary>
+ </histogram>
+ 
++<histogram name="Windows.MakeChromeDefaultDirectly.Result"
++    enum="DefaultDirectAttemptResult" expires_after="2024-01-28">
++  <owner>robliao@chromium.org</owner>
++  <owner>davidbienvenu@chromium.org</owner>
++  <summary>
++    Records the outcome of attempting to set the default directly. Recorded when
++    a request to make Chrome default is received and is eligible for the direct
++    path.
++  </summary>
++</histogram>
++
+ <histogram name="Windows.PatchLevel" enum="WindowsPatchLevel"
+     expires_after="never">
+ <!-- expires-never: Needed to measure Windows ecosystem. -->

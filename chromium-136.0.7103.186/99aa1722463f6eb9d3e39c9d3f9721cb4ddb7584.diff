@@ -1,0 +1,124 @@
+diff --git a/content/child/BUILD.gn b/content/child/BUILD.gn
+index f39db3a8730cc..1466965a0a85a 100644
+--- a/content/child/BUILD.gn
++++ b/content/child/BUILD.gn
+@@ -87,7 +87,6 @@ target(link_target_type, "child") {
+       "font_warmup_win.cc",
+       "font_warmup_win.h",
+     ]
+-    libs = [ "dwrite.lib" ]
+   }
+ 
+   if (is_mac) {
+diff --git a/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc b/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc
+index 5708d60caa655..c1d59d29a8ce4 100644
+--- a/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc
++++ b/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc
+@@ -33,18 +33,50 @@ IPC::Sender* g_sender_override = nullptr;
+ // Windows-only DirectWrite support. These warm up the DirectWrite paths
+ // before sandbox lock down to allow Skia access to the Font Manager service.
+ void CreateDirectWriteFactory(IDWriteFactory** factory) {
++  typedef decltype(DWriteCreateFactory)* DWriteCreateFactoryProc;
++  HMODULE dwrite_dll = LoadLibraryW(L"dwrite.dll");
++  // TODO(scottmg): Temporary code to track crash in http://crbug.com/387867.
++  if (!dwrite_dll) {
++    DWORD load_library_get_last_error = GetLastError();
++    base::debug::Alias(&dwrite_dll);
++    base::debug::Alias(&load_library_get_last_error);
++    CHECK(false);
++  }
++
+   // This shouldn't be necessary, but not having this causes breakage in
+   // content_browsertests, and possibly other high-stress cases.
+   PatchServiceManagerCalls();
+ 
+-  CHECK(SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED,
+-                                      __uuidof(IDWriteFactory),
+-                                      reinterpret_cast<IUnknown**>(factory))));
++  DWriteCreateFactoryProc dwrite_create_factory_proc =
++      reinterpret_cast<DWriteCreateFactoryProc>(
++          GetProcAddress(dwrite_dll, "DWriteCreateFactory"));
++  // TODO(scottmg): Temporary code to track crash in http://crbug.com/387867.
++  if (!dwrite_create_factory_proc) {
++    DWORD get_proc_address_get_last_error = GetLastError();
++    base::debug::Alias(&dwrite_create_factory_proc);
++    base::debug::Alias(&get_proc_address_get_last_error);
++    CHECK(false);
++  }
++  CHECK(SUCCEEDED(dwrite_create_factory_proc(
++      DWRITE_FACTORY_TYPE_ISOLATED, __uuidof(IDWriteFactory),
++      reinterpret_cast<IUnknown**>(factory))));
+ }
+ 
+ }  // namespace
+ 
+ void InitializeDWriteFontProxy() {
++  using DWriteCreateFactoryProc = decltype(DWriteCreateFactory)*;
++  HMODULE dwrite_dll = LoadLibraryW(L"dwrite.dll");
++  if (!dwrite_dll)
++    return;
++
++  DWriteCreateFactoryProc dwrite_create_factory_proc =
++      reinterpret_cast<DWriteCreateFactoryProc>(
++          GetProcAddress(dwrite_dll, "DWriteCreateFactory"));
++  // Not finding the DWriteCreateFactory function indicates a corrupt dll.
++  if (!dwrite_create_factory_proc)
++    return;
++
+   TRACE_EVENT0("dwrite,fonts", "InitializeDWriteFontProxy");
+   mswr::ComPtr<IDWriteFactory> factory;
+ 
+diff --git a/ui/gfx/BUILD.gn b/ui/gfx/BUILD.gn
+index 3a2db598daa70..bf496f53cb2e0 100644
+--- a/ui/gfx/BUILD.gn
++++ b/ui/gfx/BUILD.gn
+@@ -358,7 +358,6 @@ component("gfx") {
+     libs = [
+       "setupapi.lib",
+       "dwmapi.lib",
+-      "dwrite.lib",
+     ]
+     public_deps += [ "//components/crash/core/common" ]
+   } else {
+@@ -716,7 +713,6 @@ test("gfx_unittests") {
+       "d2d1.lib",
+       "d3d10_1.lib",
+       "dwmapi.lib",
+-      "dwrite.lib",
+       "imm32.lib",
+       "oleacc.lib",
+     ]
+diff --git a/ui/gfx/win/direct_write.cc b/ui/gfx/win/direct_write.cc
+index bf30f64cc30a7..90fd728d6beef 100644
+--- a/ui/gfx/win/direct_write.cc
++++ b/ui/gfx/win/direct_write.cc
+@@ -18,12 +18,23 @@ namespace gfx {
+ }  // anonymous namespace
+ 
+ void CreateDWriteFactory(IDWriteFactory** factory) {
++  using DWriteCreateFactoryProc = decltype(DWriteCreateFactory)*;
++  HMODULE dwrite_dll = LoadLibraryW(L"dwrite.dll");
++  if (!dwrite_dll)
++    return;
++
++  DWriteCreateFactoryProc dwrite_create_factory_proc =
++      reinterpret_cast<DWriteCreateFactoryProc>(
++          GetProcAddress(dwrite_dll, "DWriteCreateFactory"));
++  // Not finding the DWriteCreateFactory function indicates a corrupt dll.
++  if (!dwrite_create_factory_proc)
++    return;
++
++  // Failure to create the DirectWrite factory indicates a corrupt dll.
+   Microsoft::WRL::ComPtr<IUnknown> factory_unknown;
+-  HRESULT hr =
+-      DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+-                          &factory_unknown);
+-  if (FAILED(hr)) {
+-    base::debug::Alias(&hr);
+-    NOTREACHED();
++  if (FAILED(dwrite_create_factory_proc(DWRITE_FACTORY_TYPE_SHARED,
++                                        __uuidof(IDWriteFactory),
++                                        &factory_unknown))) {
++    return;
+   }
+   factory_unknown.CopyTo(factory);

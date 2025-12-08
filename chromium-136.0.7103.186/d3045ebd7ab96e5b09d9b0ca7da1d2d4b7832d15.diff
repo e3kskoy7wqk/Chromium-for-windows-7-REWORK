@@ -1,0 +1,13 @@
+diff --git a/skia/ext/font_utils.cc b/skia/ext/font_utils.cc
+index 6a7c33e9be101..5903fa0f27420 100644
+--- a/skia/ext/font_utils.cc
++++ b/skia/ext/font_utils.cc
+@@ -10,7 +10,7 @@
+   base::ComponentContextForProcess()->svc()->Connect(provider.NewRequest());
+   return SkFontMgr_New_Fuchsia(std::move(provider));
+ #elif BUILDFLAG(IS_WIN)
+-  return SkFontMgr_New_DirectWrite();
++  return SkFontMgr_New_GDI();
+ #elif defined(SK_FONTMGR_FREETYPE_EMPTY_AVAILABLE)
+   return SkFontMgr_New_Custom_Empty();
+ #else
