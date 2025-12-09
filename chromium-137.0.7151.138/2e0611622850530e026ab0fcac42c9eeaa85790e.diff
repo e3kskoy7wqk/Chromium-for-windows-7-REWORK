@@ -1,0 +1,1174 @@
+diff --git a/media/gpu/windows/d3d11_decoder_configurator.cc b/media/gpu/windows/d3d11_decoder_configurator.cc
+index b1ad5f0a11083..72ab1b47ccfe4 100644
+--- a/media/gpu/windows/d3d11_decoder_configurator.cc
++++ b/media/gpu/windows/d3d11_decoder_configurator.cc
+@@ -25,8 +25,7 @@ namespace {
+ 
+ GUID GetD3D11DecoderGUID(const VideoCodecProfile& profile,
+                          uint8_t bit_depth,
+-                         VideoChromaSampling chroma_sampling,
+-                         ComD3D11Device device) {
++                         VideoChromaSampling chroma_sampling) {
+   switch (profile) {
+     case H264PROFILE_BASELINE:
+     case H264PROFILE_MAIN:
+@@ -60,9 +59,7 @@ GUID GetD3D11DecoderGUID(const VideoCodecProfile& profile,
+     case HEVCPROFILE_MAIN10:
+       return D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10;
+     case HEVCPROFILE_REXT:
+-      return GetHEVCRangeExtensionGUID(
+-          bit_depth, chroma_sampling,
+-          SupportsHEVCRangeExtensionDXVAProfile(device));
++      return GetHEVCRangeExtensionPrivateGUID(bit_depth, chroma_sampling);
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+     default:
+       return {};
+@@ -93,8 +90,7 @@ std::unique_ptr<D3D11DecoderConfigurator> D3D11DecoderConfigurator::Create(
+     uint8_t bit_depth,
+     VideoChromaSampling chroma_sampling,
+     MediaLog* media_log,
+-    bool use_shared_handle,
+-    ComD3D11Device device) {
++    bool use_shared_handle) {
+   // Decoder swap chains do not support shared resources. More info in
+   // https://crbug.com/911847. To enable Kaby Lake+ systems for using shared
+   // handle, we disable decode swap chain support if shared handle is enabled.
+@@ -113,22 +109,12 @@ std::unique_ptr<D3D11DecoderConfigurator> D3D11DecoderConfigurator::Create(
+   }
+ 
+   GUID decoder_guid =
+-      GetD3D11DecoderGUID(config.profile(), bit_depth, chroma_sampling, device);
++      GetD3D11DecoderGUID(config.profile(), bit_depth, chroma_sampling);
+ #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+   // For D3D11/D3D12, 8b/10b-422 HEVC will share 10b-422 GUID no matter
+   // it is defined by Intel or DXVA spec(as part of Windows SDK).
+-  if (decoder_guid == DXVA_ModeHEVC_VLD_Main422_10_Intel ||
+-      decoder_guid == DXVA_ModeHEVC_VLD_Main10_422) {
++  if (decoder_guid == DXVA_ModeHEVC_VLD_Main422_10_Intel) {
+     decoder_dxgi_format = DXGI_FORMAT_Y210;
+-  } else if (decoder_guid == DXVA_ModeHEVC_VLD_Main12) {
+-    constexpr UINT kNVIDIADeviceId = 0x10DE;
+-    ComDXGIDevice dxgi_device;
+-    if (SUCCEEDED(device.As(&dxgi_device)) &&
+-        GetGPUVendorID(dxgi_device) == kNVIDIADeviceId) {
+-      // NVIDIA driver requires output format to be P010 for HEVC 12b420 range
+-      // extension profile.
+-      decoder_dxgi_format = DXGI_FORMAT_P010;
+-    }
+   }
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+   if (decoder_guid == GUID()) {
+diff --git a/media/gpu/windows/d3d11_decoder_configurator.h b/media/gpu/windows/d3d11_decoder_configurator.h
+index d4443a37c943f..04a3b2327dc06 100644
+--- a/media/gpu/windows/d3d11_decoder_configurator.h
++++ b/media/gpu/windows/d3d11_decoder_configurator.h
+@@ -39,8 +39,7 @@ class MEDIA_GPU_EXPORT D3D11DecoderConfigurator {
+       uint8_t bit_depth,
+       VideoChromaSampling chroma_sampling,
+       MediaLog* media_log,
+-      bool use_shared_handle,
+-      ComD3D11Device device);
++      bool use_shared_handle);
+ 
+   bool SupportsDevice(ComD3D11VideoDevice video_device);
+ 
+diff --git a/media/gpu/windows/d3d11_decoder_configurator_unittest.cc b/media/gpu/windows/d3d11_decoder_configurator_unittest.cc
+index f93ac416ea3ff..ee790be215c07 100644
+--- a/media/gpu/windows/d3d11_decoder_configurator_unittest.cc
++++ b/media/gpu/windows/d3d11_decoder_configurator_unittest.cc
+@@ -47,7 +47,7 @@ class D3D11DecoderConfiguratorUnittest : public ::testing::Test {
+     auto media_log = std::make_unique<NullMediaLog>();
+     return D3D11DecoderConfigurator::Create(
+         prefs, workarounds, config, bit_depth, chroma_sampling, media_log.get(),
+-        /*use_shared_handle=*/false, MakeComPtr<D3D11DeviceMock>());
++        false /*use_shared_handle*/);
+   }
+ };
+ 
+diff --git a/media/gpu/windows/d3d11_h265_accelerator.cc b/media/gpu/windows/d3d11_h265_accelerator.cc
+index 5bef218fd0ce3..7047af2b2cfe0 100644
+--- a/media/gpu/windows/d3d11_h265_accelerator.cc
++++ b/media/gpu/windows/d3d11_h265_accelerator.cc
+@@ -11,7 +11,6 @@
+ 
+ #include <algorithm>
+ 
+-#include "base/containers/span.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -56,11 +55,8 @@ D3D11H265Picture::~D3D11H265Picture() {
+ }
+ 
+ D3D11H265Accelerator::D3D11H265Accelerator(D3D11VideoDecoderClient* client,
+-                                           MediaLog* media_log,
+-                                           bool use_dxva_device_for_hevc_rext)
+-    : media_log_(media_log->Clone()),
+-      client_(client),
+-      use_dxva_device_for_hevc_rext_(use_dxva_device_for_hevc_rext) {
++                                           MediaLog* media_log)
++    : media_log_(media_log->Clone()), client_(client) {
+   DCHECK(client_);
+ }
+ 
+@@ -135,216 +131,200 @@ H265DecoderStatus D3D11H265Accelerator::SubmitFrameMetadata(
+ }
+ 
+ void D3D11H265Accelerator::FillPicParamsWithConstants(
+-    DXVA_PicParams_HEVC_Rext* pic_param) {
+-  std::visit(
+-      [&](auto& pic) {
+-        // According to DXVA spec section 2.2, this optional 1-bit flag
+-        // has no meaning when used for CurrPic so always configure to 0.
+-        pic.params.CurrPic.AssociatedFlag = 0;
++    DXVA_PicParams_HEVC_Rext* pic) {
++  // According to DXVA spec section 2.2, this optional 1-bit flag
++  // has no meaning when used for CurrPic so always configure to 0.
++  pic->main.CurrPic.AssociatedFlag = 0;
+ 
+-        // num_tile_columns_minus1 and num_tile_rows_minus1 will only
+-        // be set if tiles are enabled. Set to 0 by default.
+-        pic.params.num_tile_columns_minus1 = 0;
+-        pic.params.num_tile_rows_minus1 = 0;
++  // num_tile_columns_minus1 and num_tile_rows_minus1 will only
++  // be set if tiles are enabled. Set to 0 by default.
++  pic->main.num_tile_columns_minus1 = 0;
++  pic->main.num_tile_rows_minus1 = 0;
+ 
+-        // Host decoder may set this to 1 if sps_max_num_reorder_pics is 0,
+-        // but there is no requirement that NoPicReorderingFlag must be
+-        // derived from it. So we always set it to 0 here.
+-        pic.params.NoPicReorderingFlag = 0;
++  // Host decoder may set this to 1 if sps_max_num_reorder_pics is 0,
++  // but there is no requirement that NoPicReorderingFlag must be
++  // derived from it. So we always set it to 0 here.
++  pic->main.NoPicReorderingFlag = 0;
+ 
+-        // Must be set to 0 in absence of indication whether B slices are used
+-        // or not, and it does not affect the decoding process.
+-        pic.params.NoBiPredFlag = 0;
++  // Must be set to 0 in absence of indication whether B slices are used
++  // or not, and it does not affect the decoding process.
++  pic->main.NoBiPredFlag = 0;
+ 
+-        // Shall be set to 0 and accelerators shall ignore its value.
+-        pic.params.ReservedBits1 = 0;
++  // Shall be set to 0 and accelerators shall ignore its value.
++  pic->main.ReservedBits1 = 0;
+ 
+-        // Bit field added to enable DWORD alignment and should be set to 0.
+-        pic.params.ReservedBits2 = 0;
++  // Bit field added to enable DWORD alignment and should be set to 0.
++  pic->main.ReservedBits2 = 0;
+ 
+-        // Should always be set to 0.
+-        pic.params.ReservedBits3 = 0;
++  // Should always be set to 0.
++  pic->main.ReservedBits3 = 0;
+ 
+-        // Should be set to 0 and ignored by accelerators
+-        pic.params.ReservedBits4 = 0;
++  // Should be set to 0 and ignored by accelerators
++  pic->main.ReservedBits4 = 0;
+ 
+-        // Should always be set to 0.
+-        pic.params.ReservedBits5 = 0;
++  // Should always be set to 0.
++  pic->main.ReservedBits5 = 0;
+ 
+-        // Should always be set to 0.
+-        pic.params.ReservedBits6 = 0;
++  // Should always be set to 0.
++  pic->main.ReservedBits6 = 0;
+ 
+-        // Should always be set to 0.
+-        pic.params.ReservedBits7 = 0;
+-      },
+-      *pic_param);
++  // Should always be set to 0.
++  pic->main.ReservedBits7 = 0;
+ }
+ 
+ #define ARG_SEL(_1, _2, NAME, ...) NAME
+-#define SPS_TO_PP1(a) (pic_param.params).a = sps->a;
+-#define SPS_TO_PPEXT(a) pic_param.a = sps->a;
+-#define SPS_TO_PP2(a, b) (pic_param.params).a = sps->b;
++#define SPS_TO_PP1(a) (pic_param->main).a = sps->a;
++#define SPS_TO_PPEXT(a) pic_param->a = sps->a;
++#define SPS_TO_PP2(a, b) (pic_param->main).a = sps->b;
+ #define SPS_TO_PP(...) ARG_SEL(__VA_ARGS__, SPS_TO_PP2, SPS_TO_PP1)(__VA_ARGS__)
+-void D3D11H265Accelerator::PicParamsFromSPS(
+-    DXVA_PicParams_HEVC_Rext* pic_params,
+-    const H265SPS* sps) {
+-  std::visit(
+-      [&](auto& pic_param) {
+-        // Refer to formula 7-14 and 7-16 of HEVC spec.
+-        int min_cb_log2_size_y =
+-            sps->log2_min_luma_coding_block_size_minus3 + 3;
+-        (pic_param.params).PicWidthInMinCbsY =
+-            sps->pic_width_in_luma_samples >> min_cb_log2_size_y;
+-        (pic_param.params).PicHeightInMinCbsY =
+-            sps->pic_height_in_luma_samples >> min_cb_log2_size_y;
+-        // wFormatAndSequenceInfoFlags from SPS
+-        SPS_TO_PP(chroma_format_idc);
+-        SPS_TO_PP(separate_colour_plane_flag);
+-        SPS_TO_PP(bit_depth_luma_minus8);
+-        SPS_TO_PP(bit_depth_chroma_minus8);
+-        SPS_TO_PP(log2_max_pic_order_cnt_lsb_minus4);
+-
+-        if (sps->profile_tier_level.general_profile_idc == 4) {
+-          is_rext_ = true;
+-        }
+-        // HEVC DXVA spec does not clearly state which slot
+-        // in sps->sps_max_dec_pic_buffering_minus1 should
+-        // be used here. However section A4.1 of HEVC spec
+-        // requires the slot of highest tid to be used for
+-        // indicating the maximum DPB size if level is not
+-        // 8.5.
+-        int highest_tid = sps->sps_max_sub_layers_minus1;
+-        (pic_param.params).sps_max_dec_pic_buffering_minus1 =
+-            sps->sps_max_dec_pic_buffering_minus1[highest_tid];
+-
+-        SPS_TO_PP(log2_min_luma_coding_block_size_minus3);
+-        SPS_TO_PP(log2_diff_max_min_luma_coding_block_size);
+-
+-        // DXVA spec names them differently with HEVC spec.
+-        SPS_TO_PP(log2_min_transform_block_size_minus2,
+-                  log2_min_luma_transform_block_size_minus2);
+-        SPS_TO_PP(log2_diff_max_min_transform_block_size,
+-                  log2_diff_max_min_luma_transform_block_size);
+-
+-        SPS_TO_PP(max_transform_hierarchy_depth_inter);
+-        SPS_TO_PP(max_transform_hierarchy_depth_intra);
+-        SPS_TO_PP(num_short_term_ref_pic_sets);
+-        SPS_TO_PP(num_long_term_ref_pics_sps);
+-
+-        // dwCodingParamToolFlags extracted from SPS
+-        SPS_TO_PP(scaling_list_enabled_flag);
+-        SPS_TO_PP(amp_enabled_flag);
+-        SPS_TO_PP(sample_adaptive_offset_enabled_flag);
+-        SPS_TO_PP(pcm_enabled_flag);
+-
+-        if (sps->pcm_enabled_flag) {
+-          SPS_TO_PP(pcm_sample_bit_depth_luma_minus1);
+-          SPS_TO_PP(pcm_sample_bit_depth_chroma_minus1);
+-          SPS_TO_PP(log2_min_pcm_luma_coding_block_size_minus3);
+-          SPS_TO_PP(log2_diff_max_min_pcm_luma_coding_block_size);
+-          SPS_TO_PP(pcm_loop_filter_disabled_flag);
+-        }
+-        SPS_TO_PP(long_term_ref_pics_present_flag);
+-        SPS_TO_PP(sps_temporal_mvp_enabled_flag);
+-        SPS_TO_PP(strong_intra_smoothing_enabled_flag);
+-
+-        if (sps->sps_range_extension_flag) {
+-          SPS_TO_PPEXT(transform_skip_rotation_enabled_flag);
+-          SPS_TO_PPEXT(transform_skip_context_enabled_flag);
+-          SPS_TO_PPEXT(implicit_rdpcm_enabled_flag);
+-          SPS_TO_PPEXT(explicit_rdpcm_enabled_flag);
+-          SPS_TO_PPEXT(extended_precision_processing_flag);
+-          SPS_TO_PPEXT(intra_smoothing_disabled_flag);
+-          SPS_TO_PPEXT(high_precision_offsets_enabled_flag);
+-          SPS_TO_PPEXT(persistent_rice_adaptation_enabled_flag);
+-          SPS_TO_PPEXT(cabac_bypass_alignment_enabled_flag);
+-        }
+-      },
+-      *pic_params);
++void D3D11H265Accelerator::PicParamsFromSPS(DXVA_PicParams_HEVC_Rext* pic_param,
++                                            const H265SPS* sps) {
++  // Refer to formula 7-14 and 7-16 of HEVC spec.
++  int min_cb_log2_size_y = sps->log2_min_luma_coding_block_size_minus3 + 3;
++  (pic_param->main).PicWidthInMinCbsY =
++      sps->pic_width_in_luma_samples >> min_cb_log2_size_y;
++  (pic_param->main).PicHeightInMinCbsY =
++      sps->pic_height_in_luma_samples >> min_cb_log2_size_y;
++  // wFormatAndSequenceInfoFlags from SPS
++  SPS_TO_PP(chroma_format_idc);
++  SPS_TO_PP(separate_colour_plane_flag);
++  SPS_TO_PP(bit_depth_luma_minus8);
++  SPS_TO_PP(bit_depth_chroma_minus8);
++  SPS_TO_PP(log2_max_pic_order_cnt_lsb_minus4);
++
++  if (sps->profile_tier_level.general_profile_idc == 4) {
++    is_rext_ = true;
++  }
++  // HEVC DXVA spec does not clearly state which slot
++  // in sps->sps_max_dec_pic_buffering_minus1 should
++  // be used here. However section A4.1 of HEVC spec
++  // requires the slot of highest tid to be used for
++  // indicating the maximum DPB size if level is not
++  // 8.5.
++  int highest_tid = sps->sps_max_sub_layers_minus1;
++  (pic_param->main).sps_max_dec_pic_buffering_minus1 =
++      sps->sps_max_dec_pic_buffering_minus1[highest_tid];
++
++  SPS_TO_PP(log2_min_luma_coding_block_size_minus3);
++  SPS_TO_PP(log2_diff_max_min_luma_coding_block_size);
++
++  // DXVA spec names them differently with HEVC spec.
++  SPS_TO_PP(log2_min_transform_block_size_minus2,
++            log2_min_luma_transform_block_size_minus2);
++  SPS_TO_PP(log2_diff_max_min_transform_block_size,
++            log2_diff_max_min_luma_transform_block_size);
++
++  SPS_TO_PP(max_transform_hierarchy_depth_inter);
++  SPS_TO_PP(max_transform_hierarchy_depth_intra);
++  SPS_TO_PP(num_short_term_ref_pic_sets);
++  SPS_TO_PP(num_long_term_ref_pics_sps);
++
++  // dwCodingParamToolFlags extracted from SPS
++  SPS_TO_PP(scaling_list_enabled_flag);
++  SPS_TO_PP(amp_enabled_flag);
++  SPS_TO_PP(sample_adaptive_offset_enabled_flag);
++  SPS_TO_PP(pcm_enabled_flag);
++
++  if (sps->pcm_enabled_flag) {
++    SPS_TO_PP(pcm_sample_bit_depth_luma_minus1);
++    SPS_TO_PP(pcm_sample_bit_depth_chroma_minus1);
++    SPS_TO_PP(log2_min_pcm_luma_coding_block_size_minus3);
++    SPS_TO_PP(log2_diff_max_min_pcm_luma_coding_block_size);
++    SPS_TO_PP(pcm_loop_filter_disabled_flag);
++  }
++  SPS_TO_PP(long_term_ref_pics_present_flag);
++  SPS_TO_PP(sps_temporal_mvp_enabled_flag);
++  SPS_TO_PP(strong_intra_smoothing_enabled_flag);
++
++  if (sps->sps_range_extension_flag) {
++    SPS_TO_PPEXT(transform_skip_rotation_enabled_flag);
++    SPS_TO_PPEXT(transform_skip_context_enabled_flag);
++    SPS_TO_PPEXT(implicit_rdpcm_enabled_flag);
++    SPS_TO_PPEXT(explicit_rdpcm_enabled_flag);
++    SPS_TO_PPEXT(extended_precision_processing_flag);
++    SPS_TO_PPEXT(intra_smoothing_disabled_flag);
++    SPS_TO_PPEXT(high_precision_offsets_enabled_flag);
++    SPS_TO_PPEXT(persistent_rice_adaptation_enabled_flag);
++    SPS_TO_PPEXT(cabac_bypass_alignment_enabled_flag);
++  }
+ }
+ #undef SPS_TO_PP
+ #undef SPS_TO_PPEXT
+ #undef SPS_TO_PP2
+ #undef SPS_TO_PP1
+ 
+-#define PPS_TO_PPEXT(a) pic_param.a = pps->a;
+-#define PPS_TO_PP1(a) (pic_param.params).a = pps->a;
+-#define PPS_TO_PP2(a, b) (pic_param.params).a = pps->b;
++#define PPS_TO_PPEXT(a) pic_param->a = pps->a;
++#define PPS_TO_PP1(a) (pic_param->main).a = pps->a;
++#define PPS_TO_PP2(a, b) (pic_param->main).a = pps->b;
+ #define PPS_TO_PP(...) ARG_SEL(__VA_ARGS__, PPS_TO_PP2, PPS_TO_PP1)(__VA_ARGS__)
+-void D3D11H265Accelerator::PicParamsFromPPS(
+-    DXVA_PicParams_HEVC_Rext* pic_params,
+-    const H265PPS* pps) {
+-  std::visit(
+-      [&](auto& pic_param) {
+-        PPS_TO_PP(num_ref_idx_l0_default_active_minus1);
+-        PPS_TO_PP(num_ref_idx_l1_default_active_minus1);
+-        PPS_TO_PP(init_qp_minus26);
+-
+-        // dwCodingParamToolFlags from PPS
+-        PPS_TO_PP(dependent_slice_segments_enabled_flag);
+-        PPS_TO_PP(output_flag_present_flag);
+-        PPS_TO_PP(num_extra_slice_header_bits);
+-        PPS_TO_PP(sign_data_hiding_enabled_flag);
+-        PPS_TO_PP(cabac_init_present_flag);
+-
+-        // dwCodingSettingPicturePropertyFlags from PPS
+-        PPS_TO_PP(constrained_intra_pred_flag);
+-        PPS_TO_PP(transform_skip_enabled_flag);
+-        PPS_TO_PP(cu_qp_delta_enabled_flag);
+-        PPS_TO_PP(pps_slice_chroma_qp_offsets_present_flag);
+-        PPS_TO_PP(weighted_pred_flag);
+-        PPS_TO_PP(weighted_bipred_flag);
+-        PPS_TO_PP(transquant_bypass_enabled_flag);
+-        PPS_TO_PP(tiles_enabled_flag);
+-        PPS_TO_PP(entropy_coding_sync_enabled_flag);
+-        PPS_TO_PP(uniform_spacing_flag);
+-        if (pps->tiles_enabled_flag) {
+-          PPS_TO_PP(loop_filter_across_tiles_enabled_flag);
+-        }
+-        PPS_TO_PP(pps_loop_filter_across_slices_enabled_flag);
+-        PPS_TO_PP(deblocking_filter_override_enabled_flag);
+-        PPS_TO_PP(pps_deblocking_filter_disabled_flag);
+-        PPS_TO_PP(lists_modification_present_flag);
+-        PPS_TO_PP(slice_segment_header_extension_present_flag);
+-
+-        PPS_TO_PP(pps_cb_qp_offset);
+-        PPS_TO_PP(pps_cr_qp_offset);
+-        if (pps->tiles_enabled_flag) {
+-          PPS_TO_PP(num_tile_columns_minus1);
+-          PPS_TO_PP(num_tile_rows_minus1);
+-          if (!pps->uniform_spacing_flag) {
+-            for (int i = 0; i <= pps->num_tile_columns_minus1; i++) {
+-              PPS_TO_PP(column_width_minus1[i]);
+-            }
+-            for (int j = 0; j <= pps->num_tile_rows_minus1; j++) {
+-              PPS_TO_PP(row_height_minus1[j]);
+-            }
+-          }
+-        }
+-        PPS_TO_PP(diff_cu_qp_delta_depth);
+-        PPS_TO_PP(pps_beta_offset_div2);
+-        PPS_TO_PP(pps_tc_offset_div2);
+-        PPS_TO_PP(log2_parallel_merge_level_minus2);
+-
+-        if (pps->pps_range_extension_flag) {
+-          PPS_TO_PPEXT(cross_component_prediction_enabled_flag);
+-          PPS_TO_PPEXT(chroma_qp_offset_list_enabled_flag);
+-          if (pps->chroma_qp_offset_list_enabled_flag) {
+-            PPS_TO_PPEXT(diff_cu_chroma_qp_offset_depth);
+-            PPS_TO_PPEXT(chroma_qp_offset_list_len_minus1);
+-            for (int i = 0; i <= pps->chroma_qp_offset_list_len_minus1; i++) {
+-              PPS_TO_PPEXT(cb_qp_offset_list[i]);
+-              PPS_TO_PPEXT(cr_qp_offset_list[i]);
+-            }
+-          }
+-          PPS_TO_PPEXT(log2_sao_offset_scale_luma);
+-          PPS_TO_PPEXT(log2_sao_offset_scale_chroma);
+-          if (pps->transform_skip_enabled_flag) {
+-            PPS_TO_PPEXT(log2_max_transform_skip_block_size_minus2);
+-          }
+-        }
+-      },
+-      *pic_params);
++void D3D11H265Accelerator::PicParamsFromPPS(DXVA_PicParams_HEVC_Rext* pic_param,
++                                            const H265PPS* pps) {
++  PPS_TO_PP(num_ref_idx_l0_default_active_minus1);
++  PPS_TO_PP(num_ref_idx_l1_default_active_minus1);
++  PPS_TO_PP(init_qp_minus26);
++
++  // dwCodingParamToolFlags from PPS
++  PPS_TO_PP(dependent_slice_segments_enabled_flag);
++  PPS_TO_PP(output_flag_present_flag);
++  PPS_TO_PP(num_extra_slice_header_bits);
++  PPS_TO_PP(sign_data_hiding_enabled_flag);
++  PPS_TO_PP(cabac_init_present_flag);
++
++  // dwCodingSettingPicturePropertyFlags from PPS
++  PPS_TO_PP(constrained_intra_pred_flag);
++  PPS_TO_PP(transform_skip_enabled_flag);
++  PPS_TO_PP(cu_qp_delta_enabled_flag);
++  PPS_TO_PP(pps_slice_chroma_qp_offsets_present_flag);
++  PPS_TO_PP(weighted_pred_flag);
++  PPS_TO_PP(weighted_bipred_flag);
++  PPS_TO_PP(transquant_bypass_enabled_flag);
++  PPS_TO_PP(tiles_enabled_flag);
++  PPS_TO_PP(entropy_coding_sync_enabled_flag);
++  PPS_TO_PP(uniform_spacing_flag);
++  if (pps->tiles_enabled_flag)
++    PPS_TO_PP(loop_filter_across_tiles_enabled_flag);
++  PPS_TO_PP(pps_loop_filter_across_slices_enabled_flag);
++  PPS_TO_PP(deblocking_filter_override_enabled_flag);
++  PPS_TO_PP(pps_deblocking_filter_disabled_flag);
++  PPS_TO_PP(lists_modification_present_flag);
++  PPS_TO_PP(slice_segment_header_extension_present_flag);
++
++  PPS_TO_PP(pps_cb_qp_offset);
++  PPS_TO_PP(pps_cr_qp_offset);
++  if (pps->tiles_enabled_flag) {
++    PPS_TO_PP(num_tile_columns_minus1);
++    PPS_TO_PP(num_tile_rows_minus1);
++    if (!pps->uniform_spacing_flag) {
++      for (int i = 0; i <= pps->num_tile_columns_minus1; i++) {
++        PPS_TO_PP(column_width_minus1[i]);
++      }
++      for (int j = 0; j <= pps->num_tile_rows_minus1; j++) {
++        PPS_TO_PP(row_height_minus1[j]);
++      }
++    }
++  }
++  PPS_TO_PP(diff_cu_qp_delta_depth);
++  PPS_TO_PP(pps_beta_offset_div2);
++  PPS_TO_PP(pps_tc_offset_div2);
++  PPS_TO_PP(log2_parallel_merge_level_minus2);
++
++  if (pps->pps_range_extension_flag) {
++    PPS_TO_PPEXT(cross_component_prediction_enabled_flag);
++    PPS_TO_PPEXT(chroma_qp_offset_list_enabled_flag);
++    if (pps->chroma_qp_offset_list_enabled_flag) {
++      PPS_TO_PPEXT(diff_cu_chroma_qp_offset_depth);
++      PPS_TO_PPEXT(chroma_qp_offset_list_len_minus1);
++      for (int i = 0; i <= pps->chroma_qp_offset_list_len_minus1; i++) {
++        PPS_TO_PPEXT(cb_qp_offset_list[i]);
++        PPS_TO_PPEXT(cr_qp_offset_list[i]);
++      }
++    }
++    PPS_TO_PPEXT(log2_sao_offset_scale_luma);
++    PPS_TO_PPEXT(log2_sao_offset_scale_chroma);
++    if (pps->transform_skip_enabled_flag) {
++      PPS_TO_PPEXT(log2_max_transform_skip_block_size_minus2);
++    }
++  }
+   return;
+ }
+ #undef PPS_TO_PPEXT
+@@ -354,118 +334,100 @@ void D3D11H265Accelerator::PicParamsFromPPS(
+ #undef ARG_SEL
+ 
+ void D3D11H265Accelerator::PicParamsFromSliceHeader(
+-    DXVA_PicParams_HEVC_Rext* pic_params,
++    DXVA_PicParams_HEVC_Rext* pic_param,
+     const H265SPS* sps,
+     const H265SliceHeader* slice_hdr) {
+-  std::visit(
+-      [&](auto& pic_param) {
+-        // IDR_W_RADL and IDR_N_LP NALUs do not contain st_rps in slice header.
+-        // Otherwise if short_term_ref_pic_set_sps_flag is 1, host decoder
+-        // shall set ucNumDeltaPocsOfRefRpsIdx to 0.
+-        if (slice_hdr->short_term_ref_pic_set_sps_flag) {
+-          pic_param.params.ucNumDeltaPocsOfRefRpsIdx = 0;
+-          pic_param.params.wNumBitsForShortTermRPSInSlice = 0;
+-        } else {
+-          pic_param.params.ucNumDeltaPocsOfRefRpsIdx =
+-              slice_hdr->st_ref_pic_set.rps_idx_num_delta_pocs;
+-          pic_param.params.wNumBitsForShortTermRPSInSlice =
+-              slice_hdr->st_rps_bits;
+-        }
+-        pic_param.params.IrapPicFlag = slice_hdr->irap_pic;
+-        auto nal_unit_type = slice_hdr->nal_unit_type;
+-        pic_param.params.IdrPicFlag = (nal_unit_type == H265NALU::IDR_W_RADL ||
+-                                       nal_unit_type == H265NALU::IDR_N_LP);
+-        pic_param.params.IntraPicFlag = slice_hdr->irap_pic;
+-      },
+-      *pic_params);
++  // IDR_W_RADL and IDR_N_LP NALUs do not contain st_rps in slice header.
++  // Otherwise if short_term_ref_pic_set_sps_flag is 1, host decoder
++  // shall set ucNumDeltaPocsOfRefRpsIdx to 0.
++  if (slice_hdr->short_term_ref_pic_set_sps_flag) {
++    pic_param->main.ucNumDeltaPocsOfRefRpsIdx = 0;
++    pic_param->main.wNumBitsForShortTermRPSInSlice = 0;
++  } else {
++    pic_param->main.ucNumDeltaPocsOfRefRpsIdx =
++        slice_hdr->st_ref_pic_set.rps_idx_num_delta_pocs;
++    pic_param->main.wNumBitsForShortTermRPSInSlice = slice_hdr->st_rps_bits;
++  }
++  pic_param->main.IrapPicFlag = slice_hdr->irap_pic;
++  auto nal_unit_type = slice_hdr->nal_unit_type;
++  pic_param->main.IdrPicFlag = (nal_unit_type == H265NALU::IDR_W_RADL ||
++                                nal_unit_type == H265NALU::IDR_N_LP);
++  pic_param->main.IntraPicFlag = slice_hdr->irap_pic;
+ }
+ 
+-void D3D11H265Accelerator::PicParamsFromPic(
+-    DXVA_PicParams_HEVC_Rext* pic_params,
+-    D3D11H265Picture* pic) {
+-  std::visit(
+-      [&](auto& pic_param) {
+-        pic_param.params.CurrPicOrderCntVal = pic->pic_order_cnt_val_;
+-        pic_param.params.CurrPic.Index7Bits = pic->picture_index_;
+-      },
+-      *pic_params);
++void D3D11H265Accelerator::PicParamsFromPic(DXVA_PicParams_HEVC_Rext* pic_param,
++                                            D3D11H265Picture* pic) {
++  pic_param->main.CurrPicOrderCntVal = pic->pic_order_cnt_val_;
++  pic_param->main.CurrPic.Index7Bits = pic->picture_index_;
+ }
+ 
+ bool D3D11H265Accelerator::PicParamsFromRefLists(
+-    DXVA_PicParams_HEVC_Rext* pic_params,
++    DXVA_PicParams_HEVC_Rext* pic_param,
+     const H265Picture::Vector& ref_pic_set_lt_curr,
+     const H265Picture::Vector& ref_pic_set_st_curr_after,
+     const H265Picture::Vector& ref_pic_set_st_curr_before) {
+   constexpr int kDxvaInvalidRefPicIndex = 0xFF;
+   constexpr unsigned kStLtRpsSize = 8;
+ 
+-  bool ref_check_ok = true;
+-  std::visit(
+-      [&](auto& pic_param) {
+-        std::fill_n(pic_param.params.RefPicSetStCurrBefore, kStLtRpsSize,
+-                    kDxvaInvalidRefPicIndex);
+-        std::fill_n(pic_param.params.RefPicSetStCurrAfter, kStLtRpsSize,
+-                    kDxvaInvalidRefPicIndex);
+-        std::fill_n(pic_param.params.RefPicSetLtCurr, kStLtRpsSize,
+-                    kDxvaInvalidRefPicIndex);
+-        std::copy(ref_frame_pocs_, ref_frame_pocs_ + kMaxRefPicListSize - 1,
+-                  pic_param.params.PicOrderCntValList);
+-
+-        size_t idx = 0;
+-        for (auto& it : ref_pic_set_st_curr_before) {
+-          if (!it) {
+-            continue;
+-          }
+-          auto poc = it->pic_order_cnt_val_;
+-          auto poc_index = poc_index_into_ref_pic_list_[poc];
+-          if (poc_index < 0) {
+-            DLOG(ERROR) << "Invalid index of POC for RefPicSetStCurrBefore.";
+-            ref_check_ok = false;
+-          }
+-          if (idx > kStLtRpsSize - 1) {
+-            DLOG(ERROR) << "Invalid RefPicSetStCurrBefore size.";
+-            ref_check_ok = false;
+-          }
+-          pic_param.params.RefPicSetStCurrBefore[idx++] = poc_index;
+-        }
+-        idx = 0;
+-        for (auto& it : ref_pic_set_st_curr_after) {
+-          if (!it) {
+-            continue;
+-          }
+-          auto poc = it->pic_order_cnt_val_;
+-          auto poc_index = poc_index_into_ref_pic_list_[poc];
+-          if (poc_index < 0) {
+-            DLOG(ERROR) << "Invalid index of POC for RefPicSetStCurrAfter.";
+-            ref_check_ok = false;
+-          }
+-          if (idx > kStLtRpsSize - 1) {
+-            DLOG(ERROR) << "Invalid RefPicSetStCurrAfter size.";
+-            ref_check_ok = false;
+-          }
+-          pic_param.params.RefPicSetStCurrAfter[idx++] = poc_index;
+-        }
+-        idx = 0;
+-        for (auto& it : ref_pic_set_lt_curr) {
+-          if (!it) {
+-            continue;
+-          }
+-          auto poc = it->pic_order_cnt_val_;
+-          auto poc_index = poc_index_into_ref_pic_list_[poc];
+-          if (poc_index < 0) {
+-            DLOG(ERROR) << "Invalid index of POC for RefPicSetLtCurr.";
+-            ref_check_ok = false;
+-          }
+-          if (idx > kStLtRpsSize - 1) {
+-            DLOG(ERROR) << "Invalid RefPicSetLtCurr size.";
+-            ref_check_ok = false;
+-          }
+-          pic_param.params.RefPicSetLtCurr[idx++] = poc_index;
+-        }
+-      },
+-      *pic_params);
+-
+-  return ref_check_ok;
++  std::fill_n(pic_param->main.RefPicSetStCurrBefore, kStLtRpsSize,
++              kDxvaInvalidRefPicIndex);
++  std::fill_n(pic_param->main.RefPicSetStCurrAfter, kStLtRpsSize,
++              kDxvaInvalidRefPicIndex);
++  std::fill_n(pic_param->main.RefPicSetLtCurr, kStLtRpsSize,
++              kDxvaInvalidRefPicIndex);
++  std::copy(ref_frame_pocs_, ref_frame_pocs_ + kMaxRefPicListSize - 1,
++            pic_param->main.PicOrderCntValList);
++
++  size_t idx = 0;
++  for (auto& it : ref_pic_set_st_curr_before) {
++    if (!it)
++      continue;
++    auto poc = it->pic_order_cnt_val_;
++    auto poc_index = poc_index_into_ref_pic_list_[poc];
++    if (poc_index < 0) {
++      DLOG(ERROR) << "Invalid index of POC for RefPicSetStCurrBefore.";
++      return false;
++    }
++    if (idx > kStLtRpsSize - 1) {
++      DLOG(ERROR) << "Invalid RefPicSetStCurrBefore size.";
++      return false;
++    }
++    pic_param->main.RefPicSetStCurrBefore[idx++] = poc_index;
++  }
++  idx = 0;
++  for (auto& it : ref_pic_set_st_curr_after) {
++    if (!it)
++      continue;
++    auto poc = it->pic_order_cnt_val_;
++    auto poc_index = poc_index_into_ref_pic_list_[poc];
++    if (poc_index < 0) {
++      DLOG(ERROR) << "Invalid index of POC for RefPicSetStCurrAfter.";
++      return false;
++    }
++    if (idx > kStLtRpsSize - 1) {
++      DLOG(ERROR) << "Invalid RefPicSetStCurrAfter size.";
++      return false;
++    }
++    pic_param->main.RefPicSetStCurrAfter[idx++] = poc_index;
++  }
++  idx = 0;
++  for (auto& it : ref_pic_set_lt_curr) {
++    if (!it)
++      continue;
++    auto poc = it->pic_order_cnt_val_;
++    auto poc_index = poc_index_into_ref_pic_list_[poc];
++    if (poc_index < 0) {
++      DLOG(ERROR) << "Invalid index of POC for RefPicSetLtCurr.";
++      return false;
++    }
++    if (idx > kStLtRpsSize - 1) {
++      DLOG(ERROR) << "Invalid RefPicSetLtCurr size.";
++      return false;
++    }
++    pic_param->main.RefPicSetLtCurr[idx++] = poc_index;
++  }
++
++  return true;
+ }
+ 
+ H265DecoderStatus D3D11H265Accelerator::SubmitSlice(
+@@ -483,15 +445,7 @@ H265DecoderStatus D3D11H265Accelerator::SubmitSlice(
+     const std::vector<SubsampleEntry>& subsamples) {
+   if (!client_->GetWrapper()->HasPendingBuffer(
+           D3DVideoDecoderWrapper::BufferType::kPictureParameters)) {
+-    DXVA_PicParams_HEVC_Rext pic_param;
+-
+-    if (use_dxva_device_for_hevc_rext_) {
+-      pic_param.emplace<DXVA_PicParams_HEVC_RangeExt>(
+-          DXVA_PicParams_HEVC_RangeExt{});
+-    } else {
+-      pic_param.emplace<DXVA_PicParams_HEVC_Rext_Intel>(
+-          DXVA_PicParams_HEVC_Rext_Intel{});
+-    }
++    DXVA_PicParams_HEVC_Rext pic_param = {};
+ 
+     D3D11H265Picture* d3d11_pic = pic->AsD3D11H265Picture();
+     if (!d3d11_pic) {
+@@ -503,13 +457,8 @@ H265DecoderStatus D3D11H265Accelerator::SubmitSlice(
+     PicParamsFromPPS(&pic_param, pps);
+     PicParamsFromSliceHeader(&pic_param, sps, slice_hdr);
+     PicParamsFromPic(&pic_param, d3d11_pic);
+-
+-    std::visit(
+-        [&](auto& param) {
+-          base::span<DXVA_PicEntry_HEVC>(param.params.RefPicList)
+-              .copy_from(base::span<const DXVA_PicEntry_HEVC>(ref_frame_list_));
+-        },
+-        pic_param);
++    memcpy(pic_param.main.RefPicList, ref_frame_list_,
++           sizeof pic_param.main.RefPicList);
+ 
+     if (!PicParamsFromRefLists(&pic_param, ref_pic_set_lt_curr,
+                                ref_pic_set_st_curr_after,
+@@ -517,23 +466,15 @@ H265DecoderStatus D3D11H265Accelerator::SubmitSlice(
+       return H265DecoderStatus::kFail;
+     }
+ 
+-    std::visit(
+-        [&](auto& param) {
+-          param.params.StatusReportFeedbackNumber =
+-              current_status_report_feedback_num_++;
+-        },
+-        pic_param);
+-
+-    // Determine the size of the selected type.
+-    size_t pic_params_size =
+-        is_rext_ ? (use_dxva_device_for_hevc_rext_
+-                        ? sizeof(DXVA_PicParams_HEVC_RangeExt)
+-                        : sizeof(DXVA_PicParams_HEVC_Rext_Intel))
+-                 : sizeof(DXVA_PicParams_HEVC);
++    pic_param.main.StatusReportFeedbackNumber =
++        current_status_report_feedback_num_++;
++
++    size_t pic_params_size = is_rext_ ? sizeof(DXVA_PicParams_HEVC_Rext)
++                                      : sizeof(DXVA_PicParams_HEVC);
+     auto params_buffer =
+         client_->GetWrapper()->GetPictureParametersBuffer(pic_params_size);
+     // For 420 content the driver may only allow main part picture parameters.
+-    if (is_rext_ && params_buffer.size() < pic_params_size) {
++    if (is_rext_ && params_buffer.size() < sizeof(DXVA_PicParams_HEVC_Rext)) {
+       pic_params_size = sizeof(DXVA_PicParams_HEVC);
+     }
+     if (params_buffer.size() < pic_params_size) {
+@@ -542,13 +483,7 @@ H265DecoderStatus D3D11H265Accelerator::SubmitSlice(
+       return H265DecoderStatus::kFail;
+     }
+ 
+-    std::visit(
+-        [&](const auto& param) {
+-          base::span<uint8_t>(params_buffer.data(), pic_params_size)
+-              .copy_from(base::span<const uint8_t>(
+-                  reinterpret_cast<const uint8_t*>(&param), pic_params_size));
+-        },
+-        pic_param);
++    memcpy(params_buffer.data(), &pic_param, pic_params_size);
+ 
+     if (!params_buffer.Commit()) {
+       return H265DecoderStatus::kFail;
+diff --git a/media/gpu/windows/d3d11_h265_accelerator.h b/media/gpu/windows/d3d11_h265_accelerator.h
+index 10ea192cd5219..9e7bb126ece1a 100644
+--- a/media/gpu/windows/d3d11_h265_accelerator.h
++++ b/media/gpu/windows/d3d11_h265_accelerator.h
+@@ -9,8 +9,6 @@
+ #include <d3d9.h>
+ #include <dxva.h>
+ 
+-#include <variant>
+-
+ #include "base/memory/raw_ptr.h"
+ #include "gpu/command_buffer/service/texture_manager.h"
+ #include "media/base/video_frame.h"
+@@ -28,13 +26,15 @@ constexpr unsigned kMaxRefPicListSize = 15;
+ 
+ class MediaLog;
+ 
+-// The below structures come from Intel platform DDI definition, and they
+-// are Intel specific on legacy platforms.
++// Picture Parameters DXVA buffer struct for Rext/Scc is not specified in DXVA
++// spec. The below structures come from Intel platform DDI definition, so they
++// are currently Intel specific.
+ // For NVidia and AMD platforms supporting HEVC Rext & Scc, it is expected
+-// the standard DXVA devices are used for range extension/Scc decoding.
++// the picture param information included in below structures is sufficient
++// for underlying drivers supporting range extension/Scc.
+ #pragma pack(push, 1)
+ typedef struct {
+-  DXVA_PicParams_HEVC params;
++  DXVA_PicParams_HEVC main;
+ 
+   // HEVC Range Extension. Fields are named the same as in HEVC spec.
+   union {
+@@ -68,10 +68,10 @@ typedef struct {
+   UCHAR log2_max_transform_skip_block_size_minus2;
+   CHAR cb_qp_offset_list[6];  // [-12..12]
+   CHAR cr_qp_offset_list[6];  // [-12..12]
+-} DXVA_PicParams_HEVC_Rext_Intel;
++} DXVA_PicParams_HEVC_Rext;
+ 
+ typedef struct {
+-  DXVA_PicParams_HEVC_Rext_Intel main_rext;
++  DXVA_PicParams_HEVC_Rext main_rext;
+ 
+   // HEVC Screen Content Coding. Fields are named the same as in HEVC spec.
+   union {
+@@ -94,20 +94,12 @@ typedef struct {
+   CHAR pps_act_y_qp_offset_plus5;   // [-7..17]
+   CHAR pps_act_cb_qp_offset_plus5;  // [-7..17]
+   CHAR pps_act_cr_qp_offset_plus3;  // [-9..15]
+-} DXVA_PicParams_HEVC_SCC_Intel;
++} DXVA_PicParams_HEVC_SCC;
+ #pragma pack(pop)
+ 
+-using DXVA_PicParams_HEVC_Rext =
+-    std::variant<DXVA_PicParams_HEVC_Rext_Intel, DXVA_PicParams_HEVC_RangeExt>;
+-
+ class D3D11H265Accelerator : public H265Decoder::H265Accelerator {
+  public:
+-  // When `use_dxva_device_for_hevc_rext` is true, the accelerator will follow
+-  // DXVA spec to submit picture buffers to driver for range extension profile;
+-  // otherwise it will use Intel specific structures to submit picture buffers.
+-  D3D11H265Accelerator(D3D11VideoDecoderClient* client,
+-                       MediaLog* media_log,
+-                       bool use_dxva_device_for_hevc_rext);
++  D3D11H265Accelerator(D3D11VideoDecoderClient* client, MediaLog* media_log);
+ 
+   D3D11H265Accelerator(const D3D11H265Accelerator&) = delete;
+   D3D11H265Accelerator& operator=(const D3D11H265Accelerator&) = delete;
+@@ -185,9 +177,6 @@ class D3D11H265Accelerator : public H265Decoder::H265Accelerator {
+   // If current stream is encoded with range extension profile.
+   bool is_rext_ = false;
+ 
+-  // If range extension is decoded through standard DXVA device.
+-  const bool use_dxva_device_for_hevc_rext_;
+-
+   // For HEVC this number needs to be larger than 1 and different
+   // in each call to Execute().
+   int current_status_report_feedback_num_ = 1;
+diff --git a/media/gpu/windows/d3d11_video_decoder.cc b/media/gpu/windows/d3d11_video_decoder.cc
+index e151c9ea1f953..c6fa1bf36b716 100644
+--- a/media/gpu/windows/d3d11_video_decoder.cc
++++ b/media/gpu/windows/d3d11_video_decoder.cc
+@@ -86,15 +86,6 @@ scoped_refptr<CommandBufferHelper> CreateCommandBufferHelper(
+   return holder->helper;
+ }
+ 
+-#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+-bool ShouldUseDXVADeviceForHEVCRangeExtension(const VideoDecoderConfig& config,
+-                                              ComD3D11Device device) {
+-  return config.profile() == HEVCPROFILE_REXT &&
+-         (base::FeatureList::IsEnabled(kD3D12VideoDecoder) ||
+-          SupportsHEVCRangeExtensionDXVAProfile(device));
+-}
+-#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+-
+ }  // namespace
+ 
+ std::unique_ptr<VideoDecoder> D3D11VideoDecoder::Create(
+@@ -182,11 +173,8 @@ bool D3D11VideoDecoder::InitializeAcceleratedDecoder(
+ #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+   } else if (config.codec() == VideoCodec::kHEVC) {
+     DCHECK(base::FeatureList::IsEnabled(kPlatformHEVCDecoderSupport));
+-    bool use_dxva_device_for_hevc_rext =
+-        ShouldUseDXVADeviceForHEVCRangeExtension(config, device_);
+     accelerated_video_decoder_ = std::make_unique<H265Decoder>(
+-        std::make_unique<D3D11H265Accelerator>(this, media_log_.get(),
+-                                               use_dxva_device_for_hevc_rext),
++        std::make_unique<D3D11H265Accelerator>(this, media_log_.get()),
+         profile_, config.color_space_info());
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+   } else {
+@@ -222,7 +210,7 @@ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
+ 
+   auto decoder_configurator = D3D11DecoderConfigurator::Create(
+       gpu_preferences_, gpu_workarounds_, config_, bit_depth, chroma_sampling_,
+-      media_log_.get(), use_shared_handle_, device_);
++      media_log_.get(), use_shared_handle_);
+   if (!decoder_configurator) {
+     NotifyError(D3D11StatusCode::kDecoderUnsupportedProfile);
+     return false;
+diff --git a/media/gpu/windows/d3d11_video_decoder.h b/media/gpu/windows/d3d11_video_decoder.h
+index 0b4dbeb263139..a9ff0b8fb15d8 100644
+--- a/media/gpu/windows/d3d11_video_decoder.h
++++ b/media/gpu/windows/d3d11_video_decoder.h
+@@ -148,6 +148,9 @@ class MEDIA_GPU_EXPORT D3D11VideoDecoder : public VideoDecoder,
+   // Returns false if the codec is unsupported.
+   bool InitializeAcceleratedDecoder(const VideoDecoderConfig& config);
+ 
++  // Query the video device for a specific decoder ID.
++  bool DeviceHasDecoderID(GUID decoder_guid);
++
+   // Create new PictureBuffers.  Currently, this completes synchronously, but
+   // really should have an async interface since it must do some work on the
+   // gpu main thread.
+diff --git a/media/gpu/windows/d3d12_helpers.cc b/media/gpu/windows/d3d12_helpers.cc
+index 232dc2dec560c..875d1214213d4 100644
+--- a/media/gpu/windows/d3d12_helpers.cc
++++ b/media/gpu/windows/d3d12_helpers.cc
+@@ -147,8 +147,7 @@ GUID GetD3D12VideoDecodeGUID(VideoCodecProfile profile,
+     case HEVCPROFILE_MAIN10:
+       return D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN10;
+     case HEVCPROFILE_REXT:
+-      return GetHEVCRangeExtensionGUID(bitdepth, chroma_sampling,
+-                                       /*use_dxva_device_for_hevc_rext=*/true);
++      return GetHEVCRangeExtensionPrivateGUID(bitdepth, chroma_sampling);
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+     case AV1PROFILE_PROFILE_MAIN:
+       return D3D12_VIDEO_DECODE_PROFILE_AV1_PROFILE0;
+diff --git a/media/gpu/windows/d3d12_helpers_unittest.cc b/media/gpu/windows/d3d12_helpers_unittest.cc
+index 17a807c312f5b..66211accbe347 100644
+--- a/media/gpu/windows/d3d12_helpers_unittest.cc
++++ b/media/gpu/windows/d3d12_helpers_unittest.cc
+@@ -9,8 +9,6 @@
+ 
+ #include "media/gpu/windows/d3d12_helpers.h"
+ 
+-#include <dxva.h>
+-
+ #include <numeric>
+ #include <vector>
+ 
+@@ -130,16 +128,15 @@ TEST_F(D3D12Helpers, GetD3D12VideoDecodeGUID) {
+   EXPECT_EQ(GetD3D12VideoDecodeGUID(HEVCPROFILE_MAIN_STILL_PICTURE, 8,
+                                     VideoChromaSampling::k420),
+             D3D12_VIDEO_DECODE_PROFILE_HEVC_MAIN);
+-  // D3D12 does not support private device GUID.
+   EXPECT_EQ(
+       GetD3D12VideoDecodeGUID(HEVCPROFILE_REXT, 8, VideoChromaSampling::k422),
+-      DXVA_ModeHEVC_VLD_Main10_422);
++      DXVA_ModeHEVC_VLD_Main422_10_Intel);
+   EXPECT_EQ(
+       GetD3D12VideoDecodeGUID(HEVCPROFILE_REXT, 10, VideoChromaSampling::k444),
+-      DXVA_ModeHEVC_VLD_Main10_444);
++      DXVA_ModeHEVC_VLD_Main444_10_Intel);
+   EXPECT_EQ(
+       GetD3D12VideoDecodeGUID(HEVCPROFILE_REXT, 12, VideoChromaSampling::k420),
+-      DXVA_ModeHEVC_VLD_Main12);
++      DXVA_ModeHEVC_VLD_Main12_Intel);
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+ }
+ 
+diff --git a/media/gpu/windows/d3d12_video_decoder_wrapper.cc b/media/gpu/windows/d3d12_video_decoder_wrapper.cc
+index 42a7fa7c08e32..3ada780cdf517 100644
+--- a/media/gpu/windows/d3d12_video_decoder_wrapper.cc
++++ b/media/gpu/windows/d3d12_video_decoder_wrapper.cc
+@@ -11,8 +11,6 @@
+ 
+ #include <Windows.h>
+ 
+-#include <dxva.h>
+-
+ #include "base/check_op.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/notreached.h"
+@@ -375,17 +373,8 @@ std::unique_ptr<D3D12VideoDecoderWrapper> D3D12VideoDecoderWrapper::Create(
+ #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+   // For D3D11/D3D12, 8b/10b-422 HEVC will share 10b-422 GUID no matter
+   // it is defined by Intel or DXVA spec(as part of Windows SDK).
+-  if (guid == DXVA_ModeHEVC_VLD_Main10_422) {
++  if (guid == DXVA_ModeHEVC_VLD_Main422_10_Intel) {
+     decode_format = DXGI_FORMAT_Y210;
+-  } else if (guid == DXVA_ModeHEVC_VLD_Main12) {
+-    constexpr UINT kNVIDIADeviceId = 0x10DE;
+-    ComDXGIDevice dxgi_device;
+-    if (SUCCEEDED(video_device.As(&dxgi_device)) &&
+-        GetGPUVendorID(dxgi_device) == kNVIDIADeviceId) {
+-      // NVIDIA driver requires output format to be P010 for HEVC 12b420 range
+-      // extension profile.
+-      decode_format = DXGI_FORMAT_P010;
+-    }
+   }
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+ 
+diff --git a/media/gpu/windows/supported_profile_helpers.cc b/media/gpu/windows/supported_profile_helpers.cc
+index 498b7cf598e12..a307d46c0d9bd 100644
+--- a/media/gpu/windows/supported_profile_helpers.cc
++++ b/media/gpu/windows/supported_profile_helpers.cc
+@@ -171,66 +171,37 @@ SupportedResolutionRange GetResolutionsForGUID(
+ }  // namespace
+ 
+ #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+-const struct HEVCProfileGUID {
+-  uint8_t bitdepth;
+-  VideoChromaSampling chroma_sampling;
+-  GUID private_guid;
+-  GUID public_guid;
+-} kHEVCProfileGUIDs[] = {
+-    // Use main profile GUID for 8b-420 range extension. Ideally we should use
+-    // DXVA_ModeHEVC_VLD_Main10_Ext, but not all devices support it.
+-    {8, VideoChromaSampling::k420, DXVA_ModeHEVC_VLD_Main_Intel,
+-     DXVA_ModeHEVC_VLD_Main},
+-    // 8b-422 uses same device GUID as 10b-422.
+-    {8, VideoChromaSampling::k422, DXVA_ModeHEVC_VLD_Main422_10_Intel,
+-     DXVA_ModeHEVC_VLD_Main10_422},
+-    {8, VideoChromaSampling::k444, DXVA_ModeHEVC_VLD_Main444_Intel,
+-     DXVA_ModeHEVC_VLD_Main_444},
+-    // Use main10 profile GUID for 10b-420 range extension. Ideally we should
+-    // use DXVA_ModeHEVC_VLD_Main10_Ext, but not all devices support it.
+-    {10, VideoChromaSampling::k420, DXVA_ModeHEVC_VLD_Main10_Intel,
+-     DXVA_ModeHEVC_VLD_Main10},
+-    {10, VideoChromaSampling::k422, DXVA_ModeHEVC_VLD_Main422_10_Intel,
+-     DXVA_ModeHEVC_VLD_Main10_422},
+-    {10, VideoChromaSampling::k444, DXVA_ModeHEVC_VLD_Main444_10_Intel,
+-     DXVA_ModeHEVC_VLD_Main10_444},
+-    {12, VideoChromaSampling::k420, DXVA_ModeHEVC_VLD_Main12_Intel,
+-     DXVA_ModeHEVC_VLD_Main12},
+-    {12, VideoChromaSampling::k422, DXVA_ModeHEVC_VLD_Main422_12_Intel,
+-     DXVA_ModeHEVC_VLD_Main12_422},
+-    {12, VideoChromaSampling::k444, DXVA_ModeHEVC_VLD_Main444_12_Intel,
+-     DXVA_ModeHEVC_VLD_Main12_444},
+-};
+-
+-GUID GetHEVCRangeExtensionGUID(uint8_t bitdepth,
+-                               VideoChromaSampling chroma_sampling,
+-                               bool use_dxva_device_for_hevc_rext) {
+-  for (const auto& entry : kHEVCProfileGUIDs) {
+-    if (entry.bitdepth == bitdepth &&
+-        entry.chroma_sampling == chroma_sampling) {
+-      return use_dxva_device_for_hevc_rext ? entry.public_guid
+-                                           : entry.private_guid;
++GUID GetHEVCRangeExtensionPrivateGUID(uint8_t bitdepth,
++                                      VideoChromaSampling chroma_sampling) {
++  if (bitdepth == 8) {
++    if (chroma_sampling == VideoChromaSampling::k420) {
++      return DXVA_ModeHEVC_VLD_Main_Intel;
++    } else if (chroma_sampling == VideoChromaSampling::k422) {
++      // For D3D11/D3D12, 8b/10b-422 HEVC will share 10b-422 GUID no matter
++      // it is defined by Intel or DXVA spec(as part of Windows SDK).
++      return DXVA_ModeHEVC_VLD_Main422_10_Intel;
++    } else if (chroma_sampling == VideoChromaSampling::k444) {
++      return DXVA_ModeHEVC_VLD_Main444_Intel;
+     }
+-  }
+-  return {};
+-}
+ 
+-bool SupportsHEVCRangeExtensionDXVAProfile(ComD3D11Device device) {
+-  ComD3D11VideoDevice video_device;
+-  if (device && SUCCEEDED(device.As(&video_device))) {
+-    for (UINT i = video_device->GetVideoDecoderProfileCount(); i--;) {
+-      GUID profile = {};
+-      if (SUCCEEDED(video_device->GetVideoDecoderProfile(i, &profile))) {
+-        if (profile == DXVA_ModeHEVC_VLD_Main10_422 ||
+-            profile == DXVA_ModeHEVC_VLD_Main10_444 ||
+-            profile == DXVA_ModeHEVC_VLD_Main12_422 ||
+-            profile == DXVA_ModeHEVC_VLD_Main12_444) {
+-          return true;
+-        }
+-      }
++  } else if (bitdepth == 10) {
++    if (chroma_sampling == VideoChromaSampling::k420) {
++      return DXVA_ModeHEVC_VLD_Main10_Intel;
++    } else if (chroma_sampling == VideoChromaSampling::k422) {
++      return DXVA_ModeHEVC_VLD_Main422_10_Intel;
++    } else if (chroma_sampling == VideoChromaSampling::k444) {
++      return DXVA_ModeHEVC_VLD_Main444_10_Intel;
++    }
++  } else if (bitdepth == 12) {
++    if (chroma_sampling == VideoChromaSampling::k420) {
++      return DXVA_ModeHEVC_VLD_Main12_Intel;
++    } else if (chroma_sampling == VideoChromaSampling::k422) {
++      return DXVA_ModeHEVC_VLD_Main422_12_Intel;
++    } else if (chroma_sampling == VideoChromaSampling::k444) {
++      return DXVA_ModeHEVC_VLD_Main444_12_Intel;
+     }
+   }
+-  return false;
++  return {};
+ }
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+ 
+@@ -381,21 +352,14 @@ SupportedResolutionRangeMap GetSupportedD3DVideoDecoderResolutions(
+             supported_resolution;
+         continue;
+       }
+-      // For range extensions only test main10_444 with Y410, and apply
+-      // the same resolution range to other formats to reduce profile
+-      // enumeration time for decoders. The selection of main10 444 is due to
+-      // the fact that IHV drivers' support on this is more common than other
+-      // range extension formats.
+-      // Ideally we should be also testing P016 for 12-bit 4:2:0, for example,
+-      // to get the precise resolution range of 12-bit 4:2:0. Same for other
+-      // range extension formats.
+-      if (profile_id == DXVA_ModeHEVC_VLD_Main10_444 ||
+-          profile_id == DXVA_ModeHEVC_VLD_Main444_10_Intel) {
+-        // Intel private GUID reports the same capability as DXVA GUID, so
+-        // it is fine to override supported resolutions here.
++      // For range extensions only test main10_422 with P010, and apply
++      // the same resolution range to main420 & main10_YUV420. Ideally we
++      // should be also testing against NV12 & Y210 for YUV422, and Y410 for
++      // YUV444 8/10/12 bit.
++      if (profile_id == DXVA_ModeHEVC_VLD_Main422_10_Intel) {
+         supported_resolutions[HEVCPROFILE_REXT] =
+             GetResolutionsForGUID(video_device_wrapper, profile_id,
+-                                  kModernResolutions, DXGI_FORMAT_Y410);
++                                  kModernResolutions, DXGI_FORMAT_P010);
+         continue;
+       }
+       if (profile_id == D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10) {
+@@ -439,21 +403,4 @@ SupportedResolutionRangeMap GetSupportedD3D12VideoDecoderResolutions(
+                                                 workarounds);
+ }
+ 
+-UINT GetGPUVendorID(ComDXGIDevice dxgi_device) {
+-  if (!dxgi_device) {
+-    return 0;
+-  }
+-  ComDXGIAdapter dxgi_adapter;
+-  HRESULT hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  if (FAILED(hr)) {
+-    return 0;
+-  }
+-  DXGI_ADAPTER_DESC desc{};
+-  hr = dxgi_adapter->GetDesc(&desc);
+-  if (FAILED(hr)) {
+-    return 0;
+-  }
+-  return desc.VendorId;
+-}
+-
+ }  // namespace media
+diff --git a/media/gpu/windows/supported_profile_helpers.h b/media/gpu/windows/supported_profile_helpers.h
+index 07c41c61c9a96..36f147f3d885b 100644
+--- a/media/gpu/windows/supported_profile_helpers.h
++++ b/media/gpu/windows/supported_profile_helpers.h
+@@ -118,23 +118,12 @@ DEFINE_GUID(DXVA_ModeHEVC_VLD_Main444_12_Intel,
+             0xc1,
+             0x97);
+ 
+-// Get the GUID for HEVC range extension profile. If
+-// `use_dxva_device_for_hevc_rext` is false, return the Intel specific GUIDs.
+-// Otherwise return the GUID defined in Windows SDK.
++// Get the private GUID for HEVC range extension profile supported by Intel.
+ MEDIA_GPU_EXPORT GUID
+-GetHEVCRangeExtensionGUID(uint8_t bitdepth,
+-                          VideoChromaSampling chroma_sampling,
+-                          bool use_dxva_device_for_hevc_rext);
+-
+-// Check if the device supports HEVC range extension profiles through standard
+-// DXVA devices.
+-MEDIA_GPU_EXPORT bool SupportsHEVCRangeExtensionDXVAProfile(
+-    ComD3D11Device device);
++GetHEVCRangeExtensionPrivateGUID(uint8_t bitdepth,
++                                 VideoChromaSampling chroma_sampling);
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+ 
+-// Get the GPU vendor ID from the DXGI device.
+-MEDIA_GPU_EXPORT UINT GetGPUVendorID(ComDXGIDevice device);
+-
+ // Get the DXGI_FORMAT for the video decoder output texture, according to the
+ // bit depth and chroma sampling format.
+ MEDIA_GPU_EXPORT DXGI_FORMAT

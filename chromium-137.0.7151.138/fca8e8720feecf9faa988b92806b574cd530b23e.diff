@@ -1,0 +1,111 @@
+diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
+index a71603fb1b14b..716b48be1691c 100644
+--- a/build/config/win/BUILD.gn
++++ b/build/config/win/BUILD.gn
+@@ -289,7 +289,7 @@ config("runtime_library") {
+ # manually override this config for their compiles.
+ config("winver") {
+   defines = [
+-    "NTDDI_VERSION=NTDDI_WIN11_GE",
++    "NTDDI_VERSION=NTDDI_WIN10_NI",
+ 
+     # We can't say `=_WIN32_WINNT_WIN10` here because some files do
+     # `#if WINVER < 0x0600` without including windows.h before,
+diff --git a/build/toolchain/win/setup_toolchain.py b/build/toolchain/win/setup_toolchain.py
+index d6598893c06a6..927fce24fcdc6 100644
+--- a/build/toolchain/win/setup_toolchain.py
++++ b/build/toolchain/win/setup_toolchain.py
+@@ -22,7 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+ import gn_helpers
+ 
+ SCRIPT_DIR = os.path.dirname(__file__)
+-SDK_VERSION = '10.0.26100.0'
++SDK_VERSION = '10.0.22621.0'
+ 
+ 
+ def _ExtractImportantEnvironment(output_of_set):
+diff --git a/build/vs_toolchain.py b/build/vs_toolchain.py
+index e0f89a555492c..f0b8bacf57360 100755
+--- a/build/vs_toolchain.py
++++ b/build/vs_toolchain.py
+@@ -59,8 +59,8 @@ from gn_helpers import ToGNString
+ # * docs/windows_build_instructions.md
+ #   Make sure any version numbers in the documentation match the code.
+ #
+-TOOLCHAIN_HASH = '68a20d6dee'
+-SDK_VERSION = '10.0.26100.0'
++TOOLCHAIN_HASH = '7393122652'
++SDK_VERSION = '10.0.22621.0'
+ 
+ # Visual Studio versions are listed in descending order of priority.
+ # The first version is assumed by this script to be the one that is packaged,
+diff --git a/gpu/ipc/common/device_perf_info.mojom b/gpu/ipc/common/device_perf_info.mojom
+index 10be8b089e617..326b53edb7b49 100644
+--- a/gpu/ipc/common/device_perf_info.mojom
++++ b/gpu/ipc/common/device_perf_info.mojom
+@@ -6,7 +6,6 @@ module gpu.mojom;
+ 
+ // Corresponds to D3D_FEATURE_LEVEL in <d3dcommon.h>
+ enum Direct3DFeatureLevel {
+-  k1_0_Generic,
+   k1_0_Core,
+   k9_1,
+   k9_2,
+diff --git a/gpu/ipc/common/device_perf_info_mojom_traits.cc b/gpu/ipc/common/device_perf_info_mojom_traits.cc
+index 1bb3afc2451fd..aef4e0af6b550 100644
+--- a/gpu/ipc/common/device_perf_info_mojom_traits.cc
++++ b/gpu/ipc/common/device_perf_info_mojom_traits.cc
+@@ -14,13 +14,6 @@ gpu::mojom::Direct3DFeatureLevel
+ EnumTraits<gpu::mojom::Direct3DFeatureLevel, D3D_FEATURE_LEVEL>::ToMojom(
+     D3D_FEATURE_LEVEL d3d_feature_level) {
+   switch (d3d_feature_level) {
+-// TODO(crbug.com/362650376): This case is valid only for SDK version
+-// 10.0.26100.0 and up. Include it unconditionally once we start requiring this
+-// version
+-#ifdef NTDDI_WIN11_GE
+-    case D3D_FEATURE_LEVEL_1_0_GENERIC:
+-      return gpu::mojom::Direct3DFeatureLevel::k1_0_Generic;
+-#endif
+     case D3D_FEATURE_LEVEL_1_0_CORE:
+       return gpu::mojom::Direct3DFeatureLevel::k1_0_Core;
+     case D3D_FEATURE_LEVEL_9_1:
+@@ -52,16 +45,6 @@ bool EnumTraits<gpu::mojom::Direct3DFeatureLevel, D3D_FEATURE_LEVEL>::FromMojom(
+     gpu::mojom::Direct3DFeatureLevel input,
+     D3D_FEATURE_LEVEL* out) {
+   switch (input) {
+-    case gpu::mojom::Direct3DFeatureLevel::k1_0_Generic:
+-// TODO(crbug.com/362650376): This case is valid only for SDK version
+-// 10.0.26100.0 and up.
+-#ifdef NTDDI_WIN11_GE
+-      *out = D3D_FEATURE_LEVEL_1_0_GENERIC;
+-      return true;
+-#else
+-      // Should be impossible
+-      return false;
+-#endif
+     case gpu::mojom::Direct3DFeatureLevel::k1_0_Core:
+       *out = D3D_FEATURE_LEVEL_1_0_CORE;
+       return true;
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index cb1cdd6bc96a7..af367c6eb66c8 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -300,10 +300,6 @@ constexpr auto kTouchDownContextResetTimeout = base::Milliseconds(500);
+ // same location as the cursor.
+ constexpr int kSynthesizedMouseMessagesTimeDifference = 500;
+ 
+-// TODO(dloehr): As of SDK version 10.0.26100.0, IsWindowArranged is now
+-// declared in a header file, so we no longer need this version. Remove this
+-// code once the SDK update is finalized.
+-#ifndef NTDDI_WIN11_GE
+ // Returns true if the window is arranged via Snap. For example, the browser
+ // window is snapped via buttons shown when the mouse is hovered over window
+ // maximize button.
+@@ -316,7 +312,6 @@ bool IsWindowArranged(HWND window) {
+           base::win::GetUser32FunctionPointer("IsWindowArranged"));
+   return is_window_arranged_func ? is_window_arranged_func(window) : false;
+ }
+-#endif  // NTDDI_WIN11_GE
+ 
+ }  // namespace
+ 

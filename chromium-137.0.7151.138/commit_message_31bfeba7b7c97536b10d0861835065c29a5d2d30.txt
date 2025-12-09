@@ -1,0 +1,1 @@
+win7dep: Remove pre win10 support in WMI integration    2022/12/16 1:12:49    31bfeba7b7c97536b10d0861835065c29a5d2d30

@@ -1,0 +1,1477 @@
+diff --git a/ui/base/BUILD.gn b/ui/base/BUILD.gn
+index 1147a6e268f64..cec02efe6a5d1 100644
+--- a/ui/base/BUILD.gn
++++ b/ui/base/BUILD.gn
+@@ -1156,6 +1156,7 @@ test("ui_base_unittests") {
+     ]
+     if (is_win) {
+       sources += [
++        "ime/win/imm32_manager_unittest.cc",
+         "ime/win/on_screen_keyboard_display_manager_unittest.cc",
+         "ime/win/tsf_input_scope_unittest.cc",
+         "ime/win/tsf_text_store_unittest.cc",
+diff --git a/ui/base/ime/init/input_method_factory.cc b/ui/base/ime/init/input_method_factory.cc
+index c99fd18826153..5d4a41a4d64c2 100644
+--- a/ui/base/ime/init/input_method_factory.cc
++++ b/ui/base/ime/init/input_method_factory.cc
+@@ -13,6 +13,7 @@
+ #include "ui/gfx/switches.h"
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "ui/base/ime/win/input_method_win_imm32.h"
+ #include "ui/base/ime/win/input_method_win_tsf.h"
+ #elif BUILDFLAG(IS_APPLE)
+ #include "ui/base/ime/mac/input_method_mac.h"
+@@ -53,7 +54,12 @@ std::unique_ptr<InputMethod> CreateInputMethod(
+     return base::WrapUnique(new MockInputMethod(ime_key_event_dispatcher));
+ 
+ #if BUILDFLAG(IS_WIN)
+-  return std::make_unique<InputMethodWinTSF>(ime_key_event_dispatcher, widget);
++  if (base::FeatureList::IsEnabled(features::kTSFImeSupport)) {
++    return std::make_unique<InputMethodWinTSF>(ime_key_event_dispatcher,
++                                               widget);
++  }
++  return std::make_unique<InputMethodWinImm32>(ime_key_event_dispatcher,
++                                               widget);
+ #elif BUILDFLAG(IS_APPLE)
+   return std::make_unique<InputMethodMac>(ime_key_event_dispatcher);
+ #elif BUILDFLAG(IS_OZONE)
+diff --git a/ui/base/ime/win/BUILD.gn b/ui/base/ime/win/BUILD.gn
+index 61d1e9b662430..1a2a40db4dae5 100644
+--- a/ui/base/ime/win/BUILD.gn
++++ b/ui/base/ime/win/BUILD.gn
+@@ -7,8 +7,12 @@ assert(is_win)
+ component("win") {
+   output_name = "ui_base_ime_win"
+   sources = [
++    "imm32_manager.cc",
++    "imm32_manager.h",
+     "input_method_win_base.cc",
+     "input_method_win_base.h",
++    "input_method_win_imm32.cc",
++    "input_method_win_imm32.h",
+     "input_method_win_tsf.cc",
+     "input_method_win_tsf.h",
+     "mock_tsf_bridge.cc",
+@@ -37,4 +41,8 @@ component("win") {
+     "//ui/base",
+     "//ui/display",
+   ]
++
++  libs = [ "imm32.lib" ]
++
++  ldflags = [ "/DELAYLOAD:imm32.dll" ]
+ }
+diff --git a/ui/base/ime/win/imm32_manager.cc b/ui/base/ime/win/imm32_manager.cc
+new file mode 100644
+index 0000000000000..af0e4318d606e
+--- /dev/null
++++ b/ui/base/ime/win/imm32_manager.cc
+@@ -0,0 +1,487 @@
++// Copyright 2013 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/base/ime/win/imm32_manager.h"
++
++#include <stdint.h>
++
++#include <memory>
++#include <string>
++
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/ime/composition_text.h"
++
++///////////////////////////////////////////////////////////////////////////////
++// IMM32Manager
++
++namespace {
++
++// Determines whether or not the given attribute represents a target
++// (a.k.a. a selection).
++bool IsTargetAttribute(char attribute) {
++  return (attribute == ATTR_TARGET_CONVERTED ||
++          attribute == ATTR_TARGET_NOTCONVERTED);
++}
++
++// Helper function for IMM32Manager::GetCompositionInfo() method, to get the
++// target range that's selected by the user in the current composition string.
++void GetCompositionTargetRange(HIMC imm_context, int* target_start,
++                               int* target_end) {
++  int attribute_size = ::ImmGetCompositionString(imm_context, GCS_COMPATTR,
++                                                 NULL, 0);
++  if (attribute_size > 0) {
++    int start = 0;
++    int end = 0;
++    std::unique_ptr<char[]> attribute_data(new char[attribute_size]);
++    if (attribute_data.get()) {
++      ::ImmGetCompositionString(imm_context, GCS_COMPATTR,
++                                attribute_data.get(), attribute_size);
++      for (start = 0; start < attribute_size; ++start) {
++        if (IsTargetAttribute(attribute_data[start]))
++          break;
++      }
++      for (end = start; end < attribute_size; ++end) {
++        if (!IsTargetAttribute(attribute_data[end]))
++          break;
++      }
++    }
++    *target_start = start;
++    *target_end = end;
++  }
++}
++
++// Helper function for IMM32Manager::GetCompositionInfo() method, to get
++// underlines information of the current composition string.
++void GetImeTextSpans(HIMC imm_context,
++                     int target_start,
++                     int target_end,
++                     ui::ImeTextSpans* ime_text_spans) {
++  int clause_size = ::ImmGetCompositionString(imm_context, GCS_COMPCLAUSE,
++                                              NULL, 0);
++  int clause_length = clause_size / sizeof(uint32_t);
++  if (clause_length) {
++    std::unique_ptr<uint32_t[]> clause_data(new uint32_t[clause_length]);
++    if (clause_data.get()) {
++      ::ImmGetCompositionString(imm_context, GCS_COMPCLAUSE,
++                                clause_data.get(), clause_size);
++      for (int i = 0; i < clause_length - 1; ++i) {
++        ui::ImeTextSpan ime_text_span;
++        ime_text_span.start_offset = clause_data[i];
++        ime_text_span.end_offset = clause_data[i + 1];
++        ime_text_span.thickness = ui::ImeTextSpan::Thickness::kThin;
++        ime_text_span.background_color = SK_ColorTRANSPARENT;
++
++        // Use thick underline for the target clause.
++        if (ime_text_span.start_offset >= static_cast<uint32_t>(target_start) &&
++            ime_text_span.end_offset <= static_cast<uint32_t>(target_end)) {
++          ime_text_span.thickness = ui::ImeTextSpan::Thickness::kThick;
++        }
++        ime_text_spans->push_back(ime_text_span);
++      }
++    }
++  }
++}
++
++}  // namespace
++
++namespace ui {
++
++IMM32Manager::IMM32Manager()
++    : is_composing_(false),
++      input_language_id_(LANG_USER_DEFAULT),
++      system_caret_(false),
++      caret_rect_(-1, -1, 0, 0),
++      use_composition_window_(false) {
++}
++
++IMM32Manager::~IMM32Manager() {
++}
++
++void IMM32Manager::SetInputLanguage() {
++  // Retrieve the current input language from the system's keyboard layout.
++  // Using GetKeyboardLayoutName instead of GetKeyboardLayout, because
++  // the language from GetKeyboardLayout is the language under where the
++  // keyboard layout is installed. And the language from GetKeyboardLayoutName
++  // indicates the language of the keyboard layout itself.
++  // See crbug.com/344834.
++  WCHAR keyboard_layout[KL_NAMELENGTH];
++  if (::GetKeyboardLayoutNameW(keyboard_layout)) {
++    input_language_id_ =
++        static_cast<LANGID>(
++            wcstol(&keyboard_layout[KL_NAMELENGTH >> 1], nullptr, 16));
++  } else {
++    input_language_id_ = 0x0409;  // Fallback to en-US.
++  }
++}
++
++void IMM32Manager::CreateImeWindow(HWND window_handle) {
++  // When a user disables TSF (Text Service Framework) and CUAS (Cicero
++  // Unaware Application Support), Chinese IMEs somehow ignore function calls
++  // to ::ImmSetCandidateWindow(), i.e. they do not move their candidate
++  // window to the position given as its parameters, and use the position
++  // of the current system caret instead, i.e. it uses ::GetCaretPos() to
++  // retrieve the position of their IME candidate window.
++  // Therefore, we create a temporary system caret for Chinese IMEs and use
++  // it during this input context.
++  // Since some third-party Japanese IME also uses ::GetCaretPos() to determine
++  // their window position, we also create a caret for Japanese IMEs.
++  if (PRIMARYLANGID(input_language_id_) == LANG_CHINESE ||
++      PRIMARYLANGID(input_language_id_) == LANG_JAPANESE) {
++    if (!system_caret_) {
++      if (::CreateCaret(window_handle, NULL, 1, 1)) {
++        system_caret_ = true;
++      }
++    }
++  }
++  // Restore the positions of the IME windows.
++  UpdateImeWindow(window_handle);
++}
++
++LRESULT IMM32Manager::SetImeWindowStyle(HWND window_handle, UINT message,
++                                    WPARAM wparam, LPARAM lparam,
++                                    BOOL* handled) {
++  // To prevent the IMM (Input Method Manager) from displaying the IME
++  // composition window, Update the styles of the IME windows and EXPLICITLY
++  // call ::DefWindowProc() here.
++  // NOTE(hbono): We can NEVER let WTL call ::DefWindowProc() when we update
++  // the styles of IME windows because the 'lparam' variable is a local one
++  // and all its updates disappear in returning from this function, i.e. WTL
++  // does not call ::DefWindowProc() with our updated 'lparam' value but call
++  // the function with its original value and over-writes our window styles.
++  *handled = TRUE;
++  lparam &= ~ISC_SHOWUICOMPOSITIONWINDOW;
++  return ::DefWindowProc(window_handle, message, wparam, lparam);
++}
++
++void IMM32Manager::DestroyImeWindow(HWND window_handle) {
++  // Destroy the system caret if we have created for this IME input context.
++  if (system_caret_) {
++    ::DestroyCaret();
++    system_caret_ = false;
++  }
++}
++
++void IMM32Manager::MoveImeWindow(HWND window_handle, HIMC imm_context) {
++  // Does nothing when the target window has no input focus. This is important
++  // because the renderer may issue SelectionBoundsChanged event even when it
++  // has no input focus. (e.g. the page update caused by incremental search.)
++  // So this event should be ignored when the |window_handle| no longer has the
++  // input focus.
++  if (GetFocus() != window_handle)
++    return;
++
++  int x = caret_rect_.x();
++  int y = caret_rect_.y();
++
++  const int kCaretMargin = 1;
++  if (!use_composition_window_ &&
++      PRIMARYLANGID(input_language_id_) == LANG_CHINESE) {
++    // As written in a comment in IMM32Manager::CreateImeWindow(),
++    // Chinese IMEs ignore function calls to ::ImmSetCandidateWindow()
++    // when a user disables TSF (Text Service Framework) and CUAS (Cicero
++    // Unaware Application Support).
++    // On the other hand, when a user enables TSF and CUAS, Chinese IMEs
++    // ignore the position of the current system caret and uses the
++    // parameters given to ::ImmSetCandidateWindow() with its 'dwStyle'
++    // parameter CFS_CANDIDATEPOS.
++    // Therefore, we do not only call ::ImmSetCandidateWindow() but also
++    // set the positions of the temporary system caret if it exists.
++    CANDIDATEFORM candidate_position = {0, CFS_CANDIDATEPOS, {x, y},
++                                        {0, 0, 0, 0}};
++    ::ImmSetCandidateWindow(imm_context, &candidate_position);
++  }
++  if (system_caret_) {
++    switch (PRIMARYLANGID(input_language_id_)) {
++      case LANG_JAPANESE:
++        ::SetCaretPos(x, y + caret_rect_.height());
++        break;
++      default:
++        ::SetCaretPos(x, y);
++        break;
++    }
++  }
++  if (use_composition_window_) {
++    // Moves the composition text window.
++    COMPOSITIONFORM cf = {CFS_POINT, {x, y}};
++    ::ImmSetCompositionWindow(imm_context, &cf);
++    // Don't need to set the position of candidate window.
++    return;
++  }
++
++  if (PRIMARYLANGID(input_language_id_) == LANG_KOREAN) {
++    // Chinese IMEs and Japanese IMEs require the upper-left corner of
++    // the caret to move the position of their candidate windows.
++    // On the other hand, Korean IMEs require the lower-left corner of the
++    // caret to move their candidate windows.
++    y += kCaretMargin;
++  }
++  // Japanese IMEs and Korean IMEs also use the rectangle given to
++  // ::ImmSetCandidateWindow() with its 'dwStyle' parameter CFS_EXCLUDE
++  // to move their candidate windows when a user disables TSF and CUAS.
++  // Therefore, we also set this parameter here.
++  CANDIDATEFORM exclude_rectangle = {0, CFS_EXCLUDE, {x, y},
++      {x, y, x + caret_rect_.width(), y + caret_rect_.height()}};
++  ::ImmSetCandidateWindow(imm_context, &exclude_rectangle);
++}
++
++void IMM32Manager::UpdateImeWindow(HWND window_handle) {
++  // Just move the IME window attached to the given window.
++  if (caret_rect_.x() >= 0 && caret_rect_.y() >= 0) {
++    HIMC imm_context = ::ImmGetContext(window_handle);
++    if (imm_context) {
++      MoveImeWindow(window_handle, imm_context);
++      ::ImmReleaseContext(window_handle, imm_context);
++    }
++  }
++}
++
++void IMM32Manager::CleanupComposition(HWND window_handle) {
++  // Notify the IMM attached to the given window to complete the ongoing
++  // composition, (this case happens when the given window is de-activated
++  // while composing a text and re-activated), and reset the omposition status.
++  if (is_composing_) {
++    HIMC imm_context = ::ImmGetContext(window_handle);
++    if (imm_context) {
++      ::ImmNotifyIME(imm_context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
++      ::ImmReleaseContext(window_handle, imm_context);
++    }
++    ResetComposition(window_handle);
++  }
++}
++
++void IMM32Manager::ResetComposition(HWND window_handle) {
++  // Currently, just reset the composition status.
++  is_composing_ = false;
++}
++
++void IMM32Manager::CompleteComposition(HWND window_handle, HIMC imm_context) {
++  // We have to confirm there is an ongoing composition before completing it.
++  // This is for preventing some IMEs from getting confused while completing an
++  // ongoing composition even if they do not have any ongoing compositions.)
++  if (is_composing_) {
++    ::ImmNotifyIME(imm_context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
++    ResetComposition(window_handle);
++  }
++}
++
++void IMM32Manager::GetCompositionInfo(HIMC imm_context,
++                                      LPARAM lparam,
++                                      CompositionText* composition) {
++  // We only care about GCS_COMPATTR, GCS_COMPCLAUSE and GCS_CURSORPOS, and
++  // convert them into composition underlines and selection range respectively.
++  composition->ime_text_spans.clear();
++
++  int length = static_cast<int>(composition->text.length());
++
++  // Find out the range selected by the user.
++  int target_start = length;
++  int target_end = length;
++  if (lparam & GCS_COMPATTR)
++    GetCompositionTargetRange(imm_context, &target_start, &target_end);
++
++  // Retrieve the selection range information. If CS_NOMOVECARET is specified,
++  // that means the cursor should not be moved, then we just place the caret at
++  // the beginning of the composition string. Otherwise we should honour the
++  // GCS_CURSORPOS value if it's available.
++  // TODO(suzhe): due to a bug of webkit, we currently can't use selection range
++  // with composition string. See: https://bugs.webkit.org/show_bug.cgi?id=40805
++  if (!(lparam & CS_NOMOVECARET) && (lparam & GCS_CURSORPOS)) {
++    // IMM32 does not support non-zero-width selection in a composition. So
++    // always use the caret position as selection range.
++    int cursor = ::ImmGetCompositionString(imm_context, GCS_CURSORPOS, NULL, 0);
++    composition->selection = gfx::Range(cursor);
++  } else {
++    composition->selection = gfx::Range(0);
++  }
++
++  // Retrieve the clause segmentations and convert them to ime_text_spans.
++  if (lparam & GCS_COMPCLAUSE) {
++    GetImeTextSpans(imm_context, target_start, target_end,
++                    &composition->ime_text_spans);
++  }
++
++  // Set default composition underlines in case there is no clause information.
++  if (!composition->ime_text_spans.empty())
++    return;
++
++  ImeTextSpan ime_text_span;
++  ime_text_span.underline_color = SK_ColorTRANSPARENT;
++  ime_text_span.background_color = SK_ColorTRANSPARENT;
++  if (target_start > 0) {
++    ime_text_span.start_offset = 0U;
++    ime_text_span.end_offset = static_cast<uint32_t>(target_start);
++    ime_text_span.thickness = ui::ImeTextSpan::Thickness::kThin;
++    composition->ime_text_spans.push_back(ime_text_span);
++  }
++  if (target_end > target_start) {
++    ime_text_span.start_offset = static_cast<uint32_t>(target_start);
++    ime_text_span.end_offset = static_cast<uint32_t>(target_end);
++    ime_text_span.thickness = ui::ImeTextSpan::Thickness::kThick;
++    composition->ime_text_spans.push_back(ime_text_span);
++  }
++  if (target_end < length) {
++    ime_text_span.start_offset = static_cast<uint32_t>(target_end);
++    ime_text_span.end_offset = static_cast<uint32_t>(length);
++    ime_text_span.thickness = ui::ImeTextSpan::Thickness::kThin;
++    composition->ime_text_spans.push_back(ime_text_span);
++  }
++}
++
++bool IMM32Manager::GetString(HIMC imm_context,
++                             WPARAM lparam,
++                             int type,
++                             std::u16string* result) {
++  if (!(lparam & type))
++    return false;
++  LONG string_size = ::ImmGetCompositionString(imm_context, type, NULL, 0);
++  if (string_size <= 0)
++    return false;
++  DCHECK_EQ(0u, string_size % sizeof(wchar_t));
++  ::ImmGetCompositionString(imm_context, type,
++                            base::as_writable_wcstr(base::WriteInto(
++                                result, (string_size / sizeof(wchar_t)) + 1)),
++                            string_size);
++  return true;
++}
++
++bool IMM32Manager::GetResult(HWND window_handle,
++                             LPARAM lparam,
++                             std::u16string* result) {
++  bool ret = false;
++  HIMC imm_context = ::ImmGetContext(window_handle);
++  if (imm_context) {
++    ret = GetString(imm_context, lparam, GCS_RESULTSTR, result);
++    ::ImmReleaseContext(window_handle, imm_context);
++  }
++  return ret;
++}
++
++bool IMM32Manager::GetComposition(HWND window_handle, LPARAM lparam,
++                              CompositionText* composition) {
++  bool ret = false;
++  HIMC imm_context = ::ImmGetContext(window_handle);
++  if (imm_context) {
++    // Copy the composition string to the CompositionText object.
++    ret = GetString(imm_context, lparam, GCS_COMPSTR, &composition->text);
++
++    if (ret) {
++      // This is a dirty workaround for facebook. Facebook deletes the
++      // placeholder character (U+3000) used by Traditional-Chinese IMEs at the
++      // beginning of composition text. This prevents WebKit from replacing this
++      // placeholder character with a Traditional-Chinese character, i.e. we
++      // cannot input any characters in a comment box of facebook with
++      // Traditional-Chinese IMEs. As a workaround, we replace U+3000 at the
++      // beginning of composition text with U+FF3F, a placeholder character used
++      // by Japanese IMEs.
++      if (input_language_id_ == MAKELANGID(LANG_CHINESE,
++                                           SUBLANG_CHINESE_TRADITIONAL) &&
++          composition->text[0] == 0x3000) {
++        composition->text[0] = 0xFF3F;
++      }
++
++      // Retrieve the IME text spans and selection range information.
++      GetCompositionInfo(imm_context, lparam, composition);
++
++      // Mark that there is an ongoing composition.
++      is_composing_ = true;
++    }
++
++    ::ImmReleaseContext(window_handle, imm_context);
++  }
++  return ret;
++}
++
++void IMM32Manager::DisableIME(HWND window_handle) {
++  // A renderer process have moved its input focus to a password input
++  // when there is an ongoing composition, e.g. a user has clicked a
++  // mouse button and selected a password input while composing a text.
++  // For this case, we have to complete the ongoing composition and
++  // clean up the resources attached to this object BEFORE DISABLING THE IME.
++  CleanupComposition(window_handle);
++  ::ImmAssociateContextEx(window_handle, NULL, 0);
++}
++
++void IMM32Manager::CancelIME(HWND window_handle) {
++  if (is_composing_) {
++    HIMC imm_context = ::ImmGetContext(window_handle);
++    if (imm_context) {
++      ::ImmNotifyIME(imm_context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
++      ::ImmReleaseContext(window_handle, imm_context);
++    }
++    ResetComposition(window_handle);
++  }
++}
++
++void IMM32Manager::EnableIME(HWND window_handle) {
++  // Load the default IME context.
++  // NOTE(hbono)
++  //   IMM ignores this call if the IME context is loaded. Therefore, we do
++  //   not have to check whether or not the IME context is loaded.
++  ::ImmAssociateContextEx(window_handle, NULL, IACE_DEFAULT);
++}
++
++void IMM32Manager::UpdateCaretRect(HWND window_handle,
++                               const gfx::Rect& caret_rect) {
++  // Save the caret position, and Update the position of the IME window.
++  // This update is used for moving an IME window when a renderer process
++  // resize/moves the input caret.
++  if (caret_rect_ != caret_rect) {
++    caret_rect_ = caret_rect;
++    // Move the IME windows.
++    HIMC imm_context = ::ImmGetContext(window_handle);
++    if (imm_context) {
++      MoveImeWindow(window_handle, imm_context);
++      ::ImmReleaseContext(window_handle, imm_context);
++    }
++  }
++}
++
++void IMM32Manager::SetUseCompositionWindow(bool use_composition_window) {
++  use_composition_window_ = use_composition_window;
++}
++
++bool IMM32Manager::IsInputLanguageCJK() const {
++  LANGID lang = PRIMARYLANGID(input_language_id_);
++  return lang == LANG_CHINESE || lang == LANG_JAPANESE ||
++      lang == LANG_KOREAN;
++}
++
++void IMM32Manager::SetTextInputMode(HWND window_handle,
++                                    TextInputMode input_mode) {
++  if (input_mode == ui::TEXT_INPUT_MODE_DEFAULT)
++    return;
++
++  const HIMC imm_context = ::ImmGetContext(window_handle);
++  if (!imm_context)
++    return;
++
++  DWORD conversion_mode = 0;
++  DWORD sentence_mode = 0;
++  if (::ImmGetConversionStatus(imm_context, &conversion_mode, &sentence_mode)
++      == FALSE) {
++    return;
++  }
++
++  BOOL open = FALSE;
++  ConvertInputModeToImmFlags(input_mode, conversion_mode, &open,
++                             &conversion_mode),
++
++  ::ImmSetOpenStatus(imm_context, open);
++  if (open)
++    ::ImmSetConversionStatus(imm_context, conversion_mode, sentence_mode);
++  ::ImmReleaseContext(window_handle, imm_context);
++}
++
++// static
++void IMM32Manager::ConvertInputModeToImmFlags(TextInputMode input_mode,
++                                              DWORD initial_conversion_mode,
++                                              BOOL* open,
++                                              DWORD* new_conversion_mode) {
++  *open = FALSE;
++  *new_conversion_mode = initial_conversion_mode;
++}
++
++}  // namespace ui
+diff --git a/ui/base/ime/win/imm32_manager.h b/ui/base/ime/win/imm32_manager.h
+new file mode 100644
+index 0000000000000..e8271a992d4b1
+--- /dev/null
++++ b/ui/base/ime/win/imm32_manager.h
+@@ -0,0 +1,308 @@
++// Copyright 2013 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_BASE_IME_WIN_IMM32_MANAGER_H_
++#define UI_BASE_IME_WIN_IMM32_MANAGER_H_
++
++#include <windows.h>
++
++#include <string>
++#include <vector>
++
++#include "base/component_export.h"
++#include "base/i18n/rtl.h"
++#include "ui/base/ime/text_input_mode.h"
++#include "ui/gfx/geometry/rect.h"
++
++namespace ui {
++
++struct CompositionText;
++
++// This header file defines a struct and a class used for encapsulating IMM32
++// APIs, controls IMEs attached to a window, and enables the 'on-the-spot'
++// input without deep knowledge about the APIs, i.e. knowledge about the
++// language-specific and IME-specific behaviors.
++// The following items enumerates the simplest steps for an (window)
++// application to control its IMEs with the struct and the class defined
++// this file.
++// 1. Add an instance of the IMM32Manager class to its window class.
++//    (The IMM32Manager class needs a window handle.)
++// 2. Add messages handlers listed in the following subsections, follow the
++//    instructions written in each subsection, and use the IMM32Manager class.
++// 2.1. WM_IME_SETCONTEXT (0x0281)
++//      Call the functions listed below:
++//      - IMM32Manager::CreateImeWindow();
++//      - IMM32Manager::CleanupComposition(), and;
++//      - IMM32Manager::SetImeWindowStyle().
++//      An application MUST prevent from calling ::DefWindowProc().
++// 2.2. WM_IME_STARTCOMPOSITION (0x010D)
++//      Call the functions listed below:
++//      - IMM32Manager::CreateImeWindow(), and;
++//      - IMM32Manager::ResetComposition().
++//      An application MUST prevent from calling ::DefWindowProc().
++// 2.3. WM_IME_COMPOSITION (0x010F)
++//      Call the functions listed below:
++//      - IMM32Manager::UpdateImeWindow();
++//      - IMM32Manager::GetResult();
++//      - IMM32Manager::GetComposition(), and;
++//      - IMM32Manager::ResetComposition() (optional).
++//      An application MUST prevent from calling ::DefWindowProc().
++// 2.4. WM_IME_ENDCOMPOSITION (0x010E)
++//      Call the functions listed below:
++//      - IMM32Manager::ResetComposition(), and;
++//      - IMM32Manager::DestroyImeWindow().
++//      An application CAN call ::DefWindowProc().
++// 2.5. WM_INPUTLANGCHANGE (0x0051)
++//      Call the functions listed below:
++//      - IMM32Manager::SetInputLanguage().
++//      An application CAN call ::DefWindowProc().
++
++// This class controls the IMM (Input Method Manager) through IMM32 APIs and
++// enables it to retrieve the string being controled by the IMM. (I wrote
++// a note to describe the reason why I do not use 'IME' but 'IMM' below.)
++// NOTE(hbono):
++//   Fortunately or unfortunately, TSF (Text Service Framework) and
++//   CUAS (Cicero Unaware Application Support) allows IMM32 APIs for
++//   retrieving not only the inputs from IMEs (Input Method Editors), used
++//   only for inputting East-Asian language texts, but also the ones from
++//   tablets (on Windows XP Tablet PC Edition and Windows Vista), voice
++//   recognizers (e.g. ViaVoice and Microsoft Office), etc.
++//   We can disable TSF and CUAS in Windows XP Tablet PC Edition. On the other
++//   hand, we can NEVER disable either TSF or CUAS in Windows Vista, i.e.
++//   THIS CLASS IS NOT ONLY USED ON THE INPUT CONTEXTS OF EAST-ASIAN
++//   LANGUAGES BUT ALSO USED ON THE INPUT CONTEXTS OF ALL LANGUAGES.
++class COMPONENT_EXPORT(UI_BASE_IME_WIN) IMM32Manager {
++ public:
++  IMM32Manager();
++
++  IMM32Manager(const IMM32Manager&) = delete;
++  IMM32Manager& operator=(const IMM32Manager&) = delete;
++
++  virtual ~IMM32Manager();
++
++  // Retrieves whether or not there is an ongoing composition.
++  bool is_composing() const { return is_composing_; }
++
++  // Retrieves the input language from Windows and update it.
++  void SetInputLanguage();
++
++  // Creates the IME windows, and allocate required resources for them.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  void CreateImeWindow(HWND window_handle);
++
++  // Updates the style of the IME windows.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  //   * message [in] (UINT)
++  //   * wparam [in] (WPARAM)
++  //   * lparam [in] (LPARAM)
++  //     Represent the windows message of the caller.
++  //     These parameters are used for verifying if this function is called
++  //     in a handler function for WM_IME_SETCONTEXT messages because this
++  //     function uses ::DefWindowProc() to update the style.
++  //     A caller just has to pass the input parameters for the handler
++  //     function without modifications.
++  //   * handled [out] (BOOL*)
++  //     Returns ::DefWindowProc() is really called in this function.
++  //     PLEASE DO NOT CALL ::DefWindowProc() IF THIS VALUE IS TRUE!
++  //     All the window styles set in this function are over-written when
++  //     calling ::DefWindowProc() after returning this function.
++  // Returns the value returned by DefWindowProc.
++  LRESULT SetImeWindowStyle(HWND window_handle, UINT message,
++                            WPARAM wparam, LPARAM lparam, BOOL* handled);
++
++  // Destroys the IME windows and all the resources attached to them.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  void DestroyImeWindow(HWND window_handle);
++
++  // Updates the position of the IME windows.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  void UpdateImeWindow(HWND window_handle);
++
++  // Cleans up the all resources attached to the given IMM32Manager object, and
++  // reset its composition status.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  void CleanupComposition(HWND window_handle);
++
++  // Resets the composition status.
++  // Cancel the ongoing composition if it exists.
++  // NOTE(hbono): This method does not release the allocated resources.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  void ResetComposition(HWND window_handle);
++
++  // Retrieves a composition result of the ongoing composition if it exists.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  //   * lparam [in] (LPARAM)
++  //     Specifies the updated members of the ongoing composition, and must be
++  //     the same parameter of a WM_IME_COMPOSITION message handler.
++  //     This parameter is used for checking if the ongoing composition has
++  //     its result string,
++  //   * result [out] (std::u16string)
++  //     Represents the object contains the composition result.
++  // Return values
++  //   * true
++  //     The ongoing composition has a composition result.
++  //   * false
++  //     The ongoing composition does not have composition results.
++  // Remarks
++  //   This function is designed for being called from WM_IME_COMPOSITION
++  //   message handlers.
++  bool GetResult(HWND window_handle, LPARAM lparam, std::u16string* result);
++
++  // Retrieves the current composition status of the ongoing composition.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  //   * lparam [in] (LPARAM)
++  //     Specifies the updated members of the ongoing composition, and must be
++  //     the same parameter of a WM_IME_COMPOSITION message handler.
++  //     This parameter is used for checking if the ongoing composition has
++  //     its result string,
++  //   * composition [out] (Composition)
++  //     Represents the struct contains the composition status.
++  // Return values
++  //   * true
++  //     The status of the ongoing composition is updated.
++  //   * false
++  //     The status of the ongoing composition is not updated.
++  // Remarks
++  //   This function is designed for being called from WM_IME_COMPOSITION
++  //   message handlers.
++  bool GetComposition(HWND window_handle, LPARAM lparam,
++                      CompositionText* composition);
++
++  // Enables the IME attached to the given window, i.e. allows user-input
++  // events to be dispatched to the IME.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  //   * complete [in] (bool)
++  //     Represents whether or not to complete the ongoing composition.
++  //     + true
++  //       After finishing the ongoing composition and close its IME windows,
++  //       start another composition and display its IME windows to the given
++  //       position.
++  //     + false
++  //       Just move the IME windows of the ongoing composition to the given
++  //       position without finishing it.
++  void EnableIME(HWND window_handle);
++
++  // Disables the IME attached to the given window, i.e. prohibits any
++  // user-input events from being dispatched to the IME.
++  // In Chrome, this function is used when:
++  //   * a renreder process sets its input focus to a password input.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  void DisableIME(HWND window_handle);
++
++  // Cancels an ongoing composition of the IME attached to the given window.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  void CancelIME(HWND window_handle);
++
++  // Updates the caret position of the given window.
++  // Parameters
++  //   * window_handle [in] (HWND)
++  //     Represents the window handle of the caller.
++  //   * caret_rect [in] (const gfx::Rect&)
++  //     Represent the rectangle of the input caret.
++  //     This rectangle is used for controlling the positions of IME windows.
++  void UpdateCaretRect(HWND window_handle, const gfx::Rect& caret_rect);
++
++  // Updates the setting whether we want IME to render composition text.
++  void SetUseCompositionWindow(bool use_composition_window);
++
++  // Returns the current input language id.
++  LANGID input_language_id() const { return input_language_id_; }
++
++  // Returns whether the system's input language is CJK.
++  bool IsInputLanguageCJK() const;
++
++  // Sets conversion status corresponding to |input_mode|.
++  virtual void SetTextInputMode(HWND window_handle, TextInputMode input_mode);
++
++  // Helper functions ----------------------------------------------------------
++
++  // Gets parameters for ::ImmSetOpenStatus and ::ImmSetConversionStatus from
++  // |input_mode|.
++  static void ConvertInputModeToImmFlags(TextInputMode input_mode,
++                                         DWORD initial_conversion_mode,
++                                         BOOL* open,
++                                         DWORD* new_conversion_mode);
++
++ protected:
++  // Retrieves the composition information.
++  void GetCompositionInfo(HIMC imm_context, LPARAM lparam,
++                          CompositionText* composition);
++
++  // Updates the position of the IME windows.
++  void MoveImeWindow(HWND window_handle, HIMC imm_context);
++
++  // Completes the ongoing composition if it exists.
++  void CompleteComposition(HWND window_handle, HIMC imm_context);
++
++  // Retrieves a string from the IMM.
++  bool GetString(HIMC imm_context,
++                 WPARAM lparam,
++                 int type,
++                 std::u16string* result);
++
++ private:
++  // Represents whether or not there is an ongoing composition in a browser
++  // process, i.e. whether or not a browser process is composing a text.
++  bool is_composing_;
++
++  // The current input Language ID retrieved from Windows, which consists of:
++  //   * Primary Language ID (bit 0 to bit 9), which shows a natunal language
++  //     (English, Korean, Chinese, Japanese, etc.) and;
++  //   * Sub-Language ID (bit 10 to bit 15), which shows a geometrical region
++  //     the language is spoken (For English, United States, United Kingdom,
++  //     Australia, Canada, etc.)
++  // The following list enumerates some examples for the Language ID:
++  //   * "en-US" (0x0409)
++  //     MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
++  //   * "ko-KR" (0x0412)
++  //     MAKELANGID(LANG_KOREAN,  SUBLANG_KOREAN);
++  //   * "zh-TW" (0x0404)
++  //     MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL);
++  //   * "zh-CN" (0x0804)
++  //     MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED);
++  //   * "ja-JP" (0x0411)
++  //     MAKELANGID(LANG_JAPANESE, SUBLANG_JAPANESE_JAPAN), etc.
++  //   (See <winnt.h> for other available values.)
++  // This Language ID is used for processing language-specific operations in
++  // IME functions.
++  LANGID input_language_id_;
++
++  // Represents whether or not the current input context has created a system
++  // caret to set the position of its IME candidate window.
++  //   * true: it creates a system caret.
++  //   * false: it does not create a system caret.
++  bool system_caret_;
++
++  // The rectangle of the input caret retrieved from a renderer process.
++  gfx::Rect caret_rect_;
++
++  // Indicates whether or not we want IME to render composition text.
++  bool use_composition_window_;
++};
++
++}  // namespace ui
++
++#endif  // UI_BASE_IME_WIN_IMM32_MANAGER_H_
+diff --git a/ui/base/ime/win/imm32_manager_unittest.cc b/ui/base/ime/win/imm32_manager_unittest.cc
+new file mode 100644
+index 0000000000000..4d40973c626ec
+--- /dev/null
++++ b/ui/base/ime/win/imm32_manager_unittest.cc
+@@ -0,0 +1,69 @@
++// Copyright 2013 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/base/ime/win/imm32_manager.h"
++
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace ui {
++namespace {
++
++struct InputModeTestCase {
++  TextInputMode input_mode;
++  DWORD conversion_mode;
++  BOOL expected_open;
++  DWORD expected_conversion_mode;
++};
++
++// Google Test pretty-printer.
++void PrintTo(const InputModeTestCase& data, std::ostream* os) {
++  *os << " input_mode: " << testing::PrintToString(data.input_mode)
++      << "; conversion_mode: " << testing::PrintToString(data.conversion_mode);
++}
++
++class IMM32ManagerTest
++    : public ::testing::TestWithParam<InputModeTestCase> {
++};
++
++const InputModeTestCase kInputModeTestCases[] = {
++    {TEXT_INPUT_MODE_DEFAULT, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_DEFAULT, IME_CMODE_NATIVE, FALSE, IME_CMODE_NATIVE},
++    {TEXT_INPUT_MODE_TEXT, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_TEXT, IME_CMODE_NATIVE, FALSE, IME_CMODE_NATIVE},
++    {TEXT_INPUT_MODE_NUMERIC, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_NUMERIC, IME_CMODE_FULLSHAPE, FALSE, IME_CMODE_FULLSHAPE},
++    {TEXT_INPUT_MODE_DECIMAL, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_DECIMAL, IME_CMODE_FULLSHAPE, FALSE, IME_CMODE_FULLSHAPE},
++    {TEXT_INPUT_MODE_TEL, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_TEL, IME_CMODE_ROMAN, FALSE, IME_CMODE_ROMAN},
++    {TEXT_INPUT_MODE_EMAIL, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_EMAIL, IME_CMODE_CHARCODE, FALSE, IME_CMODE_CHARCODE},
++    {TEXT_INPUT_MODE_URL, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_URL, IME_CMODE_HANJACONVERT, FALSE,
++     IME_CMODE_HANJACONVERT},
++    {TEXT_INPUT_MODE_SEARCH, 0, FALSE, 0},
++    {TEXT_INPUT_MODE_SEARCH, IME_CMODE_CHARCODE, FALSE, IME_CMODE_CHARCODE},
++};
++
++TEST_P(IMM32ManagerTest, ConvertInputModeToImmFlags) {
++  const InputModeTestCase& test_case = GetParam();
++
++  BOOL open;
++  DWORD conversion_mode;
++  // Call testee method.
++  IMM32Manager::ConvertInputModeToImmFlags(test_case.input_mode,
++                                           test_case.conversion_mode,
++                                           &open,
++                                           &conversion_mode);
++
++  EXPECT_EQ(test_case.expected_open, open);
++  EXPECT_EQ(test_case.expected_conversion_mode, conversion_mode);
++}
++
++INSTANTIATE_TEST_SUITE_P(All,
++                         IMM32ManagerTest,
++                         ::testing::ValuesIn(kInputModeTestCases));
++
++}  // namespace
++}  // namespace ui
+diff --git a/ui/base/ime/win/input_method_win_base.h b/ui/base/ime/win/input_method_win_base.h
+index aeec7cbe8940d..d6ad5d11a5279 100644
+--- a/ui/base/ime/win/input_method_win_base.h
++++ b/ui/base/ime/win/input_method_win_base.h
+@@ -8,8 +8,8 @@
+ #include <windows.h>
+ 
+ #include "base/component_export.h"
+-#include "base/i18n/rtl.h"
+ #include "ui/base/ime/input_method_base.h"
++#include "ui/base/ime/win/imm32_manager.h"
+ 
+ namespace ui {
+ 
+diff --git a/ui/base/ime/win/input_method_win_imm32.cc b/ui/base/ime/win/input_method_win_imm32.cc
+new file mode 100644
+index 0000000000000..0aa096de50119
+--- /dev/null
++++ b/ui/base/ime/win/input_method_win_imm32.cc
+@@ -0,0 +1,351 @@
++// Copyright 2012 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/base/ime/win/input_method_win_imm32.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "base/auto_reset.h"
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "ui/base/ime/text_input_client.h"
++#include "ui/base/ime/win/tsf_input_scope.h"
++#include "ui/display/win/screen_win.h"
++#include "ui/events/event.h"
++#include "ui/events/event_constants.h"
++#include "ui/events/event_utils.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/gfx/win/hwnd_util.h"
++
++namespace ui {
++
++InputMethodWinImm32::InputMethodWinImm32(
++    ImeKeyEventDispatcher* ime_key_event_dispatcher,
++    HWND attached_window_handle)
++    : InputMethodWinBase(ime_key_event_dispatcher, attached_window_handle),
++
++      enabled_(false),
++      is_candidate_popup_open_(false),
++      composing_window_handle_(NULL) {
++  imm32_manager_.SetInputLanguage();
++}
++
++InputMethodWinImm32::~InputMethodWinImm32() {}
++
++void InputMethodWinImm32::OnFocus() {
++  InputMethodBase::OnFocus();
++  RefreshInputLanguage();
++}
++
++bool InputMethodWinImm32::OnUntranslatedIMEMessage(
++    const CHROME_MSG event,
++    InputMethod::NativeEventResult* result) {
++  LRESULT original_result = 0;
++  BOOL handled = FALSE;
++
++  switch (event.message) {
++    case WM_IME_SETCONTEXT:
++      original_result = OnImeSetContext(event.hwnd, event.message, event.wParam,
++                                        event.lParam, &handled);
++      break;
++    case WM_IME_STARTCOMPOSITION:
++      original_result = OnImeStartComposition(
++          event.hwnd, event.message, event.wParam, event.lParam, &handled);
++      break;
++    case WM_IME_COMPOSITION:
++      original_result = OnImeComposition(event.hwnd, event.message,
++                                         event.wParam, event.lParam, &handled);
++      break;
++    case WM_IME_ENDCOMPOSITION:
++      original_result = OnImeEndComposition(
++          event.hwnd, event.message, event.wParam, event.lParam, &handled);
++      break;
++    case WM_IME_REQUEST:
++      original_result =
++          OnImeRequest(event.message, event.wParam, event.lParam, &handled);
++      break;
++    case WM_CHAR:
++    case WM_SYSCHAR:
++      original_result = OnChar(event.hwnd, event.message, event.wParam,
++                               event.lParam, event, &handled);
++      break;
++    case WM_IME_NOTIFY:
++      original_result =
++          OnImeNotify(event.message, event.wParam, event.lParam, &handled);
++      break;
++    default:
++      NOTREACHED() << "Unknown IME message:" << event.message;
++      break;
++  }
++  if (result)
++    *result = original_result;
++  return !!handled;
++}
++
++void InputMethodWinImm32::OnTextInputTypeChanged(TextInputClient* client) {
++  InputMethodBase::OnTextInputTypeChanged(client);
++  if (!IsTextInputClientFocused(client) || !IsWindowFocused(client))
++    return;
++  imm32_manager_.CancelIME(attached_window_handle_);
++  UpdateIMEState();
++}
++
++void InputMethodWinImm32::OnCaretBoundsChanged(const TextInputClient* client) {
++  if (!IsTextInputClientFocused(client) || !IsWindowFocused(client))
++    return;
++  NotifyTextInputCaretBoundsChanged(client);
++  if (!enabled_)
++    return;
++
++  // The current text input type should not be NONE if |client| is focused.
++  DCHECK(!IsTextInputTypeNone());
++  // Tentatively assume that the returned value is DIP (Density Independent
++  // Pixel). See the comment in text_input_client.h and http://crbug.com/360334.
++  const gfx::Rect dip_screen_bounds(GetTextInputClient()->GetCaretBounds());
++  const gfx::Rect screen_bounds = display::win::GetScreenWin()->DIPToScreenRect(
++      attached_window_handle_, dip_screen_bounds);
++
++  HWND attached_window = attached_window_handle_;
++  // TODO(ime): see comment in TextInputClient::GetCaretBounds(), this
++  // conversion shouldn't be necessary.
++  RECT r = {};
++  GetClientRect(attached_window, &r);
++  POINT window_point = {screen_bounds.x(), screen_bounds.y()};
++  ScreenToClient(attached_window, &window_point);
++  gfx::Rect caret_rect(gfx::Point(window_point.x, window_point.y),
++                       screen_bounds.size());
++  imm32_manager_.UpdateCaretRect(attached_window, caret_rect);
++}
++
++void InputMethodWinImm32::CancelComposition(const TextInputClient* client) {
++  if (IsTextInputClientFocused(client) && enabled_) {
++    imm32_manager_.CancelIME(attached_window_handle_);
++  }
++}
++
++void InputMethodWinImm32::OnInputLocaleChanged() {
++  // Note: OnInputLocaleChanged() is for capturing the input language which can
++  // be used to determine the appropriate TextInputType for Omnibox.
++  // See https://crbug.com/344834.
++  // Currently OnInputLocaleChanged() on Windows relies on WM_INPUTLANGCHANGED,
++  // which is known to be incompatible with TSF.
++  // TODO(shuchen): Use ITfLanguageProfileNotifySink instead.
++  OnInputMethodChanged();
++  RefreshInputLanguage();
++}
++
++bool InputMethodWinImm32::IsInputLocaleCJK() const {
++  return imm32_manager_.IsInputLanguageCJK();
++}
++
++bool InputMethodWinImm32::IsCandidatePopupOpen() const {
++  return is_candidate_popup_open_;
++}
++
++void InputMethodWinImm32::OnUrlChanged() {}
++
++void InputMethodWinImm32::OnWillChangeFocusedClient(
++    TextInputClient* focused_before,
++    TextInputClient* focused) {
++  if (IsWindowFocused(focused_before))
++    ConfirmCompositionText();
++}
++
++void InputMethodWinImm32::OnDidChangeFocusedClient(
++    TextInputClient* focused_before,
++    TextInputClient* focused) {
++  if (IsWindowFocused(focused)) {
++    // Force to update the input type since client's TextInputStateChanged()
++    // function might not be called if text input types before the client loses
++    // focus and after it acquires focus again are the same.
++    OnTextInputTypeChanged(focused);
++
++    // Force to update caret bounds, in case the client thinks that the caret
++    // bounds has not changed.
++    OnCaretBoundsChanged(focused);
++  }
++  InputMethodWinBase::OnDidChangeFocusedClient(focused_before, focused);
++}
++
++LRESULT InputMethodWinImm32::OnImeSetContext(HWND window_handle,
++                                             UINT message,
++                                             WPARAM wparam,
++                                             LPARAM lparam,
++                                             BOOL* handled) {
++  if (!!wparam) {
++    imm32_manager_.CreateImeWindow(window_handle);
++    // Delay initialize the tsf to avoid perf regression.
++    // Loading tsf dll causes some time, so doing it in UpdateIMEState() will
++    // slow down the browser window creation.
++    // See https://crbug.com/509984.
++    tsf_inputscope::InitializeTsfForInputScopes();
++    tsf_inputscope::SetInputScopeForTsfUnawareWindow(
++        attached_window_handle_, GetTextInputType(), GetTextInputMode());
++  }
++
++  OnInputMethodChanged();
++  return imm32_manager_.SetImeWindowStyle(window_handle, message, wparam,
++                                          lparam, handled);
++}
++
++LRESULT InputMethodWinImm32::OnImeStartComposition(HWND window_handle,
++                                                   UINT message,
++                                                   WPARAM wparam,
++                                                   LPARAM lparam,
++                                                   BOOL* handled) {
++  // We have to prevent WTL from calling ::DefWindowProc() because the function
++  // calls ::ImmSetCompositionWindow() and ::ImmSetCandidateWindow() to
++  // over-write the position of IME windows.
++  *handled = TRUE;
++
++  // Reset the composition status and create IME windows.
++  composing_window_handle_ = window_handle;
++  imm32_manager_.CreateImeWindow(window_handle);
++  imm32_manager_.ResetComposition(window_handle);
++  return 0;
++}
++
++LRESULT InputMethodWinImm32::OnImeComposition(HWND window_handle,
++                                              UINT message,
++                                              WPARAM wparam,
++                                              LPARAM lparam,
++                                              BOOL* handled) {
++  // We have to prevent WTL from calling ::DefWindowProc() because we do not
++  // want for the IMM (Input Method Manager) to send WM_IME_CHAR messages.
++  *handled = TRUE;
++
++  // At first, update the position of the IME window.
++  imm32_manager_.UpdateImeWindow(window_handle);
++
++  // Retrieve the result string and its attributes of the ongoing composition
++  // and send it to a renderer process.
++  ui::CompositionText composition;
++  if (imm32_manager_.GetResult(window_handle, lparam, &composition.text)) {
++    if (!IsTextInputTypeNone())
++      GetTextInputClient()->InsertText(
++          composition.text,
++          ui::TextInputClient::InsertTextCursorBehavior::kMoveCursorAfterText);
++    imm32_manager_.ResetComposition(window_handle);
++    // Fall though and try reading the composition string.
++    // Japanese IMEs send a message containing both GCS_RESULTSTR and
++    // GCS_COMPSTR, which means an ongoing composition has been finished
++    // by the start of another composition.
++  }
++  // Retrieve the composition string and its attributes of the ongoing
++  // composition and send it to a renderer process.
++  if (imm32_manager_.GetComposition(window_handle, lparam, &composition) &&
++      !IsTextInputTypeNone())
++    GetTextInputClient()->SetCompositionText(composition);
++
++  return 0;
++}
++
++LRESULT InputMethodWinImm32::OnImeEndComposition(HWND window_handle,
++                                                 UINT message,
++                                                 WPARAM wparam,
++                                                 LPARAM lparam,
++                                                 BOOL* handled) {
++  // Let WTL call ::DefWindowProc() and release its resources.
++  *handled = FALSE;
++
++  composing_window_handle_ = NULL;
++
++  // This is a hack fix for MS Korean IME issue (https://crbug.com/647150).
++  // Messages received when hitting Space key during composition:
++  //   1. WM_IME_ENDCOMPOSITION (we usually clear composition for this MSG)
++  //   2. WM_IME_COMPOSITION with GCS_RESULTSTR (we usually commit composition)
++  // (Which is in the reversed order compared to MS Japanese and Chinese IME.)
++  // Hack fix:
++  //   * Discard WM_IME_ENDCOMPOSITION message if it's followed by a
++  //     WM_IME_COMPOSITION message with GCS_RESULTSTR.
++  // This works because we don't require WM_IME_ENDCOMPOSITION after committing
++  // composition (it doesn't do anything if there is no on-going composition).
++  // Also see Firefox's implementation:
++  // https://dxr.mozilla.org/mozilla-beta/source/widget/windows/IMMHandler.cpp#800
++  // TODO(crbug.com/654865): Further investigations and clean-ups required.
++  CHROME_MSG compositionMsg;
++  if (::PeekMessage(ChromeToWindowsType(&compositionMsg), window_handle,
++                    WM_IME_STARTCOMPOSITION, WM_IME_COMPOSITION, PM_NOREMOVE) &&
++      compositionMsg.message == WM_IME_COMPOSITION &&
++      (compositionMsg.lParam & GCS_RESULTSTR))
++    return 0;
++
++  if (!IsTextInputTypeNone() && GetTextInputClient()->HasCompositionText())
++    GetTextInputClient()->ClearCompositionText();
++
++  imm32_manager_.ResetComposition(window_handle);
++  imm32_manager_.DestroyImeWindow(window_handle);
++  return 0;
++}
++
++LRESULT InputMethodWinImm32::OnImeNotify(UINT message,
++                                         WPARAM wparam,
++                                         LPARAM lparam,
++                                         BOOL* handled) {
++  *handled = FALSE;
++
++  // Update |is_candidate_popup_open_|, whether a candidate window is open.
++  switch (wparam) {
++    case IMN_OPENCANDIDATE:
++      is_candidate_popup_open_ = true;
++      break;
++    case IMN_CLOSECANDIDATE:
++      is_candidate_popup_open_ = false;
++      break;
++  }
++
++  return 0;
++}
++
++void InputMethodWinImm32::RefreshInputLanguage() {
++  TextInputType type_original = GetTextInputType();
++  imm32_manager_.SetInputLanguage();
++  if (type_original != GetTextInputType()) {
++    // Only update the IME state when necessary.
++    // It's unnecessary to report IME state, when:
++    // 1) Switching betweeen 2 top-level windows, and the switched-away window
++    //    receives OnInputLocaleChanged.
++    // 2) The text input type is not changed by |SetInputLanguage|.
++    // Please refer to https://crbug.com/679564.
++    UpdateIMEState();
++  }
++}
++
++void InputMethodWinImm32::ConfirmCompositionText() {
++  // Makes sure the native IME app can be informed about the composition is
++  // cleared, so that it can clean up its internal states.
++  if (composing_window_handle_)
++    imm32_manager_.CleanupComposition(composing_window_handle_);
++}
++
++TextInputMode InputMethodWinImm32::GetTextInputMode() const {
++  TextInputClient* client = GetTextInputClient();
++  return client ? client->GetTextInputMode() : TEXT_INPUT_MODE_DEFAULT;
++}
++
++void InputMethodWinImm32::UpdateIMEState() {
++  // Use switch here in case we are going to add more text input types.
++  // We disable input method in password field.
++  const HWND window_handle = attached_window_handle_;
++  const TextInputType text_input_type = GetTextInputType();
++  const TextInputMode text_input_mode = GetTextInputMode();
++  switch (text_input_type) {
++    case ui::TEXT_INPUT_TYPE_NONE:
++    case ui::TEXT_INPUT_TYPE_PASSWORD:
++      imm32_manager_.DisableIME(window_handle);
++      enabled_ = false;
++      break;
++    default:
++      imm32_manager_.EnableIME(window_handle);
++      enabled_ = true;
++      break;
++  }
++
++  imm32_manager_.SetTextInputMode(window_handle, text_input_mode);
++  tsf_inputscope::SetInputScopeForTsfUnawareWindow(
++      window_handle, text_input_type, text_input_mode);
++}
++
++}  // namespace ui
+diff --git a/ui/base/ime/win/input_method_win_imm32.h b/ui/base/ime/win/input_method_win_imm32.h
+new file mode 100644
+index 0000000000000..503399af4e060
+--- /dev/null
++++ b/ui/base/ime/win/input_method_win_imm32.h
+@@ -0,0 +1,105 @@
++// Copyright 2011 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_BASE_IME_WIN_INPUT_METHOD_WIN_IMM32_H_
++#define UI_BASE_IME_WIN_INPUT_METHOD_WIN_IMM32_H_
++
++#include <windows.h>
++
++#include "base/component_export.h"
++#include "ui/base/ime/win/imm32_manager.h"
++#include "ui/base/ime/win/input_method_win_base.h"
++
++namespace ui {
++
++// A common InputMethod implementation based on IMM32.
++class COMPONENT_EXPORT(UI_BASE_IME_WIN) InputMethodWinImm32
++    : public InputMethodWinBase {
++ public:
++  InputMethodWinImm32(ImeKeyEventDispatcher* ime_key_event_dispatcher,
++                      HWND attached_window_handle);
++
++  InputMethodWinImm32(const InputMethodWinImm32&) = delete;
++  InputMethodWinImm32& operator=(const InputMethodWinImm32&) = delete;
++
++  ~InputMethodWinImm32() override;
++
++  // Overridden from InputMethodBase:
++  void OnFocus() override;
++
++  // Overridden from InputMethod:
++  bool OnUntranslatedIMEMessage(const CHROME_MSG event,
++                                NativeEventResult* result) override;
++  void OnTextInputTypeChanged(TextInputClient* client) override;
++  void OnCaretBoundsChanged(const TextInputClient* client) override;
++  void CancelComposition(const TextInputClient* client) override;
++  void OnInputLocaleChanged() override;
++  bool IsInputLocaleCJK() const override;
++  bool IsCandidatePopupOpen() const override;
++  void OnUrlChanged() override;
++
++ protected:
++  // Overridden from InputMethodBase:
++  // If a derived class overrides this method, it should call parent's
++  // implementation.
++  void OnWillChangeFocusedClient(TextInputClient* focused_before,
++                                 TextInputClient* focused) override;
++  void OnDidChangeFocusedClient(TextInputClient* focused_before,
++                                TextInputClient* focused) override;
++
++ private:
++  LRESULT OnImeSetContext(HWND window_handle,
++                          UINT message,
++                          WPARAM wparam,
++                          LPARAM lparam,
++                          BOOL* handled);
++  LRESULT OnImeStartComposition(HWND window_handle,
++                                UINT message,
++                                WPARAM wparam,
++                                LPARAM lparam,
++                                BOOL* handled);
++  LRESULT OnImeComposition(HWND window_handle,
++                           UINT message,
++                           WPARAM wparam,
++                           LPARAM lparam,
++                           BOOL* handled);
++  LRESULT OnImeEndComposition(HWND window_handle,
++                              UINT message,
++                              WPARAM wparam,
++                              LPARAM lparam,
++                              BOOL* handled);
++  LRESULT OnImeNotify(UINT message,
++                      WPARAM wparam,
++                      LPARAM lparam,
++                      BOOL* handled);
++
++  void RefreshInputLanguage();
++
++  // Enables or disables the IME according to the current text input type.
++  void UpdateIMEState();
++
++  void ConfirmCompositionText();
++
++  // Gets the text input mode of the focused text input client. Returns
++  // ui::TEXT_INPUT_MODE_DEFAULT if there is no focused client.
++  TextInputMode GetTextInputMode() const;
++
++  // Windows IMM32 wrapper.
++  // (See "ui/base/ime/win/ime_input.h" for its details.)
++  ui::IMM32Manager imm32_manager_;
++
++  // True when an IME should be allowed to process key events.
++  bool enabled_;
++
++  // True if we know for sure that a candidate window is open.
++  bool is_candidate_popup_open_;
++
++  // Window handle where composition is on-going. NULL when there is no
++  // composition.
++  HWND composing_window_handle_;
++};
++
++}  // namespace ui
++
++#endif  // UI_BASE_IME_WIN_INPUT_METHOD_WIN_IMM32_H_
+diff --git a/ui/base/ime/win/tsf_bridge.cc b/ui/base/ime/win/tsf_bridge.cc
+index 8b3e5acd96ea1..65872bc53378e 100644
+--- a/ui/base/ime/win/tsf_bridge.cc
++++ b/ui/base/ime/win/tsf_bridge.cc
+@@ -716,6 +716,10 @@ HRESULT TSFBridge::Initialize() {
+     return S_OK;
+   }
+ 
++  // If we aren't supporting TSF early out.
++  if (!base::FeatureList::IsEnabled(features::kTSFImeSupport))
++    return E_FAIL;
++
+   auto delegate = std::make_unique<TSFBridgeImpl>();
+   HRESULT hr = delegate->Initialize();
+   if (SUCCEEDED(hr)) {
+@@ -729,6 +733,8 @@ void TSFBridge::InitializeForTesting() {
+   if (!base::CurrentUIThread::IsSet()) {
+     return;
+   }
++  if (!base::FeatureList::IsEnabled(features::kTSFImeSupport))
++    return;
+   ReplaceThreadLocalTSFBridge(std::make_unique<MockTSFBridge>());
+ }
+ 
+diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
+index 152122c117cdd..74f237a723496 100644
+--- a/ui/base/ui_base_features.cc
++++ b/ui/base/ui_base_features.cc
+@@ -253,6 +253,8 @@ BASE_FEATURE(kInputPaneOnScreenKeyboard,
+ BASE_FEATURE(kDragDropOnlySynthesizeHttpOrHttpsUrlsFromText,
+              "DragDropOnlySynthesizeHttpOrHttpsUrlsFromText",
+              base::FEATURE_ENABLED_BY_DEFAULT);
++// Enables using TSF (over IMM32) for IME.
++BASE_FEATURE(kTSFImeSupport, "TSFImeSupport", base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ bool IsImprovedKeyboardShortcutsEnabled() {
+diff --git a/ui/base/ui_base_features.h b/ui/base/ui_base_features.h
+index 67f99842c04e5..bc886048bf776 100644
+--- a/ui/base/ui_base_features.h
++++ b/ui/base/ui_base_features.h
+@@ -57,6 +57,7 @@ BASE_DECLARE_FEATURE(kInputPaneOnScreenKeyboard);
+ BASE_DECLARE_FEATURE(kApplyNativeOccludedRegionToWindowTracker);
+ COMPONENT_EXPORT(UI_BASE_FEATURES)
+ BASE_DECLARE_FEATURE(kCalculateNativeWinOcclusion);
++COMPONENT_EXPORT(UI_BASE_FEATURES) BASE_DECLARE_FEATURE(kTSFImeSupport);
+ 
+ COMPONENT_EXPORT(UI_BASE_FEATURES)
+ BASE_DECLARE_FEATURE(kApplyNativeOcclusionToCompositor);

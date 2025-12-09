@@ -1,0 +1,109 @@
+diff --git a/base/process/memory.h b/base/process/memory.h
+index 62c3312598a15..f7fc569abaf3b 100644
+--- a/base/process/memory.h
++++ b/base/process/memory.h
+@@ -25,6 +25,14 @@
+ 
+ namespace base {
+ 
++// Enables low fragmentation heap (LFH) for every heaps of this process. This
++// won't have any effect on heaps created after this function call. It will not
++// modify data allocated in the heaps before calling this function. So it is
++// better to call this function early in initialization and again before
++// entering the main loop.
++// Note: Returns true on Windows 2000 without doing anything.
++BASE_EXPORT bool EnableLowFragmentationHeap();
++
+ // Enables 'terminate on heap corruption' flag. Helps protect against heap
+ // overflow. Has no effect if the OS doesn't provide the necessary facility.
+ BASE_EXPORT void EnableTerminationOnHeapCorruption();
+diff --git a/base/process/memory_win.cc b/base/process/memory_win.cc
+index 17d588aab739b..643beaf860e29 100644
+--- a/base/process/memory_win.cc
++++ b/base/process/memory_win.cc
+@@ -4,6 +4,7 @@
+ 
+ #include <windows.h>  // Must be in front of other Windows header files.
+ 
++#include <memory>
+ #include <new.h>
+ #include <psapi.h>
+ #include <stddef.h>
+@@ -50,8 +50,46 @@ typedef BOOL (WINAPI* HeapSetFn)(HANDLE, HEAP_INFORMATION_CLASS, PVOID, SIZE_T);
+   TerminateBecauseOutOfMemory(size);
+ }
+ 
++// HeapSetInformation function pointer.
++typedef BOOL (WINAPI* HeapSetFn)(HANDLE, HEAP_INFORMATION_CLASS, PVOID, SIZE_T);
++
+ }  // namespace
+ 
++bool EnableLowFragmentationHeap() {
++  HMODULE kernel32 = GetModuleHandle(L"kernel32.dll");
++  HeapSetFn heap_set = reinterpret_cast<HeapSetFn>(GetProcAddress(
++      kernel32,
++      "HeapSetInformation"));
++
++  // On Windows 2000, the function is not exported. This is not a reason to
++  // fail.
++  if (!heap_set)
++    return true;
++
++  unsigned number_heaps = GetProcessHeaps(0, NULL);
++  if (!number_heaps)
++    return false;
++
++  // Gives us some extra space in the array in case a thread is creating heaps
++  // at the same time we're querying them.
++  static const int MARGIN = 8;
++  std::unique_ptr<HANDLE[]> heaps(new HANDLE[number_heaps + MARGIN]);
++  number_heaps = GetProcessHeaps(number_heaps + MARGIN, heaps.get());
++  if (!number_heaps)
++    return false;
++
++  for (unsigned i = 0; i < number_heaps; ++i) {
++    ULONG lfh_flag = 2;
++    // Don't bother with the result code. It may fails on heaps that have the
++    // HEAP_NO_SERIALIZE flag. This is expected and not a problem at all.
++    heap_set(heaps[i],
++             HeapCompatibilityInformation,
++             &lfh_flag,
++             sizeof(lfh_flag));
++  }
++  return true;
++}
++
+ void EnableTerminationOnHeapCorruption() {
+   // Ignore the result code. Supported on XP SP3 and Vista.
+   HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
+diff --git a/chrome/app/chrome_exe_main_win.cc b/chrome/app/chrome_exe_main_win.cc
+index 7139ba3d37463..a180fd0f43370 100644
+--- a/chrome/app/chrome_exe_main_win.cc
++++ b/chrome/app/chrome_exe_main_win.cc
+@@ -130,6 +130,17 @@ void EnableHighDPISupport() {
+          NotifyChromeResult::NOTIFY_SUCCESS;
+ }
+ 
++void SwitchToLFHeap() {
++  // Only needed on XP but harmless on other Windows flavors.
++  auto crt_heap = _get_heap_handle();
++  ULONG enable_LFH = 2;
++  if (HeapSetInformation(reinterpret_cast<HANDLE>(crt_heap),
++                         HeapCompatibilityInformation,
++                         &enable_LFH, sizeof(enable_LFH))) {
++    VLOG(1) << "Low fragmentation heap enabled.";
++  }
++}
++
+ // Returns true if the child process |command_line| contains a /prefetch:#
+ // argument where # is in [1, 8] prior to Win11 and [1,16] for it and later.
+ // The intent of the function is to ensure that all child processes have a
+@@ -194,6 +205,8 @@ int main() {
+     return RunFallbackCrashHandler(*command_line);
+   }
+ 
++  SwitchToLFHeap();
++
+   const base::TimeTicks exe_entry_point_ticks = base::TimeTicks::Now();
+ 
+   // Signal Chrome Elf that Chrome has begun to start.
