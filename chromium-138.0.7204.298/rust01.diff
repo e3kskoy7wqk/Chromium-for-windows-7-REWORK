@@ -1,0 +1,446 @@
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/backtrace/src/symbolize/dbghelp.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/backtrace/src/symbolize/dbghelp.rs
+index d3b688f..933019d 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/backtrace/src/symbolize/dbghelp.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/backtrace/src/symbolize/dbghelp.rs
+@@ -78,26 +78,6 @@ impl Symbol<'_> {
+ #[repr(C, align(8))]
+ struct Aligned8<T>(T);
+ 
+-#[cfg(not(target_vendor = "win7"))]
+-pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol)) {
+-    // Ensure this process's symbols are initialized
+-    let dbghelp = match dbghelp::init() {
+-        Ok(dbghelp) => dbghelp,
+-        Err(()) => return, // oh well...
+-    };
+-    unsafe {
+-        match what {
+-            ResolveWhat::Address(_) => {
+-                resolve_with_inline(&dbghelp, what.address_or_ip(), None, cb)
+-            }
+-            ResolveWhat::Frame(frame) => {
+-                resolve_with_inline(&dbghelp, frame.ip(), frame.inner.inline_context(), cb)
+-            }
+-        };
+-    }
+-}
+-
+-#[cfg(target_vendor = "win7")]
+ pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol)) {
+     // Ensure this process's symbols are initialized
+     let dbghelp = match dbghelp::init() {
+@@ -128,7 +108,6 @@ pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol))
+ ///
+ /// This should work all the way down to Windows XP. The inline context is
+ /// ignored, since this concept was only introduced in dbghelp 6.2+.
+-#[cfg(target_vendor = "win7")]
+ unsafe fn resolve_legacy(
+     dbghelp: &dbghelp::Init,
+     addr: *mut c_void,
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/fs/tests.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/fs/tests.rs
+index 6dd18e4..4e64148 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/fs/tests.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/fs/tests.rs
+@@ -1384,18 +1384,6 @@ fn file_try_clone() {
+     check!(f1.write_all(b"!"));
+ }
+ 
+-#[test]
+-#[cfg(not(target_vendor = "win7"))]
+-fn unlink_readonly() {
+-    let tmpdir = tmpdir();
+-    let path = tmpdir.join("file");
+-    check!(File::create(&path));
+-    let mut perm = check!(fs::metadata(&path)).permissions();
+-    perm.set_readonly(true);
+-    check!(fs::set_permissions(&path, perm));
+-    check!(fs::remove_file(&path));
+-}
+-
+ #[test]
+ fn mkdir_trailing_slash() {
+     let tmpdir = tmpdir();
+@@ -1918,7 +1906,6 @@ fn test_hidden_file_truncation() {
+ // these two tests are disabled under Windows 7 here.
+ #[cfg(windows)]
+ #[test]
+-#[cfg_attr(target_vendor = "win7", ignore = "Unsupported under Windows 7.")]
+ fn test_rename_file_over_open_file() {
+     // Make sure that std::fs::rename works if the target file is already opened with FILE_SHARE_DELETE. See #123985.
+     let tmpdir = tmpdir();
+@@ -1943,7 +1930,6 @@ fn test_rename_file_over_open_file() {
+ 
+ #[test]
+ #[cfg(windows)]
+-#[cfg_attr(target_vendor = "win7", ignore = "Unsupported under Windows 7.")]
+ fn test_rename_directory_to_non_empty_directory() {
+     // Renaming a directory over a non-empty existing directory should fail on Windows.
+     let tmpdir: TempDir = tmpdir();
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs
+index 004cbee..eed9725 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs
+@@ -19,9 +19,7 @@ pub const INVALID_HANDLE_VALUE: HANDLE = ::core::ptr::without_provenance_mut(-1i
+ pub const EXIT_SUCCESS: u32 = 0;
+ pub const EXIT_FAILURE: u32 = 1;
+ 
+-#[cfg(target_vendor = "win7")]
+ pub const CONDITION_VARIABLE_INIT: CONDITION_VARIABLE = CONDITION_VARIABLE { Ptr: ptr::null_mut() };
+-#[cfg(target_vendor = "win7")]
+ pub const SRWLOCK_INIT: SRWLOCK = SRWLOCK { Ptr: ptr::null_mut() };
+ #[cfg(not(target_thread_local))]
+ pub const INIT_ONCE_STATIC_INIT: INIT_ONCE = INIT_ONCE { Ptr: ptr::null_mut() };
+@@ -108,17 +106,6 @@ if #[cfg(not(target_vendor = "uwp"))] {
+ }
+ }
+ 
+-// Use raw-dylib to import ProcessPrng as we can't rely on there being an import library.
+-#[cfg(not(target_vendor = "win7"))]
+-#[cfg_attr(
+-    target_arch = "x86",
+-    link(name = "bcryptprimitives", kind = "raw-dylib", import_name_type = "undecorated")
+-)]
+-#[cfg_attr(not(target_arch = "x86"), link(name = "bcryptprimitives", kind = "raw-dylib"))]
+-unsafe extern "system" {
+-    pub fn ProcessPrng(pbdata: *mut u8, cbdata: usize) -> BOOL;
+-}
+-
+ // Functions that aren't available on every version of Windows that we support,
+ // but we still use them and just provide some form of a fallback implementation.
+ compat_fn_with_fallback! {
+@@ -138,7 +125,6 @@ compat_fn_with_fallback! {
+ 
+     // >= Win8 / Server 2012
+     // https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimepreciseasfiletime
+-    #[cfg(target_vendor = "win7")]
+     pub fn GetSystemTimePreciseAsFileTime(lpsystemtimeasfiletime: *mut FILETIME) -> () {
+         unsafe { GetSystemTimeAsFileTime(lpsystemtimeasfiletime) }
+     }
+@@ -150,33 +136,6 @@ compat_fn_with_fallback! {
+     }
+ }
+ 
+-#[cfg(not(target_vendor = "win7"))]
+-// Use raw-dylib to import synchronization functions to workaround issues with the older mingw import library.
+-#[cfg_attr(
+-    target_arch = "x86",
+-    link(
+-        name = "api-ms-win-core-synch-l1-2-0",
+-        kind = "raw-dylib",
+-        import_name_type = "undecorated"
+-    )
+-)]
+-#[cfg_attr(
+-    not(target_arch = "x86"),
+-    link(name = "api-ms-win-core-synch-l1-2-0", kind = "raw-dylib")
+-)]
+-unsafe extern "system" {
+-    pub fn WaitOnAddress(
+-        address: *const c_void,
+-        compareaddress: *const c_void,
+-        addresssize: usize,
+-        dwmilliseconds: u32,
+-    ) -> BOOL;
+-    pub fn WakeByAddressSingle(address: *const c_void);
+-    pub fn WakeByAddressAll(address: *const c_void);
+-}
+-
+-// These are loaded by `load_synch_functions`.
+-#[cfg(target_vendor = "win7")]
+ compat_fn_optional! {
+     pub fn WaitOnAddress(
+         address: *const c_void,
+@@ -187,11 +146,9 @@ compat_fn_optional! {
+     pub fn WakeByAddressSingle(address: *const c_void);
+ }
+ 
+-#[cfg(any(target_vendor = "win7", target_vendor = "uwp"))]
+ compat_fn_with_fallback! {
+     pub static NTDLL: &CStr = c"ntdll";
+ 
+-    #[cfg(target_vendor = "win7")]
+     pub fn NtCreateKeyedEvent(
+         KeyedEventHandle: *mut HANDLE,
+         DesiredAccess: u32,
+@@ -200,7 +157,6 @@ compat_fn_with_fallback! {
+     ) -> NTSTATUS {
+         panic!("keyed events not available")
+     }
+-    #[cfg(target_vendor = "win7")]
+     pub fn NtReleaseKeyedEvent(
+         EventHandle: HANDLE,
+         Key: *const c_void,
+@@ -209,7 +165,6 @@ compat_fn_with_fallback! {
+     ) -> NTSTATUS {
+         panic!("keyed events not available")
+     }
+-    #[cfg(target_vendor = "win7")]
+     pub fn NtWaitForKeyedEvent(
+         EventHandle: HANDLE,
+         Key: *const c_void,
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs
+index 2b98384..c0f0d53 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs
+@@ -37,7 +37,6 @@ use crate::sys::c;
+ // file an issue for discussion; currently we don't guarantee any functionality
+ // before main.
+ // See https://docs.microsoft.com/en-us/cpp/c-runtime-library/crt-initialization?view=msvc-170
+-#[cfg(target_vendor = "win7")]
+ #[used]
+ #[unsafe(link_section = ".CRT$XCT")]
+ static INIT_TABLE_ENTRY: unsafe extern "C" fn() = init;
+@@ -52,7 +51,6 @@ static INIT_TABLE_ENTRY: unsafe extern "C" fn() = init;
+ /// negative performance impact in practical situations.
+ ///
+ /// Currently we only preload `WaitOnAddress` and `WakeByAddressSingle`.
+-#[cfg(target_vendor = "win7")]
+ unsafe extern "C" fn init() {
+     // In an exe this code is executed before main() so is single threaded.
+     // In a DLL the system's loader lock will be held thereby synchronizing
+@@ -199,7 +197,6 @@ macro_rules! compat_fn_with_fallback {
+ /// Optionally loaded functions.
+ ///
+ /// Relies on the functions being pre-loaded elsewhere.
+-#[cfg(target_vendor = "win7")]
+ macro_rules! compat_fn_optional {
+     ($(
+         $(#[$meta:meta])*
+@@ -232,7 +229,6 @@ macro_rules! compat_fn_optional {
+ }
+ 
+ /// Load all needed functions from "api-ms-win-core-synch-l1-2-0".
+-#[cfg(target_vendor = "win7")]
+ pub(super) fn load_synch_functions() {
+     fn try_load() -> Option<()> {
+         use crate::sync::atomic::Ordering;
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/mod.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/mod.rs
+index 6eb68f3..21c5a44 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/mod.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/mod.rs
+@@ -17,8 +17,6 @@ pub mod api;
+ pub mod api;
+ 
+ pub mod c;
+-#[cfg(not(target_vendor = "win7"))]
+-pub mod futex;
+ pub mod handle;
+ pub mod os;
+ pub mod pipe;
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/os.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/os.rs
+index 044dc2e..235e0c0 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/os.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/os.rs
+@@ -321,33 +321,6 @@ pub fn temp_dir() -> PathBuf {
+     super::fill_utf16_buf(|buf, sz| unsafe { c::GetTempPath2W(sz, buf) }, super::os2path).unwrap()
+ }
+ 
+-#[cfg(all(not(target_vendor = "uwp"), not(target_vendor = "win7")))]
+-fn home_dir_crt() -> Option<PathBuf> {
+-    unsafe {
+-        // Defined in processthreadsapi.h.
+-        const CURRENT_PROCESS_TOKEN: usize = -4_isize as usize;
+-
+-        super::fill_utf16_buf(
+-            |buf, mut sz| {
+-                // GetUserProfileDirectoryW does not quite use the usual protocol for
+-                // negotiating the buffer size, so we have to translate.
+-                match c::GetUserProfileDirectoryW(
+-                    ptr::without_provenance_mut(CURRENT_PROCESS_TOKEN),
+-                    buf,
+-                    &mut sz,
+-                ) {
+-                    0 if api::get_last_error() != WinError::INSUFFICIENT_BUFFER => 0,
+-                    0 => sz,
+-                    _ => sz - 1, // sz includes the null terminator
+-                }
+-            },
+-            super::os2path,
+-        )
+-        .ok()
+-    }
+-}
+-
+-#[cfg(target_vendor = "win7")]
+ fn home_dir_crt() -> Option<PathBuf> {
+     unsafe {
+         use crate::sys::handle::Handle;
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/random/windows.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/random/windows.rs
+index f5da637..6bdd048 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/random/windows.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/random/windows.rs
+@@ -1,15 +1,5 @@
+ use crate::sys::c;
+ 
+-#[cfg(not(target_vendor = "win7"))]
+-#[inline]
+-pub fn fill_bytes(bytes: &mut [u8]) {
+-    let ret = unsafe { c::ProcessPrng(bytes.as_mut_ptr(), bytes.len()) };
+-    // ProcessPrng is documented as always returning `TRUE`.
+-    // https://learn.microsoft.com/en-us/windows/win32/seccng/processprng#return-value
+-    debug_assert_eq!(ret, c::TRUE);
+-}
+-
+-#[cfg(target_vendor = "win7")]
+ pub fn fill_bytes(mut bytes: &mut [u8]) {
+     while !bytes.is_empty() {
+         let len = bytes.len().try_into().unwrap_or(u32::MAX);
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/stdio/windows.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/stdio/windows.rs
+index 9b27f76..ae6406a 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/stdio/windows.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/stdio/windows.rs
+@@ -85,13 +85,6 @@ fn is_console(handle: c::HANDLE) -> bool {
+     unsafe { c::GetConsoleMode(handle, &mut mode) != 0 }
+ }
+ 
+-/// Returns true if the attached console's code page is currently UTF-8.
+-#[cfg(not(target_vendor = "win7"))]
+-fn is_utf8_console() -> bool {
+-    unsafe { c::GetConsoleOutputCP() == c::CP_UTF8 }
+-}
+-
+-#[cfg(target_vendor = "win7")]
+ fn is_utf8_console() -> bool {
+     // Windows 7 has a fun "feature" where WriteFile on a console handle will return
+     // the number of UTF-16 code units written and not the number of bytes from the input string.
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/mod.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/mod.rs
+index d0c998a..b3ae156 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/mod.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/mod.rs
+@@ -1,6 +1,5 @@
+ cfg_if::cfg_if! {
+     if #[cfg(any(
+-        all(target_os = "windows", not(target_vendor="win7")),
+         target_os = "linux",
+         target_os = "android",
+         target_os = "freebsd",
+@@ -18,7 +17,7 @@ cfg_if::cfg_if! {
+     ))] {
+         mod pthread;
+         pub use pthread::Condvar;
+-    } else if #[cfg(all(target_os = "windows", target_vendor = "win7"))] {
++    } else if #[cfg(target_os = "windows")] {
+         mod windows7;
+         pub use windows7::Condvar;
+     } else if #[cfg(all(target_vendor = "fortanix", target_env = "sgx"))] {
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/mod.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/mod.rs
+index 360df3f..37d9813 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/mod.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/mod.rs
+@@ -1,6 +1,5 @@
+ cfg_if::cfg_if! {
+     if #[cfg(any(
+-        all(target_os = "windows", not(target_vendor = "win7")),
+         target_os = "linux",
+         target_os = "android",
+         target_os = "freebsd",
+@@ -20,7 +19,7 @@ cfg_if::cfg_if! {
+     ))] {
+         mod pthread;
+         pub use pthread::Mutex;
+-    } else if #[cfg(all(target_os = "windows", target_vendor = "win7"))] {
++    } else if #[cfg(target_os = "windows")] {
+         mod windows7;
+         pub use windows7::{Mutex, raw};
+     } else if #[cfg(all(target_vendor = "fortanix", target_env = "sgx"))] {
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/once/mod.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/once/mod.rs
+index 0e38937..61b2971 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/once/mod.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/once/mod.rs
+@@ -9,7 +9,6 @@
+ 
+ cfg_if::cfg_if! {
+     if #[cfg(any(
+-        all(target_os = "windows", not(target_vendor="win7")),
+         target_os = "linux",
+         target_os = "android",
+         all(target_arch = "wasm32", target_feature = "atomics"),
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/rwlock/mod.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/rwlock/mod.rs
+index 70ba6bf..72ab729 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/rwlock/mod.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/rwlock/mod.rs
+@@ -1,6 +1,5 @@
+ cfg_if::cfg_if! {
+     if #[cfg(any(
+-        all(target_os = "windows", not(target_vendor = "win7")),
+         target_os = "linux",
+         target_os = "android",
+         target_os = "freebsd",
+@@ -14,7 +13,7 @@ cfg_if::cfg_if! {
+         pub use futex::RwLock;
+     } else if #[cfg(any(
+         target_family = "unix",
+-        all(target_os = "windows", target_vendor = "win7"),
++        target_os = "windows",
+         all(target_vendor = "fortanix", target_env = "sgx"),
+         target_os = "xous",
+     ))] {
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/mod.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/mod.rs
+index f4d8fa0..95dfcf5 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/mod.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/mod.rs
+@@ -1,6 +1,5 @@
+ cfg_if::cfg_if! {
+     if #[cfg(any(
+-        all(target_os = "windows", not(target_vendor = "win7")),
+         target_os = "linux",
+         target_os = "android",
+         all(target_arch = "wasm32", target_feature = "atomics"),
+@@ -19,7 +18,7 @@ cfg_if::cfg_if! {
+     ))] {
+         mod id;
+         pub use id::Parker;
+-    } else if #[cfg(target_vendor = "win7")] {
++    } else if #[cfg(target_os = "windows")] {
+         mod windows7;
+         pub use windows7::Parker;
+     } else if #[cfg(all(target_vendor = "apple", not(miri)))] {
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/windows7.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/windows7.rs
+index a1a0f84..ca07d11 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/windows7.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/thread_parking/windows7.rs
+@@ -110,7 +110,6 @@ impl Parker {
+             return;
+         }
+ 
+-        #[cfg(target_vendor = "win7")]
+         if c::WaitOnAddress::option().is_none() {
+             return keyed_events::park(self);
+         }
+@@ -138,7 +137,6 @@ impl Parker {
+             return;
+         }
+ 
+-        #[cfg(target_vendor = "win7")]
+         if c::WaitOnAddress::option().is_none() {
+             return keyed_events::park_timeout(self, timeout);
+         }
+@@ -168,7 +166,6 @@ impl Parker {
+         // with park().
+         if self.state.swap(NOTIFIED, Release) == PARKED {
+             unsafe {
+-                #[cfg(target_vendor = "win7")]
+                 if c::WakeByAddressSingle::option().is_none() {
+                     return keyed_events::unpark(self);
+                 }
+@@ -182,7 +179,6 @@ impl Parker {
+     }
+ }
+ 
+-#[cfg(target_vendor = "win7")]
+ mod keyed_events {
+     use core::pin::Pin;
+     use core::ptr;
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/windows_targets/src/lib.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/windows_targets/src/lib.rs
+index c7d1585..432471a 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/windows_targets/src/lib.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/windows_targets/src/lib.rs
+@@ -34,7 +34,7 @@ pub macro link {
+ }
+ 
+ #[cfg(not(feature = "windows_raw_dylib"))]
+-#[cfg_attr(target_vendor = "win7", link(name = "advapi32"))]
++#[link(name = "advapi32")]
+ #[link(name = "ntdll")]
+ #[link(name = "userenv")]
+ #[link(name = "ws2_32")]

@@ -1,0 +1,24 @@
+diff --git a/content/child/font_warmup_win.cc b/content/child/font_warmup_win.cc
+index d71bd63281f51..f8a50e5081e8a 100644
+--- a/content/child/font_warmup_win.cc
++++ b/content/child/font_warmup_win.cc
+@@ -24,6 +22,7 @@
+ #include "base/synchronization/lock.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/win/iat_patch_function.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "ppapi/buildflags/buildflags.h"
+ #include "third_party/skia/include/core/SkFontMgr.h"
+@@ -392,7 +391,10 @@ void PatchServiceManagerCalls() {
+   static bool is_patched = false;
+   if (is_patched)
+     return;
+-  const char* service_provider_dll = "api-ms-win-service-management-l1-1-0.dll";
++  const char* service_provider_dll =
++      (base::win::GetVersion() >= base::win::Version::WIN8
++           ? "api-ms-win-service-management-l1-1-0.dll"
++           : "advapi32.dll");
+ 
+   is_patched = true;
+ 

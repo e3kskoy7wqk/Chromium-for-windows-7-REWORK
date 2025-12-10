@@ -1,0 +1,141 @@
+diff --git a/crypto/unexportable_key_win.cc b/crypto/unexportable_key_win.cc
+index 3e3e4239a482e..795d342681d76 100644
+--- a/crypto/unexportable_key_win.cc
++++ b/crypto/unexportable_key_win.cc
+@@ -122,6 +122,9 @@ std::optional<SignatureVerifier::SignatureAlgorithm> GetBestSupported(
+     NCRYPT_PROV_HANDLE provider,
+     base::span<const SignatureVerifier::SignatureAlgorithm>
+         acceptable_algorithms) {
++  if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptIsAlgSupported" ))
++    return std::nullopt;
++
+   for (auto algo : acceptable_algorithms) {
+     std::optional<LPCWSTR> bcrypto_algo_name = BCryptAlgorithmFor(algo);
+     if (!bcrypto_algo_name) {
+@@ -143,6 +146,9 @@ std::optional<std::vector<uint8_t>> GetKeyProperty(NCRYPT_KEY_HANDLE key,
+                                                    LPCWSTR property) {
+   SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+   DWORD size;
++  if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptGetProperty" ))
++    return std::nullopt;
++
+   if (FAILED(NCryptGetProperty(key, property, nullptr, 0, &size, 0))) {
+     return std::nullopt;
+   }
+@@ -161,6 +167,9 @@ std::optional<std::vector<uint8_t>> GetKeyProperty(NCRYPT_KEY_HANDLE key,
+ base::expected<std::vector<uint8_t>, SECURITY_STATUS> ExportKey(
+     NCRYPT_KEY_HANDLE key,
+     LPCWSTR format) {
++  if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptExportKey" ))
++    return base::unexpected(NTE_FAIL);
++
+   SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+   DWORD output_size;
+   SECURITY_STATUS status =
+@@ -292,6 +301,9 @@ std::optional<std::vector<uint8_t>> GetRSASPKI(NCRYPT_KEY_HANDLE key) {
+ base::expected<std::vector<uint8_t>, SECURITY_STATUS> SignECDSA(
+     NCRYPT_KEY_HANDLE key,
+     base::span<const uint8_t> data) {
++  if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptSignHash" ))
++    return base::unexpected(NTE_FAIL);
++
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::WILL_BLOCK);
+ 
+@@ -326,6 +338,9 @@ base::expected<std::vector<uint8_t>, SECURITY_STATUS> SignECDSA(
+ base::expected<std::vector<uint8_t>, SECURITY_STATUS> SignRSA(
+     NCRYPT_KEY_HANDLE key,
+     base::span<const uint8_t> data) {
++  if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptSignHash" ))
++    return base::unexpected(NTE_FAIL);
++
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::WILL_BLOCK);
+ 
+@@ -358,6 +373,11 @@ bool LoadWrappedKey(base::span<const uint8_t> wrapped,
+ 
+ ScopedNCryptKey LoadWrappedKey(base::span<const uint8_t> wrapped,
+                                ProviderType provider_type) {
++  if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenStorageProvider" ) ||
++      !GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenKey" ) ||
++      !GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptImportKey" ))
++    return ScopedNCryptKey();
++
+   SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+   ScopedNCryptProvider provider;
+   if (FAILED(NCryptOpenStorageProvider(
+@@ -485,6 +505,9 @@ class UnexportableKeyProviderWin : public UnexportableKeyProvider {
+   std::optional<SignatureVerifier::SignatureAlgorithm> SelectAlgorithm(
+       base::span<const SignatureVerifier::SignatureAlgorithm>
+           acceptable_algorithms) override {
++    if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenStorageProvider" ))
++      return std::nullopt;
++
+     ScopedNCryptProvider provider;
+     {
+       SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+@@ -501,6 +524,11 @@ class UnexportableKeyProviderWin : public UnexportableKeyProvider {
+   std::unique_ptr<UnexportableSigningKey> GenerateSigningKeySlowly(
+       base::span<const SignatureVerifier::SignatureAlgorithm>
+           acceptable_algorithms) override {
++    if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenStorageProvider" ) ||
++        !GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptCreatePersistedKey" ) ||
++        !GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptFinalizeKey" ))
++      return nullptr;
++
+     base::ScopedBlockingCall scoped_blocking_call(
+         FROM_HERE, base::BlockingType::WILL_BLOCK);
+ 
+@@ -679,6 +707,9 @@ class ECDSASoftwareKey : public VirtualUnexportableSigningKey {
+   }
+ 
+   void DeleteKey() override {
++    if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptDeleteKey" ))
++      return;
++
+     if (!key_.is_valid()) {
+       return;
+     }
+@@ -727,6 +758,9 @@ class RSASoftwareKey : public VirtualUnexportableSigningKey {
+   }
+ 
+   void DeleteKey() override {
++    if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptDeleteKey" ))
++      return;
++
+     if (!key_.is_valid()) {
+       return;
+     }
+@@ -757,6 +791,9 @@ class VirtualUnexportableKeyProviderWin
+   std::optional<SignatureVerifier::SignatureAlgorithm> SelectAlgorithm(
+       base::span<const SignatureVerifier::SignatureAlgorithm>
+           acceptable_algorithms) override {
++    if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenStorageProvider" ))
++      return std::nullopt;
++
+     ScopedNCryptProvider provider;
+     {
+       SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY();
+@@ -776,6 +813,11 @@ class VirtualUnexportableKeyProviderWin
+       base::span<const SignatureVerifier::SignatureAlgorithm>
+           acceptable_algorithms,
+       std::string name) override {
++    if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenStorageProvider" ) ||
++        !GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptCreatePersistedKey" ) ||
++        !GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptFinalizeKey" ))
++      return nullptr;
++
+     base::ScopedBlockingCall scoped_blocking_call(
+         FROM_HERE, base::BlockingType::WILL_BLOCK);
+ 
+@@ -842,6 +884,10 @@ class VirtualUnexportableKeyProviderWin
+ 
+   std::unique_ptr<VirtualUnexportableSigningKey> FromKeyName(
+       std::string name) override {
++    if (!GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenStorageProvider" ) ||
++        !GetProcAddress( LoadLibraryW( L"Ncrypt.dll" ), "NCryptOpenKey" ))
++      return nullptr;
++
+     base::ScopedBlockingCall scoped_blocking_call(
+         FROM_HERE, base::BlockingType::WILL_BLOCK);
+ 

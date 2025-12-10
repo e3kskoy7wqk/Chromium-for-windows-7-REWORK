@@ -1,0 +1,677 @@
+diff --git a/media/audio/win/core_audio_util_win.cc b/media/audio/win/core_audio_util_win.cc
+index 5c84f4f2e058a..bd6cea5c1441a 100644
+--- a/media/audio/win/core_audio_util_win.cc
++++ b/media/audio/win/core_audio_util_win.cc
+@@ -599,6 +600,19 @@ base::TimeDelta CoreAudioUtil::ReferenceTimeToTimeDelta(REFERENCE_TIME time) {
+   return AUDCLNT_SHAREMODE_SHARED;
+ }
+ 
++uint32_t CoreAudioUtil::GetIAudioClientVersion() {
++  if (base::win::GetVersion() >= base::win::Version::WIN10) {
++    // Minimum supported client: Windows 10.
++    // Minimum supported server: Windows Server 2016
++    return 3;
++  } else if (base::win::GetVersion() >= base::win::Version::WIN8) {
++    // Minimum supported client: Windows 8.
++    // Minimum supported server: Windows Server 2012.
++    return 2;
++  }
++  return 1;
++}
++
+ int CoreAudioUtil::NumberOfActiveDevices(EDataFlow data_flow) {
+   // Create the IMMDeviceEnumerator interface.
+   ComPtr<IMMDeviceEnumerator> device_enumerator = CreateDeviceEnumerator();
+diff --git a/media/audio/win/core_audio_util_win.h b/media/audio/win/core_audio_util_win.h
+index 223e7e957e9da..34c07cbcc8304 100644
+--- a/media/audio/win/core_audio_util_win.h
++++ b/media/audio/win/core_audio_util_win.h
+@@ -79,6 +79,10 @@ class MEDIA_EXPORT CoreAudioUtil {
+   // Example: double s = RefererenceTimeToTimeDelta(t).InMillisecondsF();
+   static base::TimeDelta ReferenceTimeToTimeDelta(REFERENCE_TIME time);
+ 
++  // Returns 1, 2, or 3 corresponding to the highest version of IAudioClient
++  // the platform supports.
++  static uint32_t GetIAudioClientVersion();
++
+   // Returns AUDCLNT_SHAREMODE_EXCLUSIVE if --enable-exclusive-mode is used
+   // as command-line flag and AUDCLNT_SHAREMODE_SHARED otherwise (default).
+   static AUDCLNT_SHAREMODE GetShareMode();
+diff --git a/media/audio/win/core_audio_util_win_unittest.cc b/media/audio/win/core_audio_util_win_unittest.cc
+index cd88148d8b540..d1d5b4702506b 100644
+--- a/media/audio/win/core_audio_util_win_unittest.cc
++++ b/media/audio/win/core_audio_util_win_unittest.cc
+@@ -104,6 +104,12 @@ TEST_F(CoreAudioUtilWinTest, WaveFormatWrapperExtended) {
+   EXPECT_TRUE(wave_format_ex.IsFloat());
+ }
+ 
++TEST_F(CoreAudioUtilWinTest, GetIAudioClientVersion) {
++  uint32_t client_version = CoreAudioUtil::GetIAudioClientVersion();
++  EXPECT_GE(client_version, 1u);
++  EXPECT_LE(client_version, 3u);
++}
++
+ TEST_F(CoreAudioUtilWinTest, NumberOfActiveDevices) {
+   ABORT_AUDIO_TEST_IF_NOT(DevicesAvailable());
+ 
+@@ -280,7 +286,8 @@ TEST_F(CoreAudioUtilWinTest, CreateClient) {
+ }
+ 
+ TEST_F(CoreAudioUtilWinTest, CreateClient3) {
+-  ABORT_AUDIO_TEST_IF_NOT(DevicesAvailable());
++  ABORT_AUDIO_TEST_IF_NOT(DevicesAvailable() &&
++                          CoreAudioUtil::GetIAudioClientVersion() >= 3);
+ 
+   EDataFlow data[] = {eRender, eCapture};
+ 
+diff --git a/media/base/win/dxgi_device_manager.cc b/media/base/win/dxgi_device_manager.cc
+index 30876d22752ed..1e953a4e40e45 100644
+--- a/media/base/win/dxgi_device_manager.cc
++++ b/media/base/win/dxgi_device_manager.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "base/check.h"
+ #include "base/logging.h"
++#include "base/win/windows_version.h"
+ #include "media/base/win/mf_helpers.h"
+ #include "media/base/win/mf_initializer.h"
+ 
+@@ -60,7 +59,7 @@ Microsoft::WRL::ComPtr<ID3D11Device> DXGIDeviceScopedHandle::GetDevice() {
+ }
+ 
+ scoped_refptr<DXGIDeviceManager> DXGIDeviceManager::Create(CHROME_LUID luid) {
+-  if (!InitializeMediaFoundation()) {
++  if (base::win::GetVersion() < base::win::Version::WIN8 ||!InitializeMediaFoundation()) {
+     DLOG(ERROR) << "MF DXGI Device Manager is not available";
+     return nullptr;
+   }
+diff --git a/media/base/win/dxgi_device_scope_handle_unittest.cc b/media/base/win/dxgi_device_scope_handle_unittest.cc
+index bbd6d2fc793b1..64716c161a624 100644
+--- a/media/base/win/dxgi_device_scope_handle_unittest.cc
++++ b/media/base/win/dxgi_device_scope_handle_unittest.cc
+@@ -5,6 +5,7 @@
+ #include <d3d11.h>
+ #include <mfapi.h>
+ 
++#include "base/win/windows_version.h"
+ #include "media/base/test_helpers.h"
+ #include "media/base/win/dxgi_device_manager.h"
+ #include "media/base/win/mf_initializer.h"
+@@ -15,11 +16,15 @@ using Microsoft::WRL::ComPtr;
+ 
+ class DXGIDeviceScopedHandleTest : public testing::Test {
+  public:
+-  DXGIDeviceScopedHandleTest() = default;
++  DXGIDeviceScopedHandleTest()
++      : test_supported_(base::win::GetVersion() >= base::win::Version::WIN10) {}
+   ~DXGIDeviceScopedHandleTest() override = default;
+ 
+  protected:
+   void SetUp() override {
++    if (!test_supported_)
++      return;
++
+     ASSERT_TRUE(InitializeMediaFoundation());
+ 
+     // Get a shared DXGI Device Manager from Media Foundation.
+@@ -50,14 +55,20 @@ class DXGIDeviceScopedHandleTest : public testing::Test {
+   }
+ 
+   void TearDown() override {
+-    ASSERT_HRESULT_SUCCEEDED(MFUnlockDXGIDeviceManager());
++    if (test_supported_) {
++      ASSERT_HRESULT_SUCCEEDED(MFUnlockDXGIDeviceManager());
++    }
+   }
+ 
+   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> dxgi_device_man_ = nullptr;
+   UINT device_reset_token_ = 0;
++  const bool test_supported_;
+ };
+ 
+ TEST_F(DXGIDeviceScopedHandleTest, LockDevice) {
++  if (!test_supported_)
++    return;
++
+   {
+     // Create DXGIDeviceScopedHandle in an inner scope without LockDevice
+     // call.
+@@ -77,6 +88,9 @@ TEST_F(DXGIDeviceScopedHandleTest, LockDevice) {
+ }
+ 
+ TEST_F(DXGIDeviceScopedHandleTest, GetDevice) {
++  if (!test_supported_)
++    return;
++
+   {
+     // Create DXGIDeviceScopedHandle in an inner scope.
+     DXGIDeviceScopedHandle device_handle_1(dxgi_device_man_.Get());
+diff --git a/media/capture/video/win/video_capture_device_factory_win.cc b/media/capture/video/win/video_capture_device_factory_win.cc
+index b881e2f070305..c731cfe5772f3 100644
+--- a/media/capture/video/win/video_capture_device_factory_win.cc
++++ b/media/capture/video/win/video_capture_device_factory_win.cc
+@@ -284,6 +280,12 @@ DevicesInfo::const_iterator FindNonDirectShowDeviceInfoByNameAndModel(
+ }
+ 
+ bool IsEnclosureLocationSupported() {
++  // DeviceInformation class is only available in Win10 onwards (v10.0.10240.0).
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    DVLOG(1) << "DeviceInformation not supported before Windows 10";
++    return false;
++  }
++
+   if (!(base::win::ResolveCoreWinRTDelayload() &&
+         ScopedHString::ResolveCoreWinRTStringDelayload())) {
+     DLOG(ERROR) << "Failed loading functions from combase.dll";
+diff --git a/media/capture/video/win/video_capture_device_utils_win.cc b/media/capture/video/win/video_capture_device_utils_win.cc
+index 53d314378af02..e2fd2b0c14f6c 100644
+--- a/media/capture/video/win/video_capture_device_utils_win.cc
++++ b/media/capture/video/win/video_capture_device_utils_win.cc
+@@ -7,8 +7,8 @@
+ #include <cmath>
+ #include <iostream>
+ 
+-#include "base/check_op.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ 
+ namespace media {
+ 
+@@ -82,6 +82,9 @@ double PlatformExposureTimeToCaptureStep(long log_step,
+ int GetCameraRotation(VideoFacingMode facing) {
+   int rotation = 0;
+ 
++  // Before Win10, we can't distinguish if the selected camera is an internal or
++  // external one. So we assume it's internal and do the frame rotation if the
++  // auto rotation is enabled to cover most user cases.
+   if (!IsInternalCamera(facing)) {
+     return rotation;
+   }
+@@ -95,9 +98,13 @@ int GetCameraRotation(VideoFacingMode facing) {
+     return rotation;
+   }
+ 
+-  // Windows cameras with VideoFacingMode::MEDIA_VIDEO_FACING_NONE should early
+-  // exit as part of the IsInternalCamera(facing) check above.
+-  DCHECK_NE(facing, VideoFacingMode::MEDIA_VIDEO_FACING_NONE);
++  if (facing == VideoFacingMode::MEDIA_VIDEO_FACING_NONE) {
++    // We set camera facing using Win10 only DeviceInformation API. So pre-Win10
++    // cameras always have a facing of VideoFacingMode::MEDIA_VIDEO_FACING_NONE.
++    // Win10 cameras with VideoFacingMode::MEDIA_VIDEO_FACING_NONE should early
++    // exit as part of the IsInternalCamera(facing) check above.
++    DCHECK(base::win::GetVersion() < base::win::Version::WIN10);
++  }
+ 
+   DEVMODE mode;
+   ::ZeroMemory(&mode, sizeof(mode));
+@@ -175,8 +182,16 @@ bool IsAutoRotationEnabled() {
+ }
+ 
+ bool IsInternalCamera(VideoFacingMode facing) {
+-  return facing == MEDIA_VIDEO_FACING_USER ||
+-         facing == MEDIA_VIDEO_FACING_ENVIRONMENT;
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    return true;
++  }
++
++  if (facing == MEDIA_VIDEO_FACING_USER ||
++      facing == MEDIA_VIDEO_FACING_ENVIRONMENT) {
++    return true;
++  }
++
++  return false;
+ }
+ 
+ bool HasActiveInternalDisplayDevice(DISPLAY_DEVICE* internal_display_device) {
+diff --git a/media/gpu/windows/mf_video_encoder_util.cc b/media/gpu/windows/mf_video_encoder_util.cc
+index d54b7176a97c8..6b41c13560ccd 100644
+--- a/media/gpu/windows/mf_video_encoder_util.cc
++++ b/media/gpu/windows/mf_video_encoder_util.cc
+@@ -27,6 +27,7 @@
+ #include "base/win/scoped_co_mem.h"
+ #include "base/win/scoped_variant.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "media/base/media_switches.h"
+ #include "media/base/win/mf_helpers.h"
+@@ -112,8 +113,13 @@ eAVEncH264VProfile GetH264VProfile(VideoCodecProfile profile,
+                                  : eAVEncH264VProfile_Base;
+     case H264PROFILE_MAIN:
+       return eAVEncH264VProfile_Main;
+-    case H264PROFILE_HIGH:
++    case H264PROFILE_HIGH: {
++      // eAVEncH264VProfile_High requires Windows 8.
++      if (base::win::GetVersion() < base::win::Version::WIN8) {
++        return eAVEncH264VProfile_unknown;
++      }
+       return eAVEncH264VProfile_High;
++    }
+     default:
+       return eAVEncH264VProfile_unknown;
+   }
+@@ -249,9 +255,15 @@ MediaFoundationVideoEncodeAccelerator::DriverVendor GetDriverVendor(
+ }
+ 
+ std::vector<Microsoft::WRL::ComPtr<IMFActivate>> EnumerateHardwareEncoders(
+-    VideoCodec codec) {
++    VideoCodec codec,
++                                   bool compatible_with_win7) {
+   std::vector<Microsoft::WRL::ComPtr<IMFActivate>> encoders;
+ 
++  if (!compatible_with_win7 &&
++      base::win::GetVersion() < base::win::Version::WIN8) {
++    return encoders;
++  }
++
+   if (!InitializeMediaFoundation()) {
+     return encoders;
+   }
+diff --git a/media/gpu/windows/mf_video_encoder_util.h b/media/gpu/windows/mf_video_encoder_util.h
+index d54b7176a97c8..6b41c13560ccd 100644
+--- a/media/gpu/windows/mf_video_encoder_util.h
++++ b/media/gpu/windows/mf_video_encoder_util.h
+@@ -27,7 +27,7 @@
+ // Adapter-based enumeration of HMFT. The adapter with lower index is enumerated
+ // first.
+ std::vector<Microsoft::WRL::ComPtr<IMFActivate>> EnumerateHardwareEncoders(
+-    VideoCodec codec);
++    VideoCodec codec, bool);
+ 
+ // Get the maximum supported framerate and resolution combinations for the given
+ // codec and HMFT. If |allow_set_output_type| is true, it will try to set the
+diff --git a/media/gpu/windows/mf_video_encoder_shared_state.h b/media/gpu/windows/mf_video_encoder_shared_state.h
+index d54b7176a97c8..6b41c13560ccd 100644
+--- a/media/gpu/windows/mf_video_encoder_shared_state.h
++++ b/media/gpu/windows/mf_video_encoder_shared_state.h
+@@ -23,7 +23,8 @@ namespace media {
+ class MEDIA_GPU_EXPORT MediaFoundationVideoEncoderSharedState {
+  public:
+   static MediaFoundationVideoEncoderSharedState* GetInstance(
+-      const gpu::GpuDriverBugWorkarounds& workarounds);
++      const gpu::GpuDriverBugWorkarounds& workarounds,
++                                   bool compatible_with_win7);
+ 
+   MediaFoundationVideoEncoderSharedState(
+       const MediaFoundationVideoEncoderSharedState&) = delete;
+@@ -46,7 +46,9 @@ class MEDIA_GPU_EXPORT MediaFoundationVideoEncoderSharedState {
+ 
+  private:
+   MediaFoundationVideoEncoderSharedState(
+-      const gpu::GpuDriverBugWorkarounds& workarounds);
++      const gpu::GpuDriverBugWorkarounds& workarounds,
++                                   bool compatible_with_win7);
++  const bool compatible_with_win7_;
+   virtual ~MediaFoundationVideoEncoderSharedState();
+ 
+   void GetSupportedProfilesInternal();
+diff --git a/media/gpu/windows/mf_video_encoder_shared_state.cc b/media/gpu/windows/mf_video_encoder_shared_state.cc
+index d54b7176a97c8..6b41c13560ccd 100644
+--- a/media/gpu/windows/mf_video_encoder_shared_state.cc
++++ b/media/gpu/windows/mf_video_encoder_shared_state.cc
+@@ -95,9 +95,10 @@ int GetMaxTemporalLayer(
+ // static
+ MediaFoundationVideoEncoderSharedState*
+ MediaFoundationVideoEncoderSharedState::GetInstance(
+-    const gpu::GpuDriverBugWorkarounds& workarounds) {
++    const gpu::GpuDriverBugWorkarounds& workarounds,
++                                   bool compatible_with_win7) {
+   static MediaFoundationVideoEncoderSharedState* instance =
+-      new MediaFoundationVideoEncoderSharedState(workarounds);
++      new MediaFoundationVideoEncoderSharedState(workarounds, compatible_with_win7);
+   return instance;
+ }
+ 
+@@ -105,8 +105,9 @@ MediaFoundationVideoEncoderSharedState::
+     ~MediaFoundationVideoEncoderSharedState() = default;
+ 
+ MediaFoundationVideoEncoderSharedState::MediaFoundationVideoEncoderSharedState(
+-    const gpu::GpuDriverBugWorkarounds& workarounds)
+-    : workarounds_(workarounds) {
++    const gpu::GpuDriverBugWorkarounds& workarounds,
++                                   bool compatible_with_win7)
++    : workarounds_(workarounds), compatible_with_win7_(compatible_with_win7) {
+   GetSupportedProfilesInternal();
+ }
+ 
+@@ -269,7 +275,7 @@ EnumerateHardwareEncoders(VideoCodec codec, IMFActivate*** activates) {
+ #endif
+ 
+   for (auto codec : supported_codecs) {
+-    auto activates = EnumerateHardwareEncoders(codec);
++    auto activates = EnumerateHardwareEncoders(codec, compatible_with_win7_);
+     if (activates.empty()) {
+       DVLOG(1) << "Hardware encode acceleration is not available for "
+                << GetCodecName(codec);
+diff --git a/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc b/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+index d54b7176a97c8..6b41c13560ccd 100644
+--- a/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
++++ b/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+@@ -27,6 +27,7 @@
+ #include "base/win/scoped_co_mem.h"
+ #include "base/win/scoped_variant.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "gpu/command_buffer/service/shared_context_state.h"
+ #include "gpu/ipc/common/dxgi_helpers.h"
+@@ -405,7 +417,10 @@ struct MediaFoundationVideoEncodeAccelerator::BitstreamBufferRef {
+     const gpu::GpuDriverBugWorkarounds& gpu_workarounds,
+     CHROME_LUID luid)
+     : task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()),
+-      luid_(luid),
++// TODO(zijiehe): Respect |compatible_with_win7_| in the implementation. Some
++// attributes are not supported by Windows 7, setting them will return errors.
++// See bug: http://crbug.com/777659.
++      luid_(luid), compatible_with_win7_(gpu_preferences.enable_media_foundation_vea_on_windows7),
+       gpu_preferences_(gpu_preferences),
+       workarounds_(gpu_workarounds) {
+   weak_ptr_ = weak_factory_.GetWeakPtr();
+@@ -427,7 +439,7 @@ MediaFoundationVideoEncodeAccelerator::GetSupportedProfiles() {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+ 
+   MediaFoundationVideoEncoderSharedState* mf_shared_state =
+-      MediaFoundationVideoEncoderSharedState::GetInstance(workarounds_);
++      MediaFoundationVideoEncoderSharedState::GetInstance(workarounds_, compatible_with_win7_);
+ 
+   return mf_shared_state->GetSupportedProfiles();
+ }
+@@ -642,7 +660,7 @@ void MediaFoundationVideoEncodeAccelerator::EncoderInitializeTask(
+   }
+ 
+   std::vector<ComPtr<IMFActivate>> activates =
+-      EnumerateHardwareEncoders(codec_);
++      EnumerateHardwareEncoders(codec_, compatible_with_win7_);
+ 
+   if (activates.empty()) {
+     NotifyErrorStatus({EncoderStatus::Codes::kEncoderInitializationError,
+@@ -693,7 +711,7 @@ bool MediaFoundationVideoEncodeAccelerator::Initialize(
+   if (base::FeatureList::IsEnabled(kExpandMediaFoundationEncodingResolutions)) {
+     size_t activate_hash = GetMFTGuidHash(activate_.Get());
+     MediaFoundationVideoEncoderSharedState* shared_state =
+-        MediaFoundationVideoEncoderSharedState::GetInstance(workarounds_);
++        MediaFoundationVideoEncoderSharedState::GetInstance(workarounds_, compatible_with_win7_);
+     DCHECK(shared_state);
+     const auto& max_framerate_and_resolutions =
+         shared_state->GetMaxFramerateAndResolutions(activate_hash);
+@@ -1058,7 +1077,13 @@ bool MediaFoundationVideoEncodeAccelerator::SetEncoderModes() {
+       break;
+   }
+   hr = codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &var);
+-  RETURN_ON_HR_FAILURE(hr, "Couldn't set CommonRateControlMode", false);
++  if (!compatible_with_win7_) {
++    // Though CODECAPI_AVEncCommonRateControlMode is supported by Windows 7, but
++    // according to a discussion on MSDN,
++    // https://social.msdn.microsoft.com/Forums/windowsdesktop/en-US/6da521e9-7bb3-4b79-a2b6-b31509224638/win7-h264-encoder-imfsinkwriter-cant-use-quality-vbr-encoding?forum=mediafoundationdevelopment
++    // setting it on Windows 7 returns error.
++    RETURN_ON_HR_FAILURE(hr, "Couldn't set CommonRateControlMode", false);
++  }
+ 
+   // Intel drivers want the layer count to be set explicitly for H.264/HEVC,
+   // even if it's one.
+@@ -1069,59 +1094,67 @@ bool MediaFoundationVideoEncodeAccelerator::SetEncoderModes() {
+     DVLOG(3) << "Setting CODECAPI_AVEncVideoTemporalLayerCount to "
+              << var.ulVal;
+     hr = codec_api_->SetValue(&CODECAPI_AVEncVideoTemporalLayerCount, &var);
+-    RETURN_ON_HR_FAILURE(hr, "Couldn't set temporal layer count", false);
++    if (!compatible_with_win7_) {
++      RETURN_ON_HR_FAILURE(hr, "Couldn't set temporal layer count", false);
++    }
+ 
+     // On Intel platform at L1T2, for some codecs(AV1 & HEVC), recent drivers
+     // allow configuring the number of reference frames to 1, which will produce
+     // bitstream that follows WebRTC SVC spec for L1T2. For L1T3, however,
+     // driver does not allow reducing the number of reference frames to 1.
+     if (vendor_ == DriverVendor::kIntel && num_temporal_layers_ == 2) {
+       if (S_OK ==
+           codec_api_->IsModifiable(&CODECAPI_AVEncVideoMaxNumRefFrame)) {
+         var.ulVal = 1;
+         DVLOG(3) << "Setting CODECAPI_AVEncVideoMaxNumRefFrame to "
+                  << var.ulVal;
+         hr = codec_api_->SetValue(&CODECAPI_AVEncVideoMaxNumRefFrame, &var);
+         if (SUCCEEDED(hr)) {
+           encoder_produces_svc_spec_compliant_bitstream_ = true;
+         } else {
+           // Failing to set number of reference frames is not fatal.
+           DVLOG(3) << "Couldn't set CODECAPI_AVEncVideoMaxNumRefFrame to 1";
+         }
+       }
+     }
+   }
+ 
+   if (!rate_ctrl_ &&
+       bitrate_allocation_.GetMode() != Bitrate::Mode::kExternal) {
+     var.ulVal = AdjustBitrateToFrameRate(bitrate_allocation_.GetSumBps(),
+                                          configured_frame_rate_, frame_rate_);
+     DVLOG(3) << "bitrate_allocation_.GetSumBps() is "
+              << bitrate_allocation_.GetSumBps();
+     DVLOG(3) << "configured_frame_rate_ is " << configured_frame_rate_;
+     DVLOG(3) << "framerate is " << frame_rate_;
+     DVLOG(3) << "Setting CODECAPI_AVEncCommonMeanBitRate to " << var.ulVal;
+     hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
+-    RETURN_ON_HR_FAILURE(hr, "Couldn't set bitrate", false);
++    if (!compatible_with_win7_) {
++      RETURN_ON_HR_FAILURE(hr, "Couldn't set bitrate", false);
++    }
+   }
+ 
+   if (bitrate_allocation_.GetMode() == Bitrate::Mode::kVariable) {
+     var.ulVal = AdjustBitrateToFrameRate(bitrate_allocation_.GetPeakBps(),
+                                          configured_frame_rate_, frame_rate_);
+     DVLOG(3) << "bitrate_allocation_.GetPeakBps() is "
+              << bitrate_allocation_.GetPeakBps();
+     DVLOG(3) << "configured_frame_rate_ is " << configured_frame_rate_;
+     DVLOG(3) << "framerate is " << frame_rate_;
+     DVLOG(3) << "Setting CODECAPI_AVEncCommonMaxBitRate to " << var.ulVal;
+     hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &var);
+-    RETURN_ON_HR_FAILURE(hr, "Couldn't set bitrate", false);
++    if (!compatible_with_win7_) {
++      RETURN_ON_HR_FAILURE(hr, "Couldn't set bitrate", false);
++    }
+   }
+ 
+   if (S_OK == codec_api_->IsModifiable(&CODECAPI_AVEncAdaptiveMode)) {
+     var.ulVal = eAVEncAdaptiveMode_Resolution;
+     DVLOG(3) << "Setting CODECAPI_AVEncAdaptiveMode to " << var.ulVal;
+     hr = codec_api_->SetValue(&CODECAPI_AVEncAdaptiveMode, &var);
+-    RETURN_ON_HR_FAILURE(hr, "Couldn't set adaptive mode", false);
++    if (!compatible_with_win7_) {
++      RETURN_ON_HR_FAILURE(hr, "Couldn't set adaptive mode", false);
++    }
+   }
+ 
+   var.ulVal = gop_length_;
+@@ -1100,7 +1133,9 @@ bool MediaFoundationVideoEncodeAccelerator::SetEncoderModes() {
+     var.boolVal = low_latency_mode_ ? VARIANT_TRUE : VARIANT_FALSE;
+     DVLOG(3) << "Setting CODECAPI_AVLowLatencyMode to " << var.boolVal;
+     hr = codec_api_->SetValue(&CODECAPI_AVLowLatencyMode, &var);
+-    RETURN_ON_HR_FAILURE(hr, "Couldn't set low latency mode", false);
++    if (!compatible_with_win7_) {
++      RETURN_ON_HR_FAILURE(hr, "Couldn't set low latency mode", false);
++    }
+   }
+ 
+   // For AV1 screen content encoding, configure scenario to enable AV1
+@@ -1192,6 +1227,7 @@ HRESULT MediaFoundationVideoEncodeAccelerator::ProcessInput(
+     var.ulVal = 1;
+     DVLOG(3) << "Setting CODECAPI_AVEncVideoForceKeyFrame to " << var.ulVal;
+     hr = codec_api_->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var);
++    if (!compatible_with_win7_ && FAILED(hr)) 
+       RETURN_ON_HR_FAILURE(hr, "Set CODECAPI_AVEncVideoForceKeyFrame failed",
+                            hr);
+     }
+@@ -1835,21 +1870,23 @@ void MediaFoundationVideoEncodeAccelerator::RequestEncodingParametersChangeTask(
+         DVLOG(3) << "framerate is " << framerate;
+         DVLOG(3) << "Setting AVEncCommonMaxBitRate to " << var.ulVal;
+       hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &var);
++  if (!compatible_with_win7_)
+       if (FAILED(hr)) {
+         NotifyErrorStatus({EncoderStatus::Codes::kSystemAPICallError,
+                            "Couldn't set max bitrate" + PrintHr(hr)});
+         return;
+       }
+       [[fallthrough]];
+     case Bitrate::Mode::kConstant:
+       var.ulVal = AdjustBitrateToFrameRate(bitrate_allocation_.GetSumBps(),
+                                            configured_frame_rate_, framerate);
+         DVLOG(3) << "bitrate_allocation_.GetSumBps() is "
+                  << bitrate_allocation_.GetSumBps();
+         DVLOG(3) << "configured_frame_rate_ is " << configured_frame_rate_;
+         DVLOG(3) << "framerate is " << framerate;
+         DVLOG(3) << "Setting CODECAPI_AVEncCommonMeanBitRate to " << var.ulVal;
+       hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
++  if (!compatible_with_win7_)
+       if (FAILED(hr)) {
+         NotifyErrorStatus({EncoderStatus::Codes::kSystemAPICallError,
+                            "Couldn't set mean bitrate" + PrintHr(hr)});
+diff --git a/media/gpu/windows/media_foundation_video_encode_accelerator_win.h b/media/gpu/windows/media_foundation_video_encode_accelerator_win.h
+index 6660fb13f539b..4b1f67ae29e54 100644
+--- a/media/gpu/windows/media_foundation_video_encode_accelerator_win.h
++++ b/media/gpu/windows/media_foundation_video_encode_accelerator_win.h
+@@ -165,6 +165,8 @@ class MEDIA_GPU_EXPORT MediaFoundationVideoEncodeAccelerator
+ 
+   bool InitMFVideoProcessor();
+ 
++  const bool compatible_with_win7_;
++
+   // Used to post tasks from the IMFMediaEvent::Invoke() method.
+   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
+ 
+diff --git a/media/gpu/windows/mf_audio_encoder.cc b/media/gpu/windows/mf_audio_encoder.cc
+index 4008c0080cac9..8eddd14ad56f9 100644
+--- a/media/gpu/windows/mf_audio_encoder.cc
++++ b/media/gpu/windows/mf_audio_encoder.cc
+@@ -27,6 +26,7 @@
+ #include "base/win/com_init_util.h"
+ #include "base/win/scoped_co_mem.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ #include "media/base/audio_buffer.h"
+ #include "media/base/audio_parameters.h"
+ #include "media/base/audio_timestamp_helper.h"
+@@ -92,8 +92,12 @@ EncoderStatus::Codes ValidateInputOptions(const AudioEncoder::Options& options,
+       *channel_layout = CHANNEL_LAYOUT_STEREO;
+       break;
+     case 6:
+-      *channel_layout = CHANNEL_LAYOUT_5_1;
+-      break;
++      // 5.1 is only supported by the MF AAC encoder on Win10+.
++      if (base::win::GetVersion() >= base::win::Version::WIN10) {
++        *channel_layout = CHANNEL_LAYOUT_5_1;
++        break;
++      }
++      [[fallthrough]];
+     default:
+       return EncoderStatus::Codes::kEncoderUnsupportedConfig;
+   }
+@@ -173,7 +177,12 @@ HRESULT CreateOutputMediaType(const int sample_rate,
+   // 1 - Audio Data Transport Stream (ADTS).
+   //     The stream contains an adts_sequence, as defined by MPEG-2.
+   if (format == media::AudioEncoder::AacOutputFormat::ADTS) {
+-  RETURN_IF_FAILED(media_type->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 1));
++  // On Win8+, the encoder can produce ADTS headers for us if we set the payload
++  // type to 1. On Win7, only raw AAC frames are produced.
++  if (base::win::GetVersion() >= base::win::Version::WIN8)
++    RETURN_IF_FAILED(media_type->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 1));
++  else
++    RETURN_IF_FAILED(media_type->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0));
+   }
+ 
+   *output_media_type = std::move(media_type);
+diff --git a/media/gpu/windows/supported_profile_helpers.cc b/media/gpu/windows/supported_profile_helpers.cc
+index fc08fb786b066..a95e4b778e512 100644
+--- a/media/gpu/windows/supported_profile_helpers.cc
++++ b/media/gpu/windows/supported_profile_helpers.cc
+@@ -120,6 +120,9 @@ SupportedResolutionRangeMap GetSupportedD3D11VideoDecoderResolutions(
+   for (const auto profile : kSupportedH264Profiles)
+     supported_resolutions[profile] = h264_profile;
+ 
++  if (base::win::GetVersion() <= base::win::Version::WIN7)
++    return supported_resolutions;
++
+   if (!video_device_wrapper) {
+     return supported_resolutions;
+   }
+diff --git a/media/midi/midi_manager_win.cc b/media/midi/midi_manager_win.cc
+index 774e50f094b9c..19f21618e2c51 100644
+--- a/media/midi/midi_manager_win.cc
++++ b/media/midi/midi_manager_win.cc
+@@ -30,6 +30,7 @@
+ #include "base/synchronization/lock.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
++#include "base/win/windows_version.h"
+ #include "media/midi/message_util.h"
+ #include "media/midi/midi_manager_winrt.h"
+ #include "media/midi/midi_service.h"
+@@ -892,7 +893,8 @@ void MidiManagerWin::SendOnTaskRunner(MidiManagerClient* client,
+ }
+ 
+ MidiManager* MidiManager::Create(MidiService* service) {
+-  if (base::FeatureList::IsEnabled(features::kMidiManagerWinrt)) {
++  if (base::FeatureList::IsEnabled(features::kMidiManagerWinrt) &&
++      base::win::GetVersion() >= base::win::Version::WIN10) {
+     return new MidiManagerWinrt(service);
+   }
+   return new MidiManagerWin(service);
+diff --git a/media/mojo/services/gpu_mojo_media_client_win.cc b/media/mojo/services/gpu_mojo_media_client_win.cc
+index 32b7ad406ce39..c0cadd497120e 100644
+--- a/media/mojo/services/gpu_mojo_media_client_win.cc
++++ b/media/mojo/services/gpu_mojo_media_client_win.cc
+@@ -30,7 +31,8 @@ D3D11VideoDecoder::GetD3D11DeviceCB GetD3D11DeviceCallback() {
+ namespace {
+ bool ShouldUseD3D11VideoDecoder(
+     const gpu::GpuDriverBugWorkarounds& gpu_workarounds) {
+-  return !gpu_workarounds.disable_d3d11_video_decoder;
++  return !gpu_workarounds.disable_d3d11_video_decoder &&
++         base::win::GetVersion() > base::win::Version::WIN7;
+ }
+ }  // namespace
+ 
+diff --git a/media/renderers/win/media_foundation_renderer.cc b/media/renderers/win/media_foundation_renderer.cc
+index 8c56e06795df5..ff88f3752660e 100644
+--- a/media/renderers/win/media_foundation_renderer.cc
++++ b/media/renderers/win/media_foundation_renderer.cc
+@@ -24,6 +23,7 @@
+ #include "base/win/scoped_bstr.h"
+ #include "base/win/scoped_hdc.h"
+ #include "base/win/scoped_propvariant.h"
++#include "base/win/windows_version.h"
+ #include "base/win/wrapped_window_proc.h"
+ #include "media/base/cdm_context.h"
+ #include "media/base/media_log.h"
+@@ -110,6 +110,11 @@ void MediaFoundationRenderer::ReportErrorReason(ErrorReason reason) {
+                                 reason);
+ }
+ 
++// static
++bool MediaFoundationRenderer::IsSupported() {
++  return base::win::GetVersion() >= base::win::Version::WIN10;
++}
++
+ MediaFoundationRenderer::MediaFoundationRenderer(
+     scoped_refptr<base::SequencedTaskRunner> task_runner,
+     std::unique_ptr<MediaLog> media_log,
+@@ -516,7 +521,7 @@ void MediaFoundationRenderer::SetMediaFoundationRenderingMode(
+                << " is unsupported";
+       MEDIA_LOG(ERROR, media_log_)
+           << "MediaFoundationRenderer SetMediaFoundationRenderingMode: "
+-          << static_cast<int>(render_mode)
++          << (int)render_mode
+           << " is not defined. No change to the rendering mode.";
+       hr = E_NOT_SET;
+     }
+diff --git a/media/renderers/win/media_foundation_renderer.h b/media/renderers/win/media_foundation_renderer.h
+index 48298a2b90508..afbb5edde517f 100644
+--- a/media/renderers/win/media_foundation_renderer.h
++++ b/media/renderers/win/media_foundation_renderer.h
+@@ -69,6 +67,9 @@ class MEDIA_EXPORT MediaFoundationRenderer
+   // Report `reason` to UMA.
+   static void ReportErrorReason(ErrorReason reason);
+ 
++  // Whether MediaFoundationRenderer() is supported on the current device.
++  static bool IsSupported();
++
+   MediaFoundationRenderer(scoped_refptr<base::SequencedTaskRunner> task_runner,
+                           std::unique_ptr<MediaLog> media_log,
+                           LUID gpu_process_adapter_luid,

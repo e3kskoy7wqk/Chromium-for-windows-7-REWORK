@@ -1,0 +1,30 @@
+diff --git a/chrome/browser/printing/print_browsertest.cc b/chrome/browser/printing/print_browsertest.cc
+index e802e4c889b22..5beac0ac5f24f 100644
+--- a/chrome/browser/printing/print_browsertest.cc
++++ b/chrome/browser/printing/print_browsertest.cc
+@@ -2211,12 +2211,6 @@ class PrintCompositorDocumentDataTypeBrowserTest
+          {{features::kEnableOopPrintDriversJobPrint.name, "true"}}});
+     if (GetParam() == DocumentDataType::kXps) {
+       enabled_features.push_back({features::kUseXpsForPrinting, {}});
+-
+-      // Use of XPS printing requires using LPAC for the sandbox, otherwise
+-      // the permissions for token-based sandboxing have to be significantly
+-      // relaxed.
+-      enabled_features.push_back(
+-          {sandbox::policy::features::kPrintCompositorLPAC, {}});
+     } else {
+       disabled_features.push_back(features::kUseXpsForPrinting);
+     }
+diff --git a/sandbox/policy/features.cc b/sandbox/policy/features.cc
+index b819937135f29..25b87396ef23f 100644
+--- a/sandbox/policy/features.cc
++++ b/sandbox/policy/features.cc
+@@ -63,7 +63,7 @@ BASE_FEATURE(kGpuLPAC,
+ // overridden and disabled by policy.
+ BASE_FEATURE(kPrintCompositorLPAC,
+              "PrintCompositorLPAC",
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // Enables Renderer AppContainer
+ BASE_FEATURE(kRendererAppContainer,

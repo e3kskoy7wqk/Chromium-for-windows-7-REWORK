@@ -1,0 +1,283 @@
+diff --git a/chrome/browser/shell_integration_win.cc b/chrome/browser/shell_integration_win.cc
+index dc8527b81f340..cb3a023ca5620 100644
+--- a/chrome/browser/shell_integration_win.cc
++++ b/chrome/browser/shell_integration_win.cc
+@@ -52,6 +52,7 @@
+ #include "chrome/common/chrome_switches.h"
+ #include "chrome/install_static/install_util.h"
+ #include "chrome/installer/util/install_util.h"
++#include "chrome/installer/util/scoped_user_protocol_entry.h"
+ #include "chrome/installer/util/shell_util.h"
+ #include "chrome/services/util_win/public/mojom/util_win.mojom.h"
+ #include "components/variations/variations_associated_data.h"
+@@ -347,7 +348,8 @@ class OpenSystemSettingsHelper {
+  private:
+   OpenSystemSettingsHelper(const wchar_t* const schemes[],
+                            base::OnceClosure on_finished_callback)
+-      : on_finished_callback_(std::move(on_finished_callback)) {
++      : scoped_user_protocol_entry_(schemes[0]),
++        on_finished_callback_(std::move(on_finished_callback)) {
+     for (const wchar_t* const* scan = &schemes[0]; *scan != nullptr; ++scan) {
+       AddRegistryKeyWatcher(base::StrCat({L"SOFTWARE\\Microsoft\\Windows\\Shell"
+                                           L"\\Associations\\UrlAssociations\\",
+@@ -420,6 +422,10 @@ class OpenSystemSettingsHelper {
+   // Used to make sure only one instance is alive at the same time.
+   static OpenSystemSettingsHelper* instance_;
+ 
++  // This is needed to make sure that Windows displays an entry for the scheme
++  // inside the "Choose default apps by protocol" settings page.
++  ScopedUserProtocolEntry scoped_user_protocol_entry_;
++
+   // The function to call when the interaction with the system settings is
+   // finished.
+   base::OnceClosure on_finished_callback_;
+diff --git a/chrome/installer/util/BUILD.gn b/chrome/installer/util/BUILD.gn
+index 17c55843a7779..681a7c062e806 100644
+--- a/chrome/installer/util/BUILD.gn
++++ b/chrome/installer/util/BUILD.gn
+@@ -160,6 +160,8 @@ static_library("with_no_strings") {
+       "registry_entry.h",
+       "scoped_token_privilege.cc",
+       "scoped_token_privilege.h",
++      "scoped_user_protocol_entry.cc",
++      "scoped_user_protocol_entry.h",
+       "shell_util.cc",
+       "shell_util.h",
+       "system_tracing_util.cc",
+@@ -342,6 +344,7 @@ if (is_win) {
+       "registry_util_unittest.cc",
+       "run_all_unittests.cc",
+       "scoped_token_privilege_unittest.cc",
++      "scoped_user_protocol_entry_unittest.cc",
+       "self_cleaning_temp_dir_unittest.cc",
+       "set_reg_value_work_item_unittest.cc",
+       "shell_util_unittest.cc",
+diff --git a/chrome/installer/util/scoped_user_protocol_entry.cc b/chrome/installer/util/scoped_user_protocol_entry.cc
+new file mode 100644
+index 0000000000000..96f8f430a6800
+--- /dev/null
++++ b/chrome/installer/util/scoped_user_protocol_entry.cc
+@@ -0,0 +1,50 @@
++// Copyright 2015 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/installer/util/scoped_user_protocol_entry.h"
++
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/win/registry.h"
++#include "chrome/installer/util/registry_entry.h"
++#include "chrome/installer/util/shell_util.h"
++
++ScopedUserProtocolEntry::ScopedUserProtocolEntry(const wchar_t* protocol) {
++  entries_.push_back(std::make_unique<RegistryEntry>(
++      base::FilePath(ShellUtil::kRegClasses).Append(protocol).value(),
++      ShellUtil::kRegUrlProtocol, std::wstring()));
++  if (!entries_.back()->KeyExistsInRegistry(RegistryEntry::LOOK_IN_HKCU) &&
++      ShellUtil::AddRegistryEntries(HKEY_CURRENT_USER, entries_)) {
++    return;
++  }
++  entries_.clear();
++}
++
++ScopedUserProtocolEntry::~ScopedUserProtocolEntry() {
++  // The empty key is deleted only if it's created by ctor().
++  if (entries_.empty())
++    return;
++
++  // The value hasn't been changed.
++  if (!entries_.back()->ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU))
++    return;
++
++  // Key is still valid and only contains one value.
++  base::win::RegKey key(HKEY_CURRENT_USER, entries_.back()->key_path().c_str(),
++                        KEY_READ);
++  if (!key.Valid() || key.GetValueCount().value_or(1) > 1)
++    return;
++  key.Close();
++
++  // There is no subkey.
++  if (base::win::RegistryKeyIterator(HKEY_CURRENT_USER,
++                                     entries_.back()->key_path().c_str())
++          .SubkeyCount() > 0) {
++    return;
++  }
++
++  entries_.back()->set_removal_flag(RegistryEntry::RemovalFlag::KEY);
++  ShellUtil::AddRegistryEntries(HKEY_CURRENT_USER, entries_);
++}
+diff --git a/chrome/installer/util/scoped_user_protocol_entry.h b/chrome/installer/util/scoped_user_protocol_entry.h
+new file mode 100644
+index 0000000000000..72206d3ddd0ed
+--- /dev/null
++++ b/chrome/installer/util/scoped_user_protocol_entry.h
+@@ -0,0 +1,34 @@
++// Copyright 2015 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_INSTALLER_UTIL_SCOPED_USER_PROTOCOL_ENTRY_H_
++#define CHROME_INSTALLER_UTIL_SCOPED_USER_PROTOCOL_ENTRY_H_
++
++#include <memory>
++#include <vector>
++
++class RegistryEntry;
++
++// Windows 8 shows the "No apps are installed to open this type of link"
++// dialog when choosing a default handler for a |protocol| under certain
++// circumstances. Under these circumstances, it appears that ensuring the
++// existence of the HKCU\Software\Classes\<protocol> key with an empty "URL
++// Protocol" value is sufficient to make the dialog contain the usual list of
++// registered browsers. This class creates this key and value in its constructor
++// if needed, and cleans them up in its destructor if no other values or subkeys
++// were created in the meantime. For details, see https://crbug.com/569151.
++class ScopedUserProtocolEntry {
++ public:
++  explicit ScopedUserProtocolEntry(const wchar_t* protocol);
++
++  ScopedUserProtocolEntry(const ScopedUserProtocolEntry&) = delete;
++  ScopedUserProtocolEntry& operator=(const ScopedUserProtocolEntry&) = delete;
++
++  ~ScopedUserProtocolEntry();
++
++ private:
++  std::vector<std::unique_ptr<RegistryEntry>> entries_;
++};
++
++#endif  // CHROME_INSTALLER_UTIL_SCOPED_USER_PROTOCOL_ENTRY_H_
+diff --git a/chrome/installer/util/scoped_user_protocol_entry_unittest.cc b/chrome/installer/util/scoped_user_protocol_entry_unittest.cc
+new file mode 100644
+index 0000000000000..d7dc403af2b6c
+--- /dev/null
++++ b/chrome/installer/util/scoped_user_protocol_entry_unittest.cc
+@@ -0,0 +1,127 @@
++// Copyright 2015 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/installer/util/scoped_user_protocol_entry.h"
++
++#include <string>
++
++#include "base/test/test_reg_util_win.h"
++#include "base/win/registry.h"
++#include "chrome/installer/util/registry_entry.h"
++#include "chrome/installer/util/shell_util.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++class ScopedUserProtocolEntryTest : public testing::Test {
++ protected:
++  static const wchar_t kProtocolEntryKeyPath[];
++  static const wchar_t kProtocolEntrySubKeyPath[];
++  static const wchar_t kProtocolEntryName[];
++  static const wchar_t kProtocolEntryFakeName[];
++  static const wchar_t kProtocolEntryFakeValue[];
++
++  void SetUp() override {
++    ASSERT_NO_FATAL_FAILURE(
++        registry_overrides_manager_.OverrideRegistry(HKEY_CURRENT_USER));
++    ASSERT_FALSE(
++        RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName, std::wstring())
++            .KeyExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++  }
++
++  void CreateNewRegistryValue(const std::wstring& key_path,
++                              const std::wstring& name,
++                              const std::wstring& value) {
++    std::vector<std::unique_ptr<RegistryEntry>> entries;
++    entries.push_back(std::make_unique<RegistryEntry>(key_path, name, value));
++    ASSERT_TRUE(ShellUtil::AddRegistryEntries(HKEY_CURRENT_USER, entries));
++  }
++
++  void CreateScopedUserProtocolEntryAndVerifyRegistryValue(
++      const std::wstring& expected_entry_value) {
++    entry_ = std::make_unique<ScopedUserProtocolEntry>(L"http");
++    ASSERT_TRUE(RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName,
++                              expected_entry_value)
++                    .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++  }
++
++  registry_util::RegistryOverrideManager registry_overrides_manager_;
++  std::unique_ptr<ScopedUserProtocolEntry> entry_;
++};
++
++const wchar_t ScopedUserProtocolEntryTest::kProtocolEntryKeyPath[] =
++    L"Software\\Classes\\http";
++const wchar_t ScopedUserProtocolEntryTest::kProtocolEntrySubKeyPath[] =
++    L"Software\\Classes\\http\\sub";
++const wchar_t ScopedUserProtocolEntryTest::kProtocolEntryName[] =
++    L"URL Protocol";
++const wchar_t ScopedUserProtocolEntryTest::kProtocolEntryFakeName[] =
++    L"Fake URL Protocol";
++const wchar_t ScopedUserProtocolEntryTest::kProtocolEntryFakeValue[] =
++    L"Fake Value";
++
++TEST_F(ScopedUserProtocolEntryTest, CreateKeyWhenMissingTest) {
++  CreateScopedUserProtocolEntryAndVerifyRegistryValue(std::wstring());
++  entry_.reset();
++  ASSERT_FALSE(
++      RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName, std::wstring())
++          .KeyExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++}
++
++TEST_F(ScopedUserProtocolEntryTest, DontTouchExistedKeyTest) {
++  CreateNewRegistryValue(kProtocolEntryKeyPath, kProtocolEntryName,
++                         kProtocolEntryFakeValue);
++  ASSERT_TRUE(RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName,
++                            kProtocolEntryFakeValue)
++                  .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++  CreateScopedUserProtocolEntryAndVerifyRegistryValue(kProtocolEntryFakeValue);
++  entry_.reset();
++  ASSERT_TRUE(RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName,
++                            kProtocolEntryFakeValue)
++                  .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++}
++
++TEST_F(ScopedUserProtocolEntryTest, EntryValueIsChangedTest) {
++  CreateScopedUserProtocolEntryAndVerifyRegistryValue(std::wstring());
++  CreateNewRegistryValue(kProtocolEntryKeyPath, kProtocolEntryName,
++                         kProtocolEntryFakeValue);
++  entry_.reset();
++  ASSERT_TRUE(RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName,
++                            kProtocolEntryFakeValue)
++                  .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++}
++
++TEST_F(ScopedUserProtocolEntryTest, AnotherEntryIsCreatedTest) {
++  CreateScopedUserProtocolEntryAndVerifyRegistryValue(std::wstring());
++  CreateNewRegistryValue(kProtocolEntryKeyPath, kProtocolEntryFakeName,
++                         kProtocolEntryFakeValue);
++  entry_.reset();
++  ASSERT_TRUE(RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryFakeName,
++                            kProtocolEntryFakeValue)
++                  .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++  ASSERT_TRUE(
++      RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName, std::wstring())
++          .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++}
++
++TEST_F(ScopedUserProtocolEntryTest, SubKeyIsCreatedTest) {
++  CreateScopedUserProtocolEntryAndVerifyRegistryValue(std::wstring());
++  CreateNewRegistryValue(kProtocolEntrySubKeyPath, kProtocolEntryName,
++                         std::wstring());
++  entry_.reset();
++  ASSERT_TRUE(RegistryEntry(kProtocolEntrySubKeyPath, kProtocolEntryName,
++                            std::wstring())
++                  .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++  ASSERT_TRUE(
++      RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName, std::wstring())
++          .ExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++}
++
++TEST_F(ScopedUserProtocolEntryTest, KeyHasBeenDeletedByOthersTest) {
++  CreateScopedUserProtocolEntryAndVerifyRegistryValue(std::wstring());
++  base::win::RegKey key(HKEY_CURRENT_USER, L"", KEY_WRITE);
++  EXPECT_EQ(ERROR_SUCCESS, key.DeleteKey(kProtocolEntryKeyPath));
++  entry_.reset();
++  ASSERT_FALSE(
++      RegistryEntry(kProtocolEntryKeyPath, kProtocolEntryName, std::wstring())
++          .KeyExistsInRegistry(RegistryEntry::LOOK_IN_HKCU));
++}

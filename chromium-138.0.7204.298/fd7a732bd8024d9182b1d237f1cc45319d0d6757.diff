@@ -1,0 +1,200 @@
+diff --git a/content/renderer/render_thread_impl.cc b/content/renderer/render_thread_impl.cc
+index 97399814f88b5..9dd563cb180e0 100644
+--- a/content/renderer/render_thread_impl.cc
++++ b/content/renderer/render_thread_impl.cc
+@@ -631,7 +631,8 @@ void RenderThreadImpl::Init() {
+     BindHostReceiver(compositing_mode_reporter_.BindNewPipeAndPassReceiver());
+ 
+     compositing_mode_reporter_->AddCompositingModeWatcher(
+-        compositing_mode_watcher_receiver_.BindNewPipeAndPassRemote());
++        compositing_mode_watcher_receiver_.BindNewPipeAndPassRemote(
++            main_thread_scheduler_->CompositorTaskRunner()));
+   }
+ 
+   variations_observer_ = std::make_unique<VariationsRenderThreadObserver>();
+diff --git a/third_party/blink/public/platform/scheduler/test/web_fake_thread_scheduler.h b/third_party/blink/public/platform/scheduler/test/web_fake_thread_scheduler.h
+index 9af605ec3a99b..74dd16e6c4c0b 100644
+--- a/third_party/blink/public/platform/scheduler/test/web_fake_thread_scheduler.h
++++ b/third_party/blink/public/platform/scheduler/test/web_fake_thread_scheduler.h
+@@ -21,6 +21,7 @@ class WebFakeThreadScheduler : public WebThreadScheduler {
+ 
+   // RendererScheduler implementation.
+   std::unique_ptr<MainThread> CreateMainThread() override;
++  scoped_refptr<base::SingleThreadTaskRunner> CompositorTaskRunner() override;
+   std::unique_ptr<WebAgentGroupScheduler> CreateWebAgentGroupScheduler()
+       override;
+   void SetRendererHidden(bool hidden) override;
+diff --git a/third_party/blink/public/platform/scheduler/test/web_mock_thread_scheduler.h b/third_party/blink/public/platform/scheduler/test/web_mock_thread_scheduler.h
+index d6308710e84b7..253c479689513 100644
+--- a/third_party/blink/public/platform/scheduler/test/web_mock_thread_scheduler.h
++++ b/third_party/blink/public/platform/scheduler/test/web_mock_thread_scheduler.h
+@@ -30,6 +30,8 @@ class WebMockThreadScheduler : public WebThreadScheduler {
+                scoped_refptr<base::SingleThreadTaskRunner>());
+   MOCK_METHOD0(DeprecatedDefaultTaskRunner,
+                scoped_refptr<base::SingleThreadTaskRunner>());
++  MOCK_METHOD0(CompositorTaskRunner,
++               scoped_refptr<base::SingleThreadTaskRunner>());
+   MOCK_METHOD0(InputTaskRunner, scoped_refptr<base::SingleThreadTaskRunner>());
+   MOCK_METHOD0(LoadingTaskRunner,
+                scoped_refptr<base::SingleThreadTaskRunner>());
+diff --git a/third_party/blink/public/platform/scheduler/web_thread_scheduler.h b/third_party/blink/public/platform/scheduler/web_thread_scheduler.h
+index daa595ea0e1ad..b51540b8c0b8a 100644
+--- a/third_party/blink/public/platform/scheduler/web_thread_scheduler.h
++++ b/third_party/blink/public/platform/scheduler/web_thread_scheduler.h
+@@ -50,6 +50,9 @@ class BLINK_PLATFORM_EXPORT WebThreadScheduler
+   // Returns main thread scheduler for the main thread of the current process.
+   static WebThreadScheduler& MainThreadScheduler();
+ 
++  // Returns the compositor task runner.
++  virtual scoped_refptr<base::SingleThreadTaskRunner> CompositorTaskRunner();
++
+   // Returns a default task runner. This is basically same as the default task
+   // runner, but is explicitly allowed to run JavaScript. For the detail, see
+   // the comment at blink::ThreadScheduler::DeprecatedDefaultTaskRunner.
+diff --git a/third_party/blink/renderer/platform/scheduler/common/dummy_schedulers.cc b/third_party/blink/renderer/platform/scheduler/common/dummy_schedulers.cc
+index f84a93af98f0f..2e369b53086fe 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/dummy_schedulers.cc
++++ b/third_party/blink/renderer/platform/scheduler/common/dummy_schedulers.cc
+@@ -295,6 +295,11 @@ class DummyWebMainThreadScheduler : public WebThreadScheduler,
+     return base::SingleThreadTaskRunner::GetCurrentDefault();
+   }
+ 
++  scoped_refptr<base::SingleThreadTaskRunner> CompositorTaskRunner() override {
++    DCHECK(WTF::IsMainThread());
++    return base::SingleThreadTaskRunner::GetCurrentDefault();
++  }
++
+   scoped_refptr<base::SingleThreadTaskRunner> V8TaskRunner() override {
+     DCHECK(WTF::IsMainThread());
+     return base::SingleThreadTaskRunner::GetCurrentDefault();
+diff --git a/third_party/blink/renderer/platform/scheduler/common/web_thread_scheduler.cc b/third_party/blink/renderer/platform/scheduler/common/web_thread_scheduler.cc
+index 7af306704a51a..c7c0f7d1d40d8 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/web_thread_scheduler.cc
++++ b/third_party/blink/renderer/platform/scheduler/common/web_thread_scheduler.cc
+@@ -44,6 +44,12 @@ WebThreadScheduler::CreateMainThreadScheduler(
+ }
+ 
+ // Stubs for main thread only virtual functions.
++scoped_refptr<base::SingleThreadTaskRunner>
++WebThreadScheduler::CompositorTaskRunner() {
++  NOTREACHED();
++  return nullptr;
++}
++
+ scoped_refptr<base::SingleThreadTaskRunner>
+ WebThreadScheduler::DeprecatedDefaultTaskRunner() {
+   NOTREACHED();
+diff --git a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
+index be2b1d8d05444..edc8bfc2101c8 100644
+--- a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
++++ b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
+@@ -268,6 +268,12 @@ MainThreadSchedulerImpl::MainThreadSchedulerImpl(
+       find_in_page_budget_pool_controller_(
+           new FindInPageBudgetPoolController(this)),
+       control_task_queue_(helper_.ControlMainThreadTaskQueue()),
++      compositor_task_queue_(helper_.NewTaskQueue(
++          MainThreadTaskQueue::QueueCreationParams(
++              MainThreadTaskQueue::QueueType::kCompositor)
++              .SetShouldMonitorQuiescence(true)
++              .SetPrioritisationType(MainThreadTaskQueue::QueueTraits::
++                                         PrioritisationType::kCompositor))),
+       back_forward_cache_ipc_tracking_task_queue_(helper_.NewTaskQueue(
+           MainThreadTaskQueue::QueueCreationParams(
+               MainThreadTaskQueue::QueueType::kIPCTrackingForCachedPages)
+@@ -292,6 +298,10 @@ MainThreadSchedulerImpl::MainThreadSchedulerImpl(
+   // Compositor task queue and default task queue should be managed by
+   // WebThreadScheduler. Control task queue should not.
+   task_runners_.emplace(helper_.DefaultMainThreadTaskQueue(), nullptr);
++  task_runners_.emplace(compositor_task_queue_,
++                        compositor_task_queue_->CreateQueueEnabledVoter());
++  main_thread_only().idle_time_estimator.AddCompositorTaskQueue(
++      compositor_task_queue_);
+ 
+   back_forward_cache_ipc_tracking_task_runner_ =
+       back_forward_cache_ipc_tracking_task_queue_->CreateTaskRunner(
+@@ -313,6 +323,8 @@ MainThreadSchedulerImpl::MainThreadSchedulerImpl(
+       TaskType::kMainThreadTaskQueueV8UserVisible);
+   v8_best_effort_task_runner_ = v8_best_effort_task_queue_->CreateTaskRunner(
+       TaskType::kMainThreadTaskQueueV8BestEffort);
++  compositor_task_runner_ = compositor_task_queue_->CreateTaskRunner(
++      TaskType::kMainThreadTaskQueueCompositor);
+   control_task_runner_ = helper_.ControlMainThreadTaskQueue()->CreateTaskRunner(
+       TaskType::kMainThreadTaskQueueControl);
+   non_waking_task_runner_ = non_waking_task_queue_->CreateTaskRunner(
+@@ -655,6 +667,12 @@ MainThreadSchedulerImpl::DeprecatedDefaultTaskRunner() {
+   return helper_.DeprecatedDefaultTaskRunner();
+ }
+ 
++scoped_refptr<MainThreadTaskQueue>
++MainThreadSchedulerImpl::CompositorTaskQueue() {
++  helper_.CheckOnValidThread();
++  return compositor_task_queue_;
++}
++
+ scoped_refptr<MainThreadTaskQueue> MainThreadSchedulerImpl::V8TaskQueue() {
+   helper_.CheckOnValidThread();
+   return v8_task_queue_;
+@@ -2048,6 +2066,11 @@ MainThreadSchedulerImpl::V8LowPriorityTaskRunner() {
+   return v8_best_effort_task_runner_;
+ }
+ 
++scoped_refptr<base::SingleThreadTaskRunner>
++MainThreadSchedulerImpl::CompositorTaskRunner() {
++  return compositor_task_runner_;
++}
++
+ scoped_refptr<base::SingleThreadTaskRunner>
+ MainThreadSchedulerImpl::NonWakingTaskRunner() {
+   return non_waking_task_runner_;
+diff --git a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.h b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.h
+index c6d7d805bd79b..cdf1604a781ff 100644
+--- a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.h
++++ b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.h
+@@ -156,6 +156,7 @@ class PLATFORM_EXPORT MainThreadSchedulerImpl
+   ~MainThreadSchedulerImpl() override;
+ 
+   // WebThreadScheduler implementation:
++  scoped_refptr<base::SingleThreadTaskRunner> CompositorTaskRunner() override;
+   scoped_refptr<base::SingleThreadTaskRunner> DeprecatedDefaultTaskRunner()
+       override;
+   std::unique_ptr<MainThread> CreateMainThread() override;
+@@ -383,6 +383,7 @@ class PLATFORM_EXPORT MainThreadSchedulerImpl
+ 
+   scoped_refptr<MainThreadTaskQueue> ControlTaskQueue();
+   scoped_refptr<MainThreadTaskQueue> DefaultTaskQueue();
++  scoped_refptr<MainThreadTaskQueue> CompositorTaskQueue();
+   scoped_refptr<MainThreadTaskQueue> V8TaskQueue();
+ 
+   // `current_use_case` will be overwritten by the next call to UpdatePolicy.
+@@ -653,6 +654,7 @@ class PLATFORM_EXPORT MainThreadSchedulerImpl
+       find_in_page_budget_pool_controller_;
+ 
+   const scoped_refptr<MainThreadTaskQueue> control_task_queue_;
++  const scoped_refptr<MainThreadTaskQueue> compositor_task_queue_;
+   scoped_refptr<MainThreadTaskQueue> virtual_time_control_task_queue_;
+   scoped_refptr<MainThreadTaskQueue>
+       back_forward_cache_ipc_tracking_task_queue_;
+@@ -671,6 +673,7 @@ class PLATFORM_EXPORT MainThreadSchedulerImpl
+   scoped_refptr<base::SingleThreadTaskRunner> v8_task_runner_;
+   scoped_refptr<base::SingleThreadTaskRunner> v8_user_visible_task_runner_;
+   scoped_refptr<base::SingleThreadTaskRunner> v8_best_effort_task_runner_;
++  scoped_refptr<base::SingleThreadTaskRunner> compositor_task_runner_;
+   scoped_refptr<base::SingleThreadTaskRunner> control_task_runner_;
+   scoped_refptr<base::SingleThreadTaskRunner> non_waking_task_runner_;
+   scoped_refptr<base::SingleThreadTaskRunner>
+diff --git a/third_party/blink/renderer/platform/scheduler/test/web_fake_thread_scheduler.cc b/third_party/blink/renderer/platform/scheduler/test/web_fake_thread_scheduler.cc
+index 16e667edabea4..02b616ebe301b 100644
+--- a/third_party/blink/renderer/platform/scheduler/test/web_fake_thread_scheduler.cc
++++ b/third_party/blink/renderer/platform/scheduler/test/web_fake_thread_scheduler.cc
+@@ -23,6 +23,11 @@ std::unique_ptr<MainThread> WebFakeThreadScheduler::CreateMainThread() {
+   return nullptr;
+ }
+ 
++scoped_refptr<base::SingleThreadTaskRunner>
++WebFakeThreadScheduler::CompositorTaskRunner() {
++  return GetSingleThreadTaskRunnerForTesting();
++}
++
+ std::unique_ptr<WebAgentGroupScheduler>
+ WebFakeThreadScheduler::CreateWebAgentGroupScheduler() {
+   return std::make_unique<WebAgentGroupScheduler>(
