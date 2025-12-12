@@ -1,0 +1,33 @@
+diff --git a/services/webnn/ort/platform_functions_ort.cc b/services/webnn/ort/platform_functions_ort.cc
+index adc99338e7342..11299426bd345 100644
+--- a/services/webnn/ort/platform_functions_ort.cc
++++ b/services/webnn/ort/platform_functions_ort.cc
+@@ -44,11 +44,18 @@ struct ScopedWcharTypeTraits {
+ using ScopedWcharType = base::ScopedGeneric<wchar_t*, ScopedWcharTypeTraits>;
+ 
+ std::optional<base::FilePath> GetPackagePath(const wchar_t* package_full_name) {
++    typedef LONG(WINAPI * PFN_GetPackagePathByFullName)(PCWSTR, UINT32 *, PWSTR);
++    PFN_GetPackagePathByFullName fpGetPackagePathByFullName =
++        (PFN_GetPackagePathByFullName)(void *)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GetPackagePathByFullName");
++    if (!fpGetPackagePathByFullName) {
++        return std::nullopt;
++    }
++
+   uint32_t path_length = 0;
+ 
+   // Get the required path length.
+   int32_t result =
+-      GetPackagePathByFullName(package_full_name, &path_length, nullptr);
++      fpGetPackagePathByFullName(package_full_name, &path_length, nullptr);
+   if (result != ERROR_INSUFFICIENT_BUFFER) {
+     LOG(ERROR) << "Failed to get package path length for package: "
+                << package_full_name << ". Error: "
+@@ -58,7 +65,7 @@ std::optional<base::FilePath> GetPackagePath(const wchar_t* package_full_name) {
+ 
+   // Get the actual path.
+   std::wstring path_buffer;
+-  result = GetPackagePathByFullName(package_full_name, &path_length,
++  result = fpGetPackagePathByFullName(package_full_name, &path_length,
+                                     base::WriteInto(&path_buffer, path_length));
+   if (result != ERROR_SUCCESS) {
+     LOG(ERROR) << "Failed to get package path for package: "

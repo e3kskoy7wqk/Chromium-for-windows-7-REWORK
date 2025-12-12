@@ -1,0 +1,51 @@
+diff --git a/sandbox/win/BUILD.gn b/sandbox/win/BUILD.gn
+index d882fcb8681cb..6d49aa394f387 100644
+--- a/sandbox/win/BUILD.gn
++++ b/sandbox/win/BUILD.gn
+@@ -170,7 +170,6 @@ static_library("sandbox") {
+ 
+   libs = [
+     "ntdll.lib",
+-    "userenv.lib",
+   ]
+ }
+ 
+diff --git a/sandbox/win/src/app_container_base.cc b/sandbox/win/src/app_container_base.cc
+index 2840f1a7d994f..4eddb327fade8 100644
+--- a/sandbox/win/src/app_container_base.cc
++++ b/sandbox/win/src/app_container_base.cc
+@@ -25,6 +25,18 @@ namespace sandbox {
+ 
+ namespace {
+ 
++typedef decltype(::CreateAppContainerProfile) CreateAppContainerProfileFunc;
++
++typedef decltype(::DeriveAppContainerSidFromAppContainerName)
++    DeriveAppContainerSidFromAppContainerNameFunc;
++
++typedef decltype(::DeleteAppContainerProfile) DeleteAppContainerProfileFunc;
++
++typedef decltype(::GetAppContainerFolderPath) GetAppContainerFolderPathFunc;
++
++typedef decltype(
++    ::GetAppContainerRegistryLocation) GetAppContainerRegistryLocationFunc;
++
+ struct FreeSidDeleter {
+   inline void operator()(void* ptr) const { ::FreeSid(ptr); }
+ };
+@@ -47,7 +65,14 @@ AppContainerBase* AppContainerBase::CreateProfile(const wchar_t* package_name,
+ 
+ std::optional<base::win::Sid> DerivePackageSid(const wchar_t* package_name) {
+   PSID package_sid_ptr = nullptr;
+-  HRESULT hr = ::DeriveAppContainerSidFromAppContainerName(package_name,
++  static auto derive_app_container_sid =
++      reinterpret_cast<DeriveAppContainerSidFromAppContainerNameFunc*>(
++          GetProcAddress(GetModuleHandle(L"userenv"),
++                         "DeriveAppContainerSidFromAppContainerName"));
++  if (!derive_app_container_sid)
++    return std::nullopt;
++
++  HRESULT hr = derive_app_container_sid(package_name,
+                                                            &package_sid_ptr);
+   if (FAILED(hr)) {
+     return std::nullopt;

@@ -1,0 +1,1 @@
+[Windows] Remove Windows 7 fallback for handle enumeration.    2022/11/18 6:41:06    2cab8367dd145569c2164306e9b2d24c5afdb027

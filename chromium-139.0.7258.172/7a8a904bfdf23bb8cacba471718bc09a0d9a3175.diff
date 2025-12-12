@@ -1,0 +1,111 @@
+diff --git a/base/synchronization/condition_variable.h b/base/synchronization/condition_variable.h
+index ebf90d2..7dda21f 100644
+--- a/base/synchronization/condition_variable.h
++++ b/base/synchronization/condition_variable.h
+@@ -104,7 +104,7 @@ class BASE_EXPORT ConditionVariable {
+  private:
+ #if BUILDFLAG(IS_WIN)
+   CHROME_CONDITION_VARIABLE cv_;
+-  const raw_ptr<CHROME_SRWLOCK> srwlock_;
++  char const crit_sec_[100];
+ #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
+   pthread_cond_t condition_;
+   raw_ptr<pthread_mutex_t> user_mutex_;
+diff --git a/base/synchronization/condition_variable_win.cc b/base/synchronization/condition_variable_win.cc
+index 61c6a71..d598e33 100644
+--- a/base/synchronization/condition_variable_win.cc
++++ b/base/synchronization/condition_variable_win.cc
+@@ -11,7 +11,7 @@
+ namespace base {
+ 
+ ConditionVariable::ConditionVariable(Lock* user_lock)
+-    : srwlock_(user_lock->lock_.native_handle())
++    : crit_sec_(user_lock->lock_.native_handle())
+ #if DCHECK_IS_ON()
+       ,
+       user_lock_(user_lock)
+@@ -34,7 +34,7 @@ void ConditionVariable::TimedWait(const TimeDelta& max_time) {
+ #endif
+ 
+   if (!SleepConditionVariableSRW(reinterpret_cast<PCONDITION_VARIABLE>(&cv_),
+-                                 reinterpret_cast<PSRWLOCK>(srwlock_.get()),
++                                 reinterpret_cast<PCRITICAL_SECTION>(crit_sec_),
+                                  timeout, 0)) {
+     // On failure, we only expect the CV to timeout. Any other error value means
+     // that we've unexpectedly woken up.
+diff --git a/base/synchronization/lock_impl.h b/base/synchronization/lock_impl.h
+index cbaabc7..ed85987 100644
+--- a/base/synchronization/lock_impl.h
++++ b/base/synchronization/lock_impl.h
+@@ -24,9 +24,10 @@ namespace internal {
+   friend class base::win::internal::ScopedHandleVerifier;
+ 
+ #if BUILDFLAG(IS_WIN)
+-  using NativeHandle = CHROME_SRWLOCK;
++public:
++  typedef char NativeHandle[100];
+ #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
+-  using NativeHandle =  pthread_mutex_t;
++  typedef pthread_mutex_t NativeHandle;
+ #endif
+ 
+   LockImpl();
+@@ -59,12 +61,12 @@ class BASE_EXPORT LockImpl {
+ 
+ #if BUILDFLAG(IS_WIN)
+ bool LockImpl::Try() {
+-  return !!::TryAcquireSRWLockExclusive(
+-      reinterpret_cast<PSRWLOCK>(&native_handle_));
++  return !!::TryEnterCriticalSection(
++      reinterpret_cast<PCRITICAL_SECTION>(&native_handle_));
+ }
+ 
+ void LockImpl::Unlock() {
+-  ::ReleaseSRWLockExclusive(reinterpret_cast<PSRWLOCK>(&native_handle_));
++  ::LeaveCriticalSection(reinterpret_cast<PCRITICAL_SECTION>(&native_handle_));
+ }
+ 
+ #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
+diff --git a/base/synchronization/lock_impl_win.cc b/base/synchronization/lock_impl_win.cc
+index d89a131..fbc1bdd 100644
+--- a/base/synchronization/lock_impl_win.cc
++++ b/base/synchronization/lock_impl_win.cc
+@@ -7,12 +7,18 @@
+ namespace base {
+ namespace internal {
+ 
+-LockImpl::LockImpl() : native_handle_(SRWLOCK_INIT) {}
++LockImpl::LockImpl() {
++  // The second parameter is the spin count, for short-held locks it avoid the
++  // contending thread from going to sleep which helps performance greatly.
++  ::InitializeCriticalSectionAndSpinCount(reinterpret_cast<PCRITICAL_SECTION>(&native_handle_), 2000);
++}
+ 
+-LockImpl::~LockImpl() = default;
++LockImpl::~LockImpl() {
++  ::DeleteCriticalSection(reinterpret_cast<PCRITICAL_SECTION>(&native_handle_));
++}
+ 
+ void LockImpl::LockInternal() {
+-  ::AcquireSRWLockExclusive(reinterpret_cast<PSRWLOCK>(&native_handle_));
++  ::EnterCriticalSection(reinterpret_cast<PCRITICAL_SECTION>(&native_handle_));
+ }
+ 
+ }  // namespace internal
+diff --git a/base/win/windows_types.h b/base/win/windows_types.h
+index 091e47fff25a6..8060f03911171 100644
+--- a/base/win/windows_types.h
++++ b/base/win/windows_types.h
+@@ -102,6 +103,12 @@ typedef struct _FILETIME FILETIME;
+     ReleaseSRWLockExclusive(_Inout_ PSRWLOCK SRWLock);
+ WINBASEAPI BOOLEAN WINAPI TryAcquireSRWLockExclusive(_Inout_ PSRWLOCK SRWLock);
+ 
++typedef struct _RTL_CRITICAL_SECTION *PCRITICAL_SECTION;
++typedef struct _RTL_CRITICAL_SECTION *LPCRITICAL_SECTION;
++
++WINBASEAPI VOID WINAPI LeaveCriticalSection(_Inout_ LPCRITICAL_SECTION lpCriticalSection);
++WINBASEAPI BOOL WINAPI TryEnterCriticalSection(_Inout_ LPCRITICAL_SECTION lpCriticalSection);
++
+ // Needed to support protobuf's GetMessage macro magic.
+ WINUSERAPI BOOL WINAPI GetMessageW(_Out_ LPMSG lpMsg,
+                                    _In_opt_ HWND hWnd,

@@ -1,0 +1,31 @@
+diff --git a/third_party/libwebrtc/modules/desktop_capture/win/wgc_capture_source.cc b/third_party/libwebrtc/modules/desktop_capture/win/wgc_capture_source.cc
+index 1688878cded5..2d60bde31c25 100644
+--- a/third_party/webrtc/modules/desktop_capture/win/wgc_capture_source.cc
++++ b/third_party/webrtc/modules/desktop_capture/win/wgc_capture_source.cc
+@@ -97,9 +97,25 @@ DesktopVector WgcWindowSource::GetTopLeft() {
+   return window_rect.top_left();
+ }
+ 
++typedef HRESULT(WINAPI* DwmGetWindowAttributeFunc)(HWND hwnd,
++                                                   DWORD flag,
++                                                   PVOID result_ptr,
++                                                   DWORD result_size);
+ ABI::Windows::Graphics::SizeInt32 WgcWindowSource::GetSize() {
+   RECT window_rect;
+-  HRESULT hr = ::DwmGetWindowAttribute(
++  HMODULE dwmapi_library_ = nullptr;
++  DwmGetWindowAttributeFunc dwm_get_window_attribute_func_ = nullptr;
++  dwmapi_library_ = LoadLibraryW(L"dwmapi.dll");
++  if (dwmapi_library_) {
++    dwm_get_window_attribute_func_ =
++        reinterpret_cast<DwmGetWindowAttributeFunc>(
++            GetProcAddress(dwmapi_library_, "DwmGetWindowAttribute"));
++  }
++
++  if (!dwm_get_window_attribute_func_)
++    return WgcCaptureSource::GetSize();
++
++  HRESULT hr = dwm_get_window_attribute_func_(
+       reinterpret_cast<HWND>(GetSourceId()), DWMWA_EXTENDED_FRAME_BOUNDS,
+       reinterpret_cast<void*>(&window_rect), sizeof(window_rect));
+   if (FAILED(hr))

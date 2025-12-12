@@ -1,0 +1,677 @@
+diff --git a/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc b/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc
+index 7625036b94ab4..ebf548bcb9ee4 100644
+--- a/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc
++++ b/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc
+@@ -29,6 +29,11 @@
+ #include "ui/views/views_features.h"
+ 
+ namespace {
++SkColor GetDefaultInactiveFrameColor() {
++  return base::win::GetVersion() < base::win::Version::WIN10
++             ? SkColorSetRGB(0xEB, 0xEB, 0xEB)
++             : SK_ColorWHITE;
++}
+ // This class encapsulates much of the same logic from ThemeHelperWin pertaining
+ // to the calculation of frame colors on Windows 8, 10 and up. Once the
+ // ColorProvider is permanently switched on, all the relevant code from
+@@ -93,7 +97,7 @@ void FrameColorHelper::AddNativeChromeColors(
+     return std::nullopt;
+   };
+ 
+-  if ((base::win::GetVersion() >= base::win::Version::WIN10 || !( BrowserThemePack::IsPersistentImageID(IDR_THEME_FRAME) && key.custom_theme && key.custom_theme->HasCustomImage(IDR_THEME_FRAME))) && ui::win::IsAeroGlassEnabled()) {
++  if ((base::win::GetVersion() >= base::win::Version::WIN10 || !( BrowserThemePack::IsPersistentImageID(IDR_THEME_FRAME) && key.custom_theme && key.custom_theme->HasCustomImage(IDR_THEME_FRAME))) && (base::win::GetVersion() >= base::win::Version::WIN8) && ui::win::IsAeroGlassEnabled()) {
+   // When we're custom-drawing the titlebar we want to use either the colors
+   // we calculated in OnDwmKeyUpdated() or the default colors. When we're not
+   // custom-drawing the titlebar we want to match the color Windows actually
+@@ -117,6 +121,10 @@ void FrameColorHelper::AddNativeChromeColors(
+   } else if (use_native_colors) {
+     if (dwm_inactive_frame_color_) {
+       inactive_frame_transform = {dwm_inactive_frame_color_.value()};
++    } else if (!(base::win::GetVersion() >= base::win::Version::WIN10)) {
++      mixer[ui::kColorFrameInactive] = {key.color_mode == ColorMode::kDark
++                                            ? SkColorSetRGB(0x2B, 0x2B, 0x2B)
++                                            : GetDefaultInactiveFrameColor()};
+   } else if (dwm_frame_color_) {
+      inactive_frame_transform =
+        ui::HSLShift({dwm_frame_color_.value()},
+@@ -187,17 +192,21 @@ void FrameColorHelper::FetchAccentColors() {
+   ui::NativeTheme::GetInstanceForWeb()->set_user_color(accent_color);
+ 
+   if (!accent_color_observer->use_dwm_frame_color()) {
+-    dwm_accent_border_color_ = SK_ColorWHITE;
++    dwm_accent_border_color_ = GetDefaultInactiveFrameColor();
+     dwm_frame_color_.reset();
+     dwm_inactive_frame_color_.reset();
+     return;
+   }
+ 
+   dwm_accent_border_color_ =
+-      accent_color_observer->accent_border_color().value_or(SK_ColorWHITE);
++      accent_color_observer->accent_border_color().value_or(GetDefaultInactiveFrameColor());
+ 
+-  dwm_frame_color_ = accent_color;
+-  dwm_inactive_frame_color_ = accent_color_observer->accent_color_inactive();
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    dwm_frame_color_ = dwm_accent_border_color_;
++  } else {
++    dwm_frame_color_ = accent_color_observer->accent_color();
++    dwm_inactive_frame_color_ = accent_color_observer->accent_color_inactive();
++  }
+ }
+ 
+ ui::ColorTransform GetCaptionForegroundColor(
+diff --git a/chrome/browser/ui/views/apps/app_window_frame_view_win.cc b/chrome/browser/ui/views/apps/app_window_frame_view_win.cc
+index 321bd4e99eec0..3c8b7d01fe480 100644
+--- a/chrome/browser/ui/views/apps/app_window_frame_view_win.cc
++++ b/chrome/browser/ui/views/apps/app_window_frame_view_win.cc
+@@ -6,8 +6,7 @@
+ 
+ #include <windows.h>
+ 
+-#include <algorithm>
+-
++#include "base/win/windows_version.h"
+ #include "extensions/browser/app_window/native_app_window.h"
+ #include "ui/base/hit_test.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+@@ -34,13 +33,32 @@ gfx::Insets GlassAppWindowFrameViewWin::GetGlassInsets() const {
+       display::win::GetScreenWin()->GetSystemMetricsInDIP(SM_CYSIZEFRAME) +
+       display::win::GetScreenWin()->GetSystemMetricsInDIP(SM_CYCAPTION);
+ 
+-  return gfx::Insets::TLBR(caption_height, 0, 0, 0);
++  int frame_size =
++      base::win::GetVersion() < base::win::Version::WIN10
++          ? display::win::GetScreenWin()->GetSystemMetricsInDIP(SM_CXSIZEFRAME)
++          : 0;
++
++  return gfx::Insets::TLBR(caption_height, frame_size, frame_size, frame_size);
+ }
+ 
+ gfx::Insets AppWindowFrameViewWin::GetClientAreaInsets(
+     int frame_thickness) const {
+-  return gfx::Insets::TLBR(0, frame_thickness, frame_thickness,
+-                           frame_thickness);
++  gfx::Insets insets;
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    // This tells Windows that most of the window is a client area, meaning
++    // Chrome will draw it. Windows still fills in the glass bits because of the
++    // DwmExtendFrameIntoClientArea call in |UpdateDWMFrame|.
++    // Without this 1 pixel offset on the right and bottom:
++    //   * windows paint in a more standard way, and
++    //   * we get weird black bars at the top when maximized in multiple monitor
++    //     configurations.
++    int border_thickness = 1;
++    insets = gfx::Insets::TLBR(0, 0, border_thickness, border_thickness);
++  } else {
++    insets =
++        gfx::Insets::TLBR(0, frame_thickness, frame_thickness, frame_thickness);
++  }
++  return insets;
+ }
+ 
+ gfx::Rect AppWindowFrameViewWin::GetBoundsForClientView() const {
+diff --git a/chrome/browser/ui/views/create_application_shortcut_view.cc b/chrome/browser/ui/views/create_application_shortcut_view.cc
+index a6a6e43fb88a1..7acc44fd2e97c 100644
+--- a/chrome/browser/ui/views/create_application_shortcut_view.cc
++++ b/chrome/browser/ui/views/create_application_shortcut_view.cc
+@@ -27,6 +27,7 @@
+ 
+ #if BUILDFLAG(IS_WIN)
+ #include "base/win/shortcut.h"
++#include "base/win/windows_version.h"
+ #include "chrome/installer/util/taskbar_util.h"
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+@@ -122,9 +123,14 @@ void CreateChromeApplicationShortcutView::InitControls() {
+   std::unique_ptr<views::Checkbox> pin_to_taskbar_checkbox;
+ 
+ #if BUILDFLAG(IS_WIN)
+-  menu_check_box = AddCheckbox(
+-      l10n_util::GetStringUTF16(IDS_CREATE_SHORTCUTS_START_MENU_CHKBOX),
+-      prefs::kWebAppCreateInAppsMenu);
++  base::win::Version version = base::win::GetVersion();
++  // Do not allow creating shortcuts on the Start Screen for Windows 8.
++  if (version != base::win::Version::WIN8 &&
++      version != base::win::Version::WIN8_1) {
++    menu_check_box = AddCheckbox(
++        l10n_util::GetStringUTF16(IDS_CREATE_SHORTCUTS_START_MENU_CHKBOX),
++        prefs::kWebAppCreateInAppsMenu);
++  }
+ 
+   // Only include the pin-to-taskbar option when running on versions of Windows
+   // that support pinning.
+diff --git a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc
+index 1e6cb8b08cb67..a038f4c8a4a6e 100644
+--- a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc
++++ b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc
+@@ -264,6 +264,9 @@ bool BrowserDesktopWindowTreeHostWin::UsesNativeSystemMenu() const {
+ void BrowserDesktopWindowTreeHostWin::Init(
+     const views::Widget::InitParams& params) {
+   DesktopWindowTreeHostWin::Init(params);
++  if (base::win::GetVersion() < base::win::Version::WIN10)
++    return;  // VirtualDesktopManager isn't supported pre Win-10.
++
+   virtual_desktop_helper_ = new VirtualDesktopHelper(params.workspace);
+   virtual_desktop_helper_->Init(GetHWND());
+ }
+@@ -363,12 +366,20 @@ bool BrowserDesktopWindowTreeHostWin::GetDwmFrameInsetsInPixels(
+     *insets = gfx::Insets();
+   } else {
+     // The glass should extend to the bottom of the tabstrip.
++    HWND hwnd = GetHWND();
+     gfx::Rect tabstrip_region_bounds(browser_frame_->GetBoundsForTabStripRegion(
+         browser_view_->tab_strip_region_view()->GetMinimumSize()));
+-    tabstrip_region_bounds = display::win::GetScreenWin()->DIPToClientRect(
+-        GetHWND(), tabstrip_region_bounds);
+-
+-    *insets = gfx::Insets::TLBR(tabstrip_region_bounds.bottom(), 0, 0, 0);
++    tabstrip_region_bounds = display::win::GetScreenWin()->DIPToClientRect(
++        hwnd, tabstrip_region_bounds);
++
++    // The 2 px (not DIP) at the inner edges of Win 7 glass are a light and dark
++    // line, so we must inset further to account for those.
++    constexpr int kWin7GlassInset = 2;
++    const int inset = (base::win::GetVersion() < base::win::Version::WIN8)
++                          ? kWin7GlassInset
++                          : 0;
++    *insets = gfx::Insets::TLBR(tabstrip_region_bounds.bottom() + inset, inset,
++                                inset, inset);
+   }
+   return true;
+ }
+@@ -468,6 +479,9 @@ void BrowserDesktopWindowTreeHostWin::PostHandleMSG(UINT message,
+ }
+ 
+ views::FrameMode BrowserDesktopWindowTreeHostWin::GetFrameMode() const {
++  if (IsOpaqueHostedAppFrame())
++    return views::FrameMode::CUSTOM_DRAWN;
++
+   if (!browser_view_) {
+     // If there is no browser view the frame should be system drawn.
+     return views::FrameMode::SYSTEM_DRAWN;
+@@ -497,6 +511,9 @@ bool BrowserDesktopWindowTreeHostWin::ShouldUseNativeFrame() const {
+     return false;
+   }
+ 
++  if (IsOpaqueHostedAppFrame())
++    return false;
++
+   // We don't theme popup or app windows, so regardless of whether or not a
+   // theme is active for normal browser windows, we don't want to use the custom
+   // frame for popups/apps.
+@@ -561,6 +578,13 @@ void BrowserDesktopWindowTreeHostWin::UpdateWorkspace() {
+                      weak_factory_.GetWeakPtr()));
+ }
+ 
++bool BrowserDesktopWindowTreeHostWin::IsOpaqueHostedAppFrame() const {
++  // TODO(https://crbug.com/868239): Support Windows 7 Aero glass for web-app
++  // window titlebar controls.
++  return browser_view_->GetIsWebAppType() &&
++         base::win::GetVersion() < base::win::Version::WIN10;
++}
++
+ SkBitmap GetBadgedIconBitmapForProfile(Profile* profile) {
+   std::unique_ptr<gfx::ImageFamily> family = GetAppIconImageFamily();
+   if (!family) {
+diff --git a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.h b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.h
+index a3bd2e0cae1d3..e52ca6cb5dd3f 100644
+--- a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.h
++++ b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.h
+@@ -88,6 +88,8 @@ class BrowserDesktopWindowTreeHostWin
+   // WindowTreeHost of its value.
+   void UpdateWorkspace();
+ 
++  bool IsOpaqueHostedAppFrame() const;
++
+   void SetWindowIcon(bool badged);
+ 
+   raw_ptr<BrowserView> browser_view_;
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 6f8f8516ff646..9d21737ac4f4c 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -284,6 +284,7 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
+ #include "chrome/browser/taskbar/taskbar_decorator_win.h"
+ #include "chrome/browser/win/jumplist.h"
+ #include "chrome/browser/win/jumplist_factory.h"
+@@ -1366,6 +1367,8 @@ bool BrowserView::IsOnCurrentWorkspace() const {
+   return chromeos::DesksHelper::Get(native_win)
+       ->BelongsToActiveDesk(native_win);
+ #elif BUILDFLAG(IS_WIN)
++  if (base::win::GetVersion() < base::win::Version::WIN10)
++    return true;
+   std::optional<bool> on_current_workspace =
+       native_win->GetHost()->on_current_workspace();
+   if (on_current_workspace.has_value()) {
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.cc b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+index 0e9678f67c384..3126a5a1b0214 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+@@ -12,6 +12,7 @@
+ 
+ #include "base/trace_event/common/trace_event_common.h"
+ #include "base/trace_event/trace_event.h"
++#include "base/win/windows_version.h"
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/app/chrome_dll_resource.h"
+ #include "chrome/browser/themes/theme_properties.h"
+@@ -155,6 +156,10 @@ bool GlassBrowserFrameView::HasVisibleBackgroundTabShapes(
+     BrowserFrameActiveState active_state) const {
+   DCHECK(GetWidget());
+ 
++  // Pre-Win 8, tabs never match the glass frame appearance.
++  if (base::win::GetVersion() < base::win::Version::WIN8)
++    return true;
++
+   // Enabling high contrast mode disables the custom-drawn titlebar (so the
+   // system-drawn frame will respect the native frame colors) and enables the
+   // IncreasedContrastThemeSupplier (which does not respect the native frame
+@@ -167,6 +172,15 @@ bool GlassBrowserFrameView::HasVisibleBackgroundTabShapes(
+   return BrowserNonClientFrameView::HasVisibleBackgroundTabShapes(active_state);
+ }
+ 
++bool BrowserFrameViewWin::CanDrawStrokes() const {
++  // On Win 7, the tabs are drawn as flat shapes against the glass frame, so
++  // the active tab always has a visible shape and strokes are unnecessary.
++  if (base::win::GetVersion() < base::win::Version::WIN8)
++    return false;
++
++  return BrowserNonClientFrameView::CanDrawStrokes();
++}
++
+ SkColor BrowserFrameViewWin::GetCaptionColor(
+     BrowserFrameActiveState active_state) const {
+   return GetColorProvider()->GetColor(ShouldPaintAsActiveForState(active_state)
+@@ -288,39 +302,41 @@ int GlassBrowserFrameView::NonClientHitTest(const gfx::Point& point) {
+     }
+   }
+ 
+-  // On Windows, the caption buttons are almost butted up to the top right
++  // On Windows 8+, the caption buttons are almost butted up to the top right
+   // corner of the window. This code ensures the mouse isn't set to a size
+   // cursor while hovering over the caption buttons, thus giving the incorrect
+   // impression that the user can resize the window.
+-  RECT button_bounds = {0};
+-  if (SUCCEEDED(DwmGetWindowAttribute(views::HWNDForWidget(frame()),
+-                                      DWMWA_CAPTION_BUTTON_BOUNDS,
+-                                      &button_bounds, sizeof(button_bounds)))) {
+-    gfx::RectF button_bounds_in_dips = gfx::ConvertRectToDips(
+-        gfx::Rect(button_bounds), display::win::GetDPIScale());
+-    // TODO(crbug.com/40150311): GetMirroredRect() requires an integer rect,
+-    // but the size in DIPs may not be an integer with a fractional device
+-    // scale factor. If we want to keep using integers, the choice to use
+-    // ToFlooredRectDeprecated() seems to be doing the wrong thing given the
+-    // comment below about insetting 1 DIP instead of 1 physical pixel. We
+-    // should probably use ToEnclosedRect() and then we could have inset 1
+-    // physical pixel here.
+-    gfx::Rect buttons =
+-        GetMirroredRect(gfx::ToFlooredRectDeprecated(button_bounds_in_dips));
+-
+-    // There is a small one-pixel strip right above the caption buttons in
+-    // which the resize border "peeks" through.
+-    constexpr int kCaptionButtonTopInset = 1;
+-    // The sizing region at the window edge above the caption buttons is
+-    // 1 px regardless of scale factor. If we inset by 1 before converting
+-    // to DIPs, the precision loss might eliminate this region entirely. The
+-    // best we can do is to inset after conversion. This guarantees we'll
+-    // show the resize cursor when resizing is possible. The cost of which
+-    // is also maybe showing it over the portion of the DIP that isn't the
+-    // outermost pixel.
+-    buttons.Inset(gfx::Insets::TLBR(kCaptionButtonTopInset, 0, 0, 0));
+-    if (buttons.Contains(point)) {
+-      return HTNOWHERE;
++  if (base::win::GetVersion() >= base::win::Version::WIN8) {
++    RECT button_bounds = {0};
++    if (SUCCEEDED(DwmGetWindowAttribute(views::HWNDForWidget(frame()),
++                                        DWMWA_CAPTION_BUTTON_BOUNDS,
++                                        &button_bounds,
++                                        sizeof(button_bounds)))) {
++      gfx::RectF button_bounds_in_dips = gfx::ConvertRectToDips(
++          gfx::Rect(button_bounds), display::win::GetDPIScale());
++      // TODO(crbug.com/40150311): GetMirroredRect() requires an integer rect,
++      // but the size in DIPs may not be an integer with a fractional device
++      // scale factor. If we want to keep using integers, the choice to use
++      // ToFlooredRectDeprecated() seems to be doing the wrong thing given the
++      // comment below about insetting 1 DIP instead of 1 physical pixel. We
++      // should probably use ToEnclosedRect() and then we could have inset 1
++      // physical pixel here.
++      gfx::Rect buttons =
++          GetMirroredRect(gfx::ToFlooredRectDeprecated(button_bounds_in_dips));
++
++      // There is a small one-pixel strip right above the caption buttons in
++      // which the resize border "peeks" through.
++      constexpr int kCaptionButtonTopInset = 1;
++      // The sizing region at the window edge above the caption buttons is
++      // 1 px regardless of scale factor. If we inset by 1 before converting
++      // to DIPs, the precision loss might eliminate this region entirely. The
++      // best we can do is to inset after conversion. This guarantees we'll
++      // show the resize cursor when resizing is possible. The cost of which
++      // is also maybe showing it over the portion of the DIP that isn't the
++      // outermost pixel.
++      buttons.Inset(gfx::Insets::TLBR(kCaptionButtonTopInset, 0, 0, 0));
++      if (buttons.Contains(point))
++        return HTNOWHERE;
+     }
+   }
+ 
+@@ -637,20 +653,20 @@ void BrowserFrameViewWin::TabletModeChanged() {
+ }
+ 
+ void BrowserFrameViewWin::SetSystemMicaTitlebarAttributes() {
+-  CHECK(SystemTitlebarCanUseMicaMaterial());
+-
+   const BOOL dark_titlebar_enabled =
+       frame()->GetColorMode() == ui::ColorProviderKey::ColorMode::kDark;
+   DwmSetWindowAttribute(views::HWNDForWidget(frame()),
+                         DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_titlebar_enabled,
+                         sizeof(dark_titlebar_enabled));
+ 
++  if (SystemTitlebarCanUseMicaMaterial()) {
+   const DWM_SYSTEMBACKDROP_TYPE dwm_backdrop_type =
+       browser_view()->GetTabStripVisible() ? DWMSBT_TABBEDWINDOW
+                                            : DWMSBT_MAINWINDOW;
+   DwmSetWindowAttribute(views::HWNDForWidget(frame()),
+                         DWMWA_SYSTEMBACKDROP_TYPE, &dwm_backdrop_type,
+                         sizeof(dwm_backdrop_type));
++  }
+ }
+ 
+ SkColor BrowserFrameViewWin::GetTitlebarColor() const {
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.h b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+index a2e91b75d3665..abe8e6d103b8a 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+@@ -37,6 +37,7 @@ class GlassBrowserFrameView : public BrowserNonClientFrameView,
+   int GetTopInset(bool restored) const override;
+   bool HasVisibleBackgroundTabShapes(
+       BrowserFrameActiveState active_state) const override;
++  bool CanDrawStrokes() const override;
+   SkColor GetCaptionColor(BrowserFrameActiveState active_state) const override;
+   void UpdateThrobber(bool running) override;
+   gfx::Size GetMinimumSize() const override;
+diff --git a/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc b/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc
+index 1e9aa01bc1db1..0a7154017bbb5 100644
+--- a/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc
++++ b/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc
+@@ -4,21 +4,36 @@
+ 
+ #include "chrome/browser/ui/views/frame/minimize_button_metrics_win.h"
+ 
+-#include <dwmapi.h>
+-
+ #include "base/check.h"
+ #include "base/i18n/rtl.h"
++#include "base/win/windows_version.h"
++#include "dwmapi.h"
+ #include "ui/base/win/shell.h"
+ #include "ui/display/win/screen_win.h"
+ #include "ui/gfx/geometry/point.h"
+ 
+ namespace {
+ 
+-const int kButtonBoundsPositionOffset = 6;
++// These constants were determined by manually adding various offsets
++// until the identity switcher was placed at the same location as before.
++// When a new or updated OS version is released, a new constant may need
++// to be added to this list and GetDefaultButtonBoundsOffset() is updated.
++const int kWin7ButtonBoundsPositionOffset = 1;
++const int kWin8ButtonBoundsPositionOffset = 10;
++const int kWin10ButtonBoundsPositionOffset = 6;
+ const int kInvalidOffset = static_cast<int>(0x80000000);
+ 
++using base::win::GetVersion;
+ using display::win::ScreenWin;
+ 
++int GetDefaultButtonBoundsOffset() {
++  if (GetVersion() >= base::win::Version::WIN10)
++    return kWin10ButtonBoundsPositionOffset;
++  if (GetVersion() >= base::win::Version::WIN8)
++    return kWin8ButtonBoundsPositionOffset;
++  return kWin7ButtonBoundsPositionOffset;
++}
++
+ }  // namespace
+ 
+ // static
+@@ -27,9 +42,14 @@ int MinimizeButtonMetrics::last_cached_minimize_button_x_delta_ = 0;
+ // static
+ int MinimizeButtonMetrics::button_bounds_position_offset_ = kInvalidOffset;
+ 
+-MinimizeButtonMetrics::MinimizeButtonMetrics() = default;
++MinimizeButtonMetrics::MinimizeButtonMetrics()
++    : hwnd_(nullptr),
++      cached_minimize_button_x_delta_(last_cached_minimize_button_x_delta_),
++      was_activated_(false) {
++}
+ 
+-MinimizeButtonMetrics::~MinimizeButtonMetrics() = default;
++MinimizeButtonMetrics::~MinimizeButtonMetrics() {
++}
+ 
+ void MinimizeButtonMetrics::Init(HWND hwnd) {
+   DCHECK(!hwnd_);
+@@ -58,18 +78,16 @@ int MinimizeButtonMetrics::GetButtonBoundsPositionOffset(
+     const RECT& button_bounds,
+     const RECT& window_bounds) const {
+   if (button_bounds_position_offset_ == kInvalidOffset) {
+-    if (!was_activated_ || !IsWindowVisible(hwnd_)) {
+-      return kButtonBoundsPositionOffset;
+-    }
++    if (!was_activated_ || !IsWindowVisible(hwnd_))
++      return GetDefaultButtonBoundsOffset();
+     TITLEBARINFOEX info = {0};
+     info.cbSize = sizeof(info);
+     SendMessage(hwnd_, WM_GETTITLEBARINFOEX, 0,
+                 reinterpret_cast<LPARAM>(&info));
+     if (info.rgrect[2].right == info.rgrect[2].left ||
+         (info.rgstate[2] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN |
+-                            STATE_SYSTEM_UNAVAILABLE))) {
+-      return kButtonBoundsPositionOffset;
+-    }
++                            STATE_SYSTEM_UNAVAILABLE)))
++      return GetDefaultButtonBoundsOffset();
+     button_bounds_position_offset_ =
+         info.rgrect[2].left - (button_bounds.left + window_bounds.left);
+   }
+diff --git a/chrome/browser/ui/views/frame/minimize_button_metrics_win.h b/chrome/browser/ui/views/frame/minimize_button_metrics_win.h
+index 651b7bf6099e1..c378b7e510fe2 100644
+--- a/chrome/browser/ui/views/frame/minimize_button_metrics_win.h
++++ b/chrome/browser/ui/views/frame/minimize_button_metrics_win.h
+@@ -43,15 +43,14 @@ class MinimizeButtonMetrics {
+ 
+   int GetMinimizeButtonOffsetForWindow() const;
+ 
+-  HWND hwnd_ = nullptr;
++  HWND hwnd_;
+ 
+   // Cached offset of the minimize button. If RTL this is the location of the
+   // minimize button, if LTR this is the offset from the right edge of the
+   // client area to the minimize button.
+-  mutable int cached_minimize_button_x_delta_ =
+-      last_cached_minimize_button_x_delta_;
++  mutable int cached_minimize_button_x_delta_;
+ 
+-  // Static cache of `cached_minimize_button_x_delta_`.
++  // Static cache of |cached_minimize_button_x_delta_|.
+   static int last_cached_minimize_button_x_delta_;
+ 
+   // Static cache of offset value representing the difference between
+@@ -59,7 +58,7 @@ class MinimizeButtonMetrics {
+   static int button_bounds_position_offset_;
+ 
+   // Has OnHWNDActivated() been invoked?
+-  bool was_activated_ = false;
++  bool was_activated_;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_FRAME_MINIMIZE_BUTTON_METRICS_WIN_H_
+diff --git a/chrome/browser/ui/views/tabs/tab_strip.cc b/chrome/browser/ui/views/tabs/tab_strip.cc
+index 61e6e316a01d3..c6390ac4f1354 100644
+--- a/chrome/browser/ui/views/tabs/tab_strip.cc
++++ b/chrome/browser/ui/views/tabs/tab_strip.cc
+@@ -115,6 +114,7 @@
+ #include "ui/views/window/non_client_view.h"
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
+ #include "ui/display/win/screen_win.h"
+ #include "ui/gfx/win/hwnd_util.h"
+ #include "ui/views/win/hwnd_util.h"
+@@ -1924,10 +1924,12 @@ bool TabStrip::ShouldHighlightCloseButtonAfterRemove() {
+ 
+ bool TabStrip::TitlebarBackgroundIsTransparent() const {
+ #if BUILDFLAG(IS_WIN)
+-  return false;
+-#else
++  // Windows 8+ uses transparent window contents (because the titlebar area is
++  // drawn by the system and not Chrome), but the actual titlebar is opaque.
++  if (base::win::GetVersion() >= base::win::Version::WIN8)
++    return false;
++#endif
+   return GetWidget()->ShouldWindowContentsBeTransparent();
+-#endif  // BUILDFLAG(IS_WIN)
+ }
+ 
+ const Tab* TabStrip::GetLastVisibleTab() const {
+diff --git a/chrome/browser/ui/views/touch_events_interactive_uitest_win.cc b/chrome/browser/ui/views/touch_events_interactive_uitest_win.cc
+index 3f51e7f32d193..3eae80d50857e 100644
+--- a/chrome/browser/ui/views/touch_events_interactive_uitest_win.cc
++++ b/chrome/browser/ui/views/touch_events_interactive_uitest_win.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/run_loop.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/ui/views/test/view_event_test_base.h"
+ #include "chrome/test/base/testing_profile.h"
+@@ -161,6 +162,13 @@ class TouchEventsViewTest : public ViewEventTestBase {
+   }
+ 
+   void DoTestOnMessageLoop() override {
++    // ui_controls::SendTouchEvents which uses InjectTouchInput API only works
++    // on Windows 8 and up.
++    if (base::win::GetVersion() <= base::win::Version::WIN7) {
++      Done();
++      return;
++    }
++
+     const int touch_pointer_count = 3;
+     TouchEventHandler touch_event_handler;
+     window()->GetNativeWindow()->GetHost()->window()->AddPreTargetHandler(
+@@ -211,6 +219,13 @@ class TouchEventsRecursiveViewTest : public TouchEventsViewTest {
+       delete;
+ 
+   void DoTestOnMessageLoop() override {
++    // ui_controls::SendTouchEvents which uses InjectTouchInput API only works
++    // on Windows 8 and up.
++    if (base::win::GetVersion() <= base::win::Version::WIN7) {
++      Done();
++      return;
++    }
++
+     const int touch_pointer_count = 1;
+     TouchEventHandler touch_event_handler;
+     window()->GetNativeWindow()->GetHost()->window()->AddPreTargetHandler(
+diff --git a/chrome/browser/ui/views/web_apps/frame_toolbar/web_app_navigation_button_container.cc b/chrome/browser/ui/views/web_apps/frame_toolbar/web_app_navigation_button_container.cc
+index 9dd6c23fa5915..aa5650fe51a44 100644
+--- a/chrome/browser/ui/views/web_apps/frame_toolbar/web_app_navigation_button_container.cc
++++ b/chrome/browser/ui/views/web_apps/frame_toolbar/web_app_navigation_button_container.cc
+@@ -29,6 +26,10 @@
+ #include "ui/views/layout/box_layout.h"
+ #include "ui/views/window/hit_test_utils.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ namespace {
+ 
+ constexpr int kPaddingBetweenNavigationButtons = 5;
+diff --git a/chrome/browser/ui/webui/conflicts/conflicts_data_fetcher.cc b/chrome/browser/ui/webui/conflicts/conflicts_data_fetcher.cc
+index df34ffb57fcde..0c42663044803 100644
+--- a/chrome/browser/ui/webui/conflicts/conflicts_data_fetcher.cc
++++ b/chrome/browser/ui/webui/conflicts/conflicts_data_fetcher.cc
+@@ -8,6 +8,7 @@
+ #include <utility>
+ 
+ #include "base/strings/string_util.h"
++#include "base/win/windows_version.h"
+ #include "chrome/browser/win/conflicts/module_database.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+@@ -464,7 +477,7 @@ void ConflictsDataFetcher::OnModuleDatabaseIdle() {
+   ModuleDatabase::GetInstance()->RemoveObserver(this);
+ 
+   base::Value::Dict results;
+-  results.Set("moduleCount", static_cast<int>(module_list_->size()));
++  results.Set("moduleCount", int(module_list_->size()));
+   results.Set("moduleList", std::move(*module_list_));
+   module_list_ = std::nullopt;
+ 
+diff --git a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+index 3892fdae3176f..ee31c184cc3f2 100644
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -127,6 +127,7 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
+ #include "device/fido/features.h"
+ #include "device/fido/win/webauthn_api.h"
+ 
+@@ -262,7 +263,8 @@ void AddA11yStrings(content::WebUIDataSource* html_source) {
+   html_source->AddLocalizedStrings(kLocalizedStrings);
+ 
+ #if BUILDFLAG(IS_WIN)
+-  html_source->AddBoolean("isWindows10OrNewer", true);
++  html_source->AddBoolean("isWindows10OrNewer",
++                          base::win::GetVersion() >= base::win::Version::WIN10);
+ #endif
+ 
+   html_source->AddBoolean(
+diff --git a/chrome/browser/ui/webui/settings/settings_utils_win.cc b/chrome/browser/ui/webui/settings/settings_utils_win.cc
+index cffb388930dad..820c1e971889d 100644
+--- a/chrome/browser/ui/webui/settings/settings_utils_win.cc
++++ b/chrome/browser/ui/webui/settings/settings_utils_win.cc
+@@ -14,6 +14,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+ #include "base/threading/thread.h"
++#include "base/win/windows_version.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/platform_util.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -30,7 +31,7 @@ namespace {
+ // Shows a Windows certificate management dialog on the dialog thread.
+ class ManageCertificatesDialog : public ui::BaseShellDialogImpl {
+  public:
+-  ManageCertificatesDialog() = default;
++  ManageCertificatesDialog() {}
+ 
+   ManageCertificatesDialog(const ManageCertificatesDialog&) = delete;
+   ManageCertificatesDialog& operator=(const ManageCertificatesDialog&) = delete;
+@@ -102,9 +103,15 @@ void OpenConnectionDialogCallback() {
+ }
+ 
+ void ShowNetworkProxySettings(content::WebContents* /*web_contents*/) {
+-  // See
+-  // https://docs.microsoft.com/en-us/windows/uwp/launch-resume/launch-settings-app#network--internet
+-  platform_util::OpenExternal(GURL("ms-settings:network-proxy"));
++  if (base::win::GetVersion() >= base::win::Version::WIN10) {
++    // See
++    // https://docs.microsoft.com/en-us/windows/uwp/launch-resume/launch-settings-app#network--internet
++    platform_util::OpenExternal(GURL("ms-settings:network-proxy"));
++  } else {
++    base::ThreadPool::PostTask(
++        FROM_HERE, {base::TaskPriority::USER_VISIBLE, base::MayBlock()},
++        base::BindOnce(&OpenConnectionDialogCallback));
++  }
+ }
+ 
+ void ShowManageSSLCertificates(content::WebContents* web_contents) {

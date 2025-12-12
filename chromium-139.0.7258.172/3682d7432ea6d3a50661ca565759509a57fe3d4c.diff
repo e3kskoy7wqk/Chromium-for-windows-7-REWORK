@@ -1,0 +1,234 @@
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 0009a87d3063f..00ffcb295ba29 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3495,6 +3495,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+ #endif
+ #if BUILDFLAG(IS_WIN)
+     switches::kDisableHighResTimer,
++    switches::kEnableWin7WebRtcHWH264Decoding,
+       switches::kTextContrast,
+       switches::kTextGamma,
+       switches::kTrySupportedChannelLayouts,
+diff --git a/content/child/runtime_features.cc b/content/child/runtime_features.cc
+index 5d3a076392c62..cfda43ec85b03 100644
+--- a/content/child/runtime_features.cc
++++ b/content/child/runtime_features.cc
+@@ -47,6 +46,10 @@
+ #include "device/vr/public/cpp/features.h"
+ #endif
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ using blink::WebRuntimeFeatures;
+ 
+ namespace {
+@@ -64,6 +67,11 @@ void SetRuntimeFeatureDefaultsForPlatform(
+ #if defined(USE_AURA)
+   WebRuntimeFeatures::EnableCompositedSelectionUpdate(true);
+ #endif
++#if BUILDFLAG(IS_WIN)
++  if (base::win::GetVersion() >= base::win::Version::WIN10) {
++    WebRuntimeFeatures::EnableWebBluetooth(true);
++  }
++#endif
+ 
+ #if BUILDFLAG(IS_APPLE)
+   const bool enable_canvas_2d_image_chromium =
+diff --git a/content/public/common/content_features.cc b/content/public/common/content_features.cc
+index a74d986ba6916..233c09754c218 100644
+--- a/content/public/common/content_features.cc
++++ b/content/public/common/content_features.cc
+@@ -4,6 +4,10 @@
+ #include "content/public/common/btm_utils.h"
+ #include "content/public/common/buildflags.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ namespace features {
+ 
+ // All features in alphabetical order.
+@@ -1534,6 +1536,11 @@ VideoCaptureServiceConfiguration GetVideoCaptureServiceConfiguration() {
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+   return VideoCaptureServiceConfiguration::kEnabledForBrowserProcess;
+ #else
++#if BUILDFLAG(IS_WIN)
++  if (base::win::GetVersion() <= base::win::Version::WIN7) {
++    return VideoCaptureServiceConfiguration::kEnabledForBrowserProcess;
++  }
++#endif
+   return base::FeatureList::IsEnabled(
+              features::kRunVideoCaptureServiceInBrowserProcess)
+              ? VideoCaptureServiceConfiguration::kEnabledForBrowserProcess
+diff --git a/content/public/common/content_switches.cc b/content/public/common/content_switches.cc
+index dfc7ee144b562..20c23cf174e94 100644
+--- a/content/public/common/content_switches.cc
++++ b/content/public/common/content_switches.cc
+@@ -1037,6 +1037,10 @@ const char kDeviceScaleFactor[]     = "device-scale-factor";
+ // Disable the Legacy Window which corresponds to the size of the WebContents.
+ const char kDisableLegacyIntermediateWindow[] = "disable-legacy-window";
+ 
++// Enables H264 HW decode acceleration for WebRtc on Win 7.
++const char kEnableWin7WebRtcHWH264Decoding[] =
++    "enable-win7-webrtc-hw-h264-decoding";
++
+ // DirectWrite FontCache is shared by browser to renderers using shared memory.
+ // This switch allows us to pass the shared memory handle to the renderer.
+ const char kFontCacheSharedHandle[] = "font-cache-shared-handle";
+diff --git a/content/public/common/content_switches.h b/content/public/common/content_switches.h
+index 5a65b9ff69ecd..2878568cd3e4e 100644
+--- a/content/public/common/content_switches.h
++++ b/content/public/common/content_switches.h
+@@ -283,6 +283,7 @@ CONTENT_EXPORT extern const char kPrefetchArgumentOther[];
+ // like renderers, etc.
+ CONTENT_EXPORT extern const char kDeviceScaleFactor[];
+ CONTENT_EXPORT extern const char kDisableLegacyIntermediateWindow[];
++CONTENT_EXPORT extern const char kEnableWin7WebRtcHWH264Decoding[];
+ // Switch to pass the font cache shared memory handle to the renderer.
+ CONTENT_EXPORT extern const char kFontCacheSharedHandle[];
+ CONTENT_EXPORT extern const char kPpapiAntialiasedTextEnabled[];
+diff --git a/content/renderer/render_view_browsertest.cc b/content/renderer/render_view_browsertest.cc
+index d1f61c4e57355..83ff9d52fbcda 100644
+--- a/content/renderer/render_view_browsertest.cc
++++ b/content/renderer/render_view_browsertest.cc
+@@ -123,6 +123,10 @@
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ #endif
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ #if BUILDFLAG(IS_OZONE)
+ #include "ui/events/keycodes/keyboard_code_conversion.h"
+ #endif
+@@ -3152,6 +3156,12 @@ TEST_F(RenderViewImplScaleFactorTest, ConvertViewportToWindow) {
+ TEST_F(RenderViewImplScaleFactorTest,
+        DISABLED_GetCompositionCharacterBoundsTest) {  // http://crbug.com/582016
+   SetDeviceScaleFactor(1.f);
++#if BUILDFLAG(IS_WIN)
++  // http://crbug.com/508747
++  if (base::win::GetVersion() >= base::win::Version::WIN10)
++    return;
++#endif
++
+   LoadHTML("<textarea id=\"test\"></textarea>");
+   ExecuteJavaScriptForTests("document.getElementById('test').focus();");
+ 
+diff --git a/content/renderer/renderer_blink_platform_impl.cc b/content/renderer/renderer_blink_platform_impl.cc
+index 2569208f3297c..360924f5e27c0 100644
+--- a/content/renderer/renderer_blink_platform_impl.cc
++++ b/content/renderer/renderer_blink_platform_impl.cc
+@@ -120,6 +120,10 @@
+ #include "content/common/android/sync_compositor_statics.h"
+ #endif
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ using blink::Platform;
+ using blink::WebAudioDevice;
+ using blink::WebAudioLatencyHint;
+@@ -624,6 +628,22 @@ void RendererBlinkPlatformImpl::GetWebRTCRendererPreferences(
+   *allow_mdns_obfuscation = true;
+ }
+ 
++bool RendererBlinkPlatformImpl::IsWebRtcHWH264DecodingEnabled(
++    webrtc::VideoCodecType video_codec_type) {
++#if BUILDFLAG(IS_WIN)
++  // Do not use hardware decoding for H.264 on Win7, due to high latency.
++  // See https://crbug.com/webrtc/5717.
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kEnableWin7WebRtcHWH264Decoding) &&
++      video_codec_type == webrtc::kVideoCodecH264 &&
++      base::win::GetVersion() == base::win::Version::WIN7) {
++    DVLOG(1) << "H.264 HW decoding is not supported on Win7";
++    return false;
++  }
++#endif  // BUILDFLAG(IS_WIN)
++  return true;
++}
++
+ bool RendererBlinkPlatformImpl::IsWebRtcHWEncodingEnabled() {
+   return base::FeatureList::IsEnabled(::features::kWebRtcHWEncoding);
+ }
+diff --git a/content/renderer/renderer_blink_platform_impl.h b/content/renderer/renderer_blink_platform_impl.h
+index cd7d964c2a488..c656c16e37322 100644
+--- a/content/renderer/renderer_blink_platform_impl.h
++++ b/content/renderer/renderer_blink_platform_impl.h
+@@ -153,6 +153,8 @@ class CONTENT_EXPORT RendererBlinkPlatformImpl : public BlinkPlatformImpl {
+                                     uint16_t* udp_min_port,
+                                     uint16_t* udp_max_port,
+                                     bool* allow_mdns_obfuscation) override;
++  bool IsWebRtcHWH264DecodingEnabled(
++      webrtc::VideoCodecType video_coded_type) override;
+   bool IsWebRtcHWEncodingEnabled() override;
+   bool IsWebRtcHWDecodingEnabled() override;
+   bool AllowsLoopbackInPeerConnection() override;
+diff --git a/third_party/blink/public/platform/platform.h b/third_party/blink/public/platform/platform.h
+index 81103f13c8000..9629551d484ab 100644
+--- a/third_party/blink/public/platform/platform.h
++++ b/third_party/blink/public/platform/platform.h
+@@ -55,6 +56,7 @@
+ #include "third_party/blink/public/platform/web_string.h"
+ #include "third_party/blink/public/platform/web_v8_value_converter.h"
+ #include "third_party/blink/public/platform/websocket_handshake_throttle_provider.h"
++#include "third_party/webrtc/api/video/video_codec_type.h"
+ #include "ui/base/resource/resource_scale_factor.h"
+ #include "ui/gl/angle_implementation.h"
+ #include "v8/include/v8-local-handle.h"
+@@ -626,6 +626,11 @@ class BLINK_PLATFORM_EXPORT Platform {
+                                             uint16_t* udp_max_port,
+                                             bool* allow_mdns_obfuscation) {}
+ 
++  virtual bool IsWebRtcHWH264DecodingEnabled(
++      webrtc::VideoCodecType video_coded_type) {
++    return true;
++  }
++
+   virtual bool IsWebRtcHWEncodingEnabled() { return true; }
+ 
+   virtual bool IsWebRtcHWDecodingEnabled() { return true; }
+diff --git a/third_party/blink/renderer/platform/peerconnection/rtc_video_decoder_adapter.cc b/third_party/blink/renderer/platform/peerconnection/rtc_video_decoder_adapter.cc
+index a153395827355..a91336b441fee 100644
+--- a/third_party/blink/renderer/platform/peerconnection/rtc_video_decoder_adapter.cc
++++ b/third_party/blink/renderer/platform/peerconnection/rtc_video_decoder_adapter.cc
+@@ -571,6 +571,9 @@ std::unique_ptr<RTCVideoDecoderAdapter> RTCVideoDecoderAdapter::Create(
+   const webrtc::VideoCodecType video_codec_type =
+       webrtc::PayloadStringToCodecType(format.name);
+ 
++  if (!Platform::Current()->IsWebRtcHWH264DecodingEnabled(video_codec_type))
++    return nullptr;
++
+   // Bail early for unknown codecs.
+   if (WebRtcToMediaVideoCodec(video_codec_type) == media::VideoCodec::kUnknown)
+     return nullptr;
+diff --git a/content/browser/renderer_host/media/media_devices_manager.cc b/content/browser/renderer_host/media/media_devices_manager.cc
+index 4d3189e34c90f..6c78800aa2f85 100644
+--- a/content/browser/renderer_host/media/media_devices_manager.cc
++++ b/content/browser/renderer_host/media/media_devices_manager.cc
+@@ -851,8 +851,7 @@ void MediaDevicesManager::StartMonitoring(
+              video_capture::features::
+                  kWinCameraMonitoringInVideoCaptureService) ||
+          switches::IsMediaFoundationCameraUsageMonitoringEnabled()) &&
+-        !base::FeatureList::IsEnabled(
+-            features::kRunVideoCaptureServiceInBrowserProcess)) {
++        features::IsVideoCaptureServiceEnabledForOutOfProcess()) {
+       RegisterVideoCaptureDevicesChangedObserver();
+     }
+ #endif
+@@ -1638,8 +1637,7 @@ void MediaDevicesManager::NotifyDeviceChange(
+ #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ void MediaDevicesManager::RegisterVideoCaptureDevicesChangedObserver() {
+   CHECK(!video_capture_service_device_changed_observer_);
+-  if (base::FeatureList::IsEnabled(
+-          features::kRunVideoCaptureServiceInBrowserProcess)) {
++  if (features::IsVideoCaptureServiceEnabledForBrowserProcess()) {
+     // Do not create a mojo connection when the video capture service is running
+     // in the browser process as the device monitor will send device change
+     // notifications directly to the system monitor in the browser process.

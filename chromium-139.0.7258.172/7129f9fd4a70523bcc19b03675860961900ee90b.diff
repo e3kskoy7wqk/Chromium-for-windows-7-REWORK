@@ -1,0 +1,439 @@
+diff --git a/chrome/services/system_signals/win/metrics_utils.cc b/chrome/services/system_signals/win/metrics_utils.cc
+index fdc5899eb76ad..63d219e379002 100644
+--- a/chrome/services/system_signals/win/metrics_utils.cc
++++ b/chrome/services/system_signals/win/metrics_utils.cc
+@@ -65,6 +65,11 @@ void LogWscAvResponse(const device_signals::WscAvProductsResponse& response) {
+               response.query_error, response.parsing_errors);
+ }
+ 
++void LogWmiAvResponse(const device_signals::WmiAvProductsResponse& response) {
++  LogResponse(".WMI.AntiVirus", response.av_products.size(),
++              response.query_error, response.parsing_errors);
++}
++
+ void LogWmiHotfixResponse(const device_signals::WmiHotfixesResponse& response) {
+   LogResponse(".WMI.Hotfixes", response.hotfixes.size(), response.query_error,
+               response.parsing_errors);
+diff --git a/chrome/services/system_signals/win/metrics_utils.h b/chrome/services/system_signals/win/metrics_utils.h
+index c21f8908d16f4..2cd936619d730 100644
+--- a/chrome/services/system_signals/win/metrics_utils.h
++++ b/chrome/services/system_signals/win/metrics_utils.h
+@@ -14,6 +14,10 @@ namespace system_signals {
+ // `response`.
+ void LogWscAvResponse(const device_signals::WscAvProductsResponse& response);
+ 
++// Logs UMA metrics related to the number of items and errors contained in
++// `response`.
++void LogWmiAvResponse(const device_signals::WmiAvProductsResponse& response);
++
+ // Logs UMA metrics related to the number of items and errors contained in
+ // `response`.
+ void LogWmiHotfixResponse(const device_signals::WmiHotfixesResponse& response);
+diff --git a/chrome/services/util_win/av_products.cc b/chrome/services/util_win/av_products.cc
+index 73986b1e0a9a8..d7c49eefc9878 100644
+--- a/chrome/services/util_win/av_products.cc
++++ b/chrome/services/util_win/av_products.cc
+@@ -7,6 +7,7 @@
+ #include <objbase.h>
+ 
+ #include <windows.h>
++#include <wbemidl.h>
+ 
+ #include <iwscapi.h>
+ #include <stddef.h>
+@@ -29,12 +30,30 @@
+ #include "base/win/com_init_util.h"
+ #include "base/win/scoped_bstr.h"
+ #include "base/win/win_util.h"
++#include "base/win/scoped_variant.h"
+ #include "base/win/windows_version.h"
+ #include "components/variations/hashing.h"
+ #include "third_party/abseil-cpp/absl/strings/ascii.h"
+ 
+ namespace {
+ 
++// This is an undocumented structure returned from querying the "productState"
++// uint32 from the AntiVirusProduct in WMI.
++// http://neophob.com/2010/03/wmi-query-windows-securitycenter2/ gives a good
++// summary and testing was also done with a variety of AV products to determine
++// these values as accurately as possible.
++#pragma pack(push)
++#pragma pack(1)
++struct PRODUCT_STATE {
++  uint8_t unknown_1 : 4;
++  uint8_t definition_state : 4;  // 1 = Out of date, 0 = Up to date.
++  uint8_t unknown_2 : 4;
++  uint8_t security_state : 4;  //  0 = Inactive, 1 = Active, 2 = Snoozed.
++  uint8_t security_provider;   // matches WSC_SECURITY_PROVIDER in wscapi.h.
++  uint8_t unknown_3;
++};
++#pragma pack(pop)
++
+ // Filter any part of a product string that looks like it might be a version
+ // number. Returns true if the part should be removed from the product name.
+ bool ShouldFilterPart(const std::string& str) {
+@@ -202,6 +221,142 @@ internal::ResultCode FillAntiVirusProductsFromWSC(
+   return internal::ResultCode::kSuccess;
+ }
+ 
++internal::ResultCode FillAntiVirusProductsFromWMI(
++    bool report_full_names,
++    std::vector<AvProduct>* products) {
++  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
++                                                base::BlockingType::MAY_BLOCK);
++
++  std::vector<AvProduct> result_list;
++
++  Microsoft::WRL::ComPtr<IWbemLocator> wmi_locator;
++  HRESULT hr =
++      ::CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER,
++                         IID_PPV_ARGS(&wmi_locator));
++  if (FAILED(hr))
++    return internal::ResultCode::kFailedToCreateInstance;
++
++  Microsoft::WRL::ComPtr<IWbemServices> wmi_services;
++  hr = wmi_locator->ConnectServer(
++      base::win::ScopedBstr(L"ROOT\\SecurityCenter2").Get(), nullptr, nullptr,
++      nullptr, 0, nullptr, nullptr, &wmi_services);
++  if (FAILED(hr))
++    return internal::ResultCode::kFailedToConnectToWMI;
++
++  hr = ::CoSetProxyBlanket(wmi_services.Get(), RPC_C_AUTHN_WINNT,
++                           RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL,
++                           RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
++  if (FAILED(hr))
++    return internal::ResultCode::kFailedToSetSecurityBlanket;
++
++  // This interface is available on Windows Vista and above, and is officially
++  // undocumented.
++  base::win::ScopedBstr query_language(L"WQL");
++  base::win::ScopedBstr query(L"SELECT * FROM AntiVirusProduct");
++  Microsoft::WRL::ComPtr<IEnumWbemClassObject> enumerator;
++
++  hr = wmi_services->ExecQuery(
++      query_language.Get(), query.Get(),
++      WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr,
++      &enumerator);
++  if (FAILED(hr))
++    return internal::ResultCode::kFailedToExecWMIQuery;
++
++  // Iterate over the results of the WMI query. Each result will be an
++  // AntiVirusProduct instance.
++  while (true) {
++    Microsoft::WRL::ComPtr<IWbemClassObject> class_object;
++    ULONG items_returned = 0;
++    hr = enumerator->Next(WBEM_INFINITE, 1, &class_object, &items_returned);
++    if (FAILED(hr))
++      return internal::ResultCode::kFailedToIterateResults;
++
++    if (hr == WBEM_S_FALSE || items_returned == 0)
++      break;
++
++    AvProduct av_product;
++    av_product.set_product_state(
++        metrics::SystemProfileProto::AntiVirusState::
++            SystemProfileProto_AntiVirusState_STATE_ON);
++
++    // See definition of PRODUCT_STATE structure above for how this is being
++    // used.
++    base::win::ScopedVariant product_state;
++    hr = class_object->Get(L"productState", 0, product_state.Receive(), 0, 0);
++
++    if (FAILED(hr) || product_state.type() != VT_I4)
++      return internal::ResultCode::kFailedToGetProductState;
++
++    LONG state_val = V_I4(product_state.ptr());
++    PRODUCT_STATE product_state_struct;
++    std::copy(reinterpret_cast<const char*>(&state_val),
++              reinterpret_cast<const char*>(&state_val) + sizeof state_val,
++              reinterpret_cast<char*>(&product_state_struct));
++    // Map the values from product_state_struct to the proto values.
++    switch (product_state_struct.security_state) {
++      case 0:
++        av_product.set_product_state(
++            metrics::SystemProfileProto::AntiVirusState::
++                SystemProfileProto_AntiVirusState_STATE_OFF);
++        break;
++      case 1:
++        av_product.set_product_state(
++            metrics::SystemProfileProto::AntiVirusState::
++                SystemProfileProto_AntiVirusState_STATE_ON);
++        break;
++      case 2:
++        av_product.set_product_state(
++            metrics::SystemProfileProto::AntiVirusState::
++                SystemProfileProto_AntiVirusState_STATE_SNOOZED);
++        break;
++      default:
++        // unknown state.
++        return internal::ResultCode::kProductStateInvalid;
++    }
++
++    base::win::ScopedVariant display_name;
++    hr = class_object->Get(L"displayName", 0, display_name.Receive(), 0, 0);
++
++    if (FAILED(hr) || display_name.type() != VT_BSTR)
++      return internal::ResultCode::kFailedToGetProductName;
++
++    // Owned by ScopedVariant.
++    BSTR temp_bstr = V_BSTR(display_name.ptr());
++    std::string name = internal::TrimVersionOfAvProductName(base::SysWideToUTF8(
++        std::wstring(temp_bstr, ::SysStringLen(temp_bstr))));
++
++    if (report_full_names)
++      av_product.set_product_name(name);
++    av_product.set_product_name_hash(variations::HashName(name));
++
++    base::win::ScopedVariant exe_path;
++    hr = class_object->Get(L"pathToSignedProductExe", 0, exe_path.Receive(), 0,
++                           0);
++
++    if (FAILED(hr) || exe_path.type() != VT_BSTR)
++      return internal::ResultCode::kFailedToGetRemediationPath;
++
++    temp_bstr = V_BSTR(exe_path.ptr());
++    std::wstring path_str(temp_bstr, ::SysStringLen(temp_bstr));
++
++    std::string product_version;
++    // Not a failure if the product version cannot be read from the file on
++    // disk.
++    if (GetProductVersion(&path_str, &product_version)) {
++      if (report_full_names)
++        av_product.set_product_version(product_version);
++      av_product.set_product_version_hash(
++          variations::HashName(product_version));
++    }
++
++    result_list.push_back(av_product);
++  }
++
++  *products = std::move(result_list);
++
++  return internal::ResultCode::kSuccess;
++}
++
+ void MaybeAddTrusteerEndpointProtection(bool report_full_names,
+                                         std::vector<AvProduct>* products) {
+   // Trusteer Rapport does not register with WMI or Security Center so do some
+@@ -362,7 +517,13 @@ std::vector<AvProduct> GetAntiVirusProducts(bool report_full_names) {
+   if (os_info->version_type() == base::win::SUITE_SERVER) {
+     result = internal::ResultCode::kWSCNotAvailable;
+   } else {
+-    result = FillAntiVirusProductsFromWSC(report_full_names, &av_products);
++    // The WSC interface is preferred here as it's fully documented, but only
++    // available on Windows 8 and above, so instead use the undocumented WMI
++    // interface on Windows 7 and below.
++    if (os_info->version() >= base::win::Version::WIN8)
++      result = FillAntiVirusProductsFromWSC(report_full_names, &av_products);
++    else
++      result = FillAntiVirusProductsFromWMI(report_full_names, &av_products);
+   }
+ 
+   MaybeAddUnregisteredAntiVirusProducts(report_full_names, &av_products);
+diff --git a/components/device_signals/core/system_signals/win/mock_wmi_client.h b/components/device_signals/core/system_signals/win/mock_wmi_client.h
+index 1b2fb2f60e529..3e2f3413259ac 100644
+--- a/components/device_signals/core/system_signals/win/mock_wmi_client.h
++++ b/components/device_signals/core/system_signals/win/mock_wmi_client.h
+@@ -15,6 +15,7 @@ class MockWmiClient : public WmiClient {
+   MockWmiClient();
+   ~MockWmiClient() override;
+ 
++  MOCK_METHOD(WmiAvProductsResponse, GetAntiVirusProducts, (), (override));
+   MOCK_METHOD(WmiHotfixesResponse, GetInstalledHotfixes, (), (override));
+ };
+ 
+diff --git a/components/device_signals/core/system_signals/win/wmi_client.cc b/components/device_signals/core/system_signals/win/wmi_client.cc
+index 6411b62ffdbb7..973ed81c710f0 100644
+--- a/components/device_signals/core/system_signals/win/wmi_client.cc
++++ b/components/device_signals/core/system_signals/win/wmi_client.cc
+@@ -6,6 +6,13 @@
+ 
+ namespace device_signals {
+ 
++WmiAvProductsResponse::WmiAvProductsResponse() = default;
++
++WmiAvProductsResponse::WmiAvProductsResponse(
++    const WmiAvProductsResponse& other) = default;
++
++WmiAvProductsResponse::~WmiAvProductsResponse() = default;
++
+ WmiHotfixesResponse::WmiHotfixesResponse() = default;
+ 
+ WmiHotfixesResponse::WmiHotfixesResponse(const WmiHotfixesResponse& other) =
+diff --git a/components/device_signals/core/system_signals/win/wmi_client.h b/components/device_signals/core/system_signals/win/wmi_client.h
+index 3d1ed62273606..5daab91f1539a 100644
+--- a/components/device_signals/core/system_signals/win/wmi_client.h
++++ b/components/device_signals/core/system_signals/win/wmi_client.h
+@@ -28,6 +28,19 @@ enum class WmiParsingError {
+   kMaxValue = kFailedToGetId
+ };
+ 
++// Response object for calls to retrieve information about installed AntiVirus
++// software.
++struct WmiAvProductsResponse {
++  WmiAvProductsResponse();
++  ~WmiAvProductsResponse();
++
++  WmiAvProductsResponse(const WmiAvProductsResponse& other);
++
++  std::vector<AvProduct> av_products;
++  std::optional<base::win::WmiError> query_error;
++  std::vector<WmiParsingError> parsing_errors;
++};
++
+ // Response object for calls to retrieve information about installed hotfix
+ // updates.
+ struct WmiHotfixesResponse {
+@@ -46,6 +59,9 @@ class WmiClient {
+  public:
+   virtual ~WmiClient() = default;
+ 
++  // Will retrieve information about installed AntiVirus software.
++  virtual WmiAvProductsResponse GetAntiVirusProducts() = 0;
++
+   // Will retrieve information about installed hotfix updates.
+   virtual WmiHotfixesResponse GetInstalledHotfixes() = 0;
+ };
+diff --git a/components/device_signals/core/system_signals/win/wmi_client_impl.cc b/components/device_signals/core/system_signals/win/wmi_client_impl.cc
+index 736f467ca05ba..7970f5116a32b 100644
+--- a/components/device_signals/core/system_signals/win/wmi_client_impl.cc
++++ b/components/device_signals/core/system_signals/win/wmi_client_impl.cc
+@@ -57,6 +57,98 @@ WmiClientImpl::WmiClientImpl(RunWmiQueryCallback run_query_callback)
+ 
+ WmiClientImpl::~WmiClientImpl() = default;
+ 
++WmiAvProductsResponse WmiClientImpl::GetAntiVirusProducts() {
++  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
++                                                base::BlockingType::MAY_BLOCK);
++  ComPtr<IEnumWbemClassObject> enumerator;
++  auto error_code =
++      run_query_callback_.Run(base::win::kSecurityCenter2ServerName,
++                              L"SELECT * FROM AntiVirusProduct", &enumerator);
++
++  WmiAvProductsResponse response;
++  if (error_code.has_value()) {
++    response.query_error = error_code.value();
++    return response;
++  }
++
++  // Iterate over the results of the WMI query. Each result will be an
++  // AntiVirusProduct instance.
++  HRESULT hr;
++  while (true) {
++    ComPtr<IWbemClassObject> class_object;
++    ULONG items_returned = 0U;
++    hr = enumerator->Next(WBEM_INFINITE, 1, &class_object, &items_returned);
++
++    if (hr == WBEM_S_FALSE || items_returned == 0) {
++      // Reached the end of the enumerator.
++      break;
++    }
++
++    // Something went wrong and it wasn't the end of the enumerator.
++    if (FAILED(hr)) {
++      response.parsing_errors.push_back(
++          WmiParsingError::kFailedToIterateResults);
++      continue;
++    }
++
++    base::win::ScopedVariant product_state;
++    hr = class_object->Get(L"productState", 0, product_state.Receive(), 0, 0);
++
++    if (FAILED(hr) || product_state.type() != VT_I4) {
++      response.parsing_errors.push_back(WmiParsingError::kFailedToGetState);
++      continue;
++    }
++
++    LONG state_val = V_I4(product_state.ptr());
++    internal::PRODUCT_STATE product_state_struct;
++    std::copy(reinterpret_cast<const char*>(&state_val),
++              reinterpret_cast<const char*>(&state_val) + sizeof state_val,
++              reinterpret_cast<char*>(&product_state_struct));
++    // Map the values from product_state_struct to the av struct values.
++    AvProduct av_product;
++    switch (product_state_struct.security_state) {
++      case 0:
++        av_product.state = AvProductState::kOff;
++        break;
++      case 1:
++        av_product.state = AvProductState::kOn;
++        break;
++      case 2:
++        av_product.state = AvProductState::kSnoozed;
++        break;
++      default:
++        // Unknown state.
++        response.parsing_errors.push_back(WmiParsingError::kStateInvalid);
++        continue;
++    }
++
++    std::optional<std::string> display_name =
++        ParseString(L"displayName", class_object);
++    if (!display_name.has_value()) {
++      response.parsing_errors.push_back(WmiParsingError::kFailedToGetName);
++      continue;
++    }
++
++    av_product.display_name = display_name.value();
++
++    std::optional<std::string> product_id =
++        ParseString(L"instanceGuid", class_object);
++    if (!product_id.has_value()) {
++      response.parsing_errors.push_back(WmiParsingError::kFailedToGetId);
++      continue;
++    }
++
++    av_product.product_id = product_id.value();
++
++    // If all values were parsed properly, add `av_product` into the response
++    // vector. If any value could not be parsed properly, the item was
++    // discarded.
++    response.av_products.push_back(av_product);
++  }
++
++  return response;
++}
++
+ WmiHotfixesResponse WmiClientImpl::GetInstalledHotfixes() {
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::MAY_BLOCK);
+diff --git a/components/device_signals/core/system_signals/win/wmi_client_impl.h b/components/device_signals/core/system_signals/win/wmi_client_impl.h
+index d23cc61825fb9..f86ea10f2ac3c 100644
+--- a/components/device_signals/core/system_signals/win/wmi_client_impl.h
++++ b/components/device_signals/core/system_signals/win/wmi_client_impl.h
+@@ -25,6 +25,7 @@ class WmiClientImpl : public WmiClient {
+   ~WmiClientImpl() override;
+ 
+   // WmiClient:
++  WmiAvProductsResponse GetAntiVirusProducts() override;
+   WmiHotfixesResponse GetInstalledHotfixes() override;
+ 
+  private:
+@@ -37,6 +38,27 @@ class WmiClientImpl : public WmiClient {
+   RunWmiQueryCallback run_query_callback_;
+ };
+ 
++// Type shared in an internal namespace to allow for reuse in unit tests without
++// duplication.
++namespace internal {
++// This is an undocumented structure returned from querying the "productState"
++// uint32 from the AntiVirusProduct in WMI.
++// http://neophob.com/2010/03/wmi-query-windows-securitycenter2/ gives a good
++// summary and testing was also done with a variety of AV products to determine
++// these values as accurately as possible.
++#pragma pack(push)
++#pragma pack(1)
++struct PRODUCT_STATE {
++  uint8_t unknown_1 : 4;
++  uint8_t definition_state : 4;  // 1 = Out of date, 0 = Up to date.
++  uint8_t unknown_2 : 4;
++  uint8_t security_state : 4;  //  0 = Inactive, 1 = Active, 2 = Snoozed.
++  uint8_t security_provider;   // matches WSC_SECURITY_PROVIDER in wscapi.h.
++  uint8_t unknown_3;
++};
++#pragma pack(pop)
++}  // namespace internal
++
+ }  // namespace device_signals
+ 
+ #endif  // COMPONENTS_DEVICE_SIGNALS_CORE_SYSTEM_SIGNALS_WIN_WMI_CLIENT_IMPL_H_

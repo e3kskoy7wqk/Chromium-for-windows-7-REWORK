@@ -1,0 +1,60 @@
+diff --git a/base/power_monitor/cpu_frequency_utils.cc b/base/power_monitor/cpu_frequency_utils.cc
+index 46d4ee05cc453..abeec0345212d 100644
+--- a/base/power_monitor/cpu_frequency_utils.cc
++++ b/base/power_monitor/cpu_frequency_utils.cc
+@@ -36,6 +36,28 @@ typedef struct _PROCESSOR_POWER_INFORMATION {
+   ULONG MaxIdleState;
+   ULONG CurrentIdleState;
+ } PROCESSOR_POWER_INFORMATION, *PPROCESSOR_POWER_INFORMATION;
++static DWORD rtThreadGetCurrentProcessorNumber(void)
++{
++    static bool           fInitialized = false;
++    static DWORD (WINAPI *pfnGetCurrentProcessorNumber)(void) = NULL;
++    if (!fInitialized)
++    {
++        HMODULE hmodKernel32 = GetModuleHandleW(L"kernel32.dll");
++        if (hmodKernel32)
++            pfnGetCurrentProcessorNumber = (DWORD (WINAPI*)(void))GetProcAddress(hmodKernel32, "GetCurrentProcessorNumber");
++        fInitialized = true;
++    }
++    if (pfnGetCurrentProcessorNumber)
++        return pfnGetCurrentProcessorNumber();
++    DWORD_PTR xBX;
++    __asm
++    {
++        mov     eax, 1
++        cpuid
++        mov     [xBX], ebx
++    }
++    return (DWORD)(xBX);
++}
+ #endif
+ 
+ }  // namespace
+@@ -48,7 +70,7 @@ std::optional<CpuThroughputEstimationResult> EstimateCpuThroughput() {
+   TRACE_EVENT0("power", "EstimateCpuThroughput");
+ 
+ #if BUILDFLAG(IS_WIN)
+-  DWORD start_processor_number = GetCurrentProcessorNumber();
++  DWORD start_processor_number = rtThreadGetCurrentProcessorNumber();
+ #endif
+ 
+   // The heuristic to estimate CPU frequency is based on UIforETW code.
+@@ -88,7 +110,7 @@ std::optional<CpuThroughputEstimationResult> EstimateCpuThroughput() {
+   };
+ 
+ #if BUILDFLAG(IS_WIN)
+-  result.migrated = start_processor_number != GetCurrentProcessorNumber();
++  result.migrated = start_processor_number != rtThreadGetCurrentProcessorNumber();
+ #endif
+ 
+   return result;
+@@ -108,7 +130,7 @@ BASE_EXPORT CpuFrequencyInfo GetCpuFrequencyInfo() {
+   unsigned long fastest = std::numeric_limits<unsigned long>::min();
+   unsigned long slowest = std::numeric_limits<unsigned long>::max();
+ 
+-  DWORD current_processor_number = GetCurrentProcessorNumber();
++  DWORD current_processor_number = rtThreadGetCurrentProcessorNumber();
+   size_t num_cpu = static_cast<size_t>(base::SysInfo::NumberOfProcessors());
+   std::vector<PROCESSOR_POWER_INFORMATION> info(num_cpu);
+   if (!NT_SUCCESS(CallNtPowerInformation(
