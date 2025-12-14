@@ -1,0 +1,2 @@
+thread: use native windows cond var if available    2015/11/24 14:58:11    110ad5835ecd66995d0e7f66dca1b90dea595f5a
+thread: use InitializeCriticalSectionEx if available    2015/11/24 14:58:28    63fadc9ffacc77d4617526a50c696d21d558a70b

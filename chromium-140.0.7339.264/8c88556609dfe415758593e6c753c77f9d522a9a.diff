@@ -1,0 +1,44 @@
+diff --git a/base/base_paths_win.cc b/base/base_paths_win.cc
+index 3ac45e74666f7..605ad1152386d 100644
+--- a/base/base_paths_win.cc
++++ b/base/base_paths_win.cc
+@@ -146,6 +146,9 @@ bool PathProviderWin(int key, FilePath* result) {
+       break;
+     }
+     case base::DIR_APP_SHORTCUTS: {
++      if (win::GetVersion() < win::Version::WIN8)
++        return false;
++
+       base::win::ScopedCoMem<wchar_t> path_buf;
+       if (FAILED(SHGetKnownFolderPath(FOLDERID_ApplicationShortcuts, 0, NULL,
+                                       &path_buf))) {
+@@ -246,6 +246,9 @@ bool PathProviderWin(int key, FilePath* result) {
+       }
+       break;
+     case base::DIR_ONE_DRIVE: {
++      if (win::GetVersion() < win::Version::WIN8)
++        return false;
++
+       base::win::ScopedCoMem<wchar_t> path_buf;
+       // FOLDERID_OneDrive points on the user OneDrive folder. The default path
+       // is %USERPROFILE%\OneDrive. It is formerly known as FOLDERID_SkyDrive.
+diff --git a/base/process/launch_win.cc b/base/process/launch_win.cc
+index 887947887722a..07fb69d847b6b 100644
+--- a/base/process/launch_win.cc
++++ b/base/process/launch_win.cc
+@@ -349,6 +349,15 @@ Process LaunchProcess(const CommandLine::StringType& cmdline,
+     startup_info->hStdError = options.stderr_handle;
+   }
+ 
++  if (options.job_handle) {
++    // If this code is run under a debugger, the launched process is
++    // automatically associated with a job object created by the debugger.
++    // The CREATE_BREAKAWAY_FROM_JOB flag is used to prevent this on Windows
++    // releases that do not support nested jobs.
++    if (win::GetVersion() < win::Version::WIN8)
++      flags |= CREATE_BREAKAWAY_FROM_JOB;
++  }
++
+   if (options.force_breakaway_from_job_) {
+     flags |= CREATE_BREAKAWAY_FROM_JOB;
+   }

@@ -1,0 +1,22 @@
+diff --git a/third_party/libwebp/src/src/utils/thread_utils.c b/third_party/libwebp/src/src/utils/thread_utils.c
+index 4e470e17..25ecc181 100644
+--- a/third_party/libwebp/src/src/utils/thread_utils.c
++++ b/third_party/libwebp/src/src/utils/thread_utils.c
+@@ -24,7 +24,7 @@
+ typedef HANDLE pthread_t;
+ typedef CRITICAL_SECTION pthread_mutex_t;
+ 
+-#if _WIN32_WINNT >= 0x0600  // Windows Vista / Server 2008 or greater
++#if 0
+ #define USE_WINDOWS_CONDITION_VARIABLE
+ typedef CONDITION_VARIABLE pthread_cond_t;
+ #else
+@@ -104,7 +104,7 @@ static int pthread_join(pthread_t thread, void** value_ptr) {
+ // Mutex
+ static int pthread_mutex_init(pthread_mutex_t* const mutex, void* mutexattr) {
+   (void)mutexattr;
+-#if _WIN32_WINNT >= 0x0600  // Windows Vista / Server 2008 or greater
++#if 0
+   InitializeCriticalSectionEx(mutex, 0 /*dwSpinCount*/, 0 /*Flags*/);
+ #else
+   InitializeCriticalSection(mutex);

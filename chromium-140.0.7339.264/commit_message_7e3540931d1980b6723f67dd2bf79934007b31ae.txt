@@ -1,0 +1,1 @@
+win7dep: Remove ResolveCoreWinRTStringDelayload    2023/2/23 4:06:55    7e3540931d1980b6723f67dd2bf79934007b31ae

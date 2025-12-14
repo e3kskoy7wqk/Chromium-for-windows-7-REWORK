@@ -1,0 +1,32 @@
+diff --git a/chrome/browser/resources/settings/route.ts b/chrome/browser/resources/settings/route.ts
+index b8937e3140cf6..c801b3c1d1e99 100644
+--- a/chrome/browser/resources/settings/route.ts
++++ b/chrome/browser/resources/settings/route.ts
+@@ -269,6 +269,12 @@ function createRoutes(): SettingsRoutes {
+     r.CAPTIONS = r.ACCESSIBILITY.createChild('/captions');
+     r.CAPTIONS.hasMigratedToPlugin = true;
+     // </if>
++    // <if expr="is_win">
++    if (!loadTimeData.getBoolean('isWindows10OrNewer')) {
++      r.CAPTIONS = r.ACCESSIBILITY.createChild('/captions');
++    }
++    // </if>
++
+   }
+ 
+   // <if expr="not is_chromeos">
+diff --git a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+index f5bbd0b22e340..8fe72571cea77 100644
+--- a/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
++++ b/chrome/browser/ui/webui/settings/settings_localized_strings_provider.cc
+@@ -287,6 +287,10 @@ void AddA11yStrings(content::WebUIDataSource* html_source) {
+   };
+   html_source->AddLocalizedStrings(kLocalizedStrings);
+ 
++#if BUILDFLAG(IS_WIN)
++  html_source->AddBoolean("isWindows10OrNewer", true);
++#endif
++
+   html_source->AddBoolean(
+       "isGuest",
+ #if BUILDFLAG(IS_CHROMEOS)

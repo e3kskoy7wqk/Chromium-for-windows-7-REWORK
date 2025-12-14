@@ -1,0 +1,680 @@
+diff --git a/base/win/hstring_reference_unittest.cc b/base/win/hstring_reference_unittest.cc
+index 64fa91320a040..1b03cafc19b8c 100644
+--- a/base/win/hstring_reference_unittest.cc
++++ b/base/win/hstring_reference_unittest.cc
+@@ -26,6 +26,8 @@ void VerifyHSTRINGEquals(HSTRING hstring, const wchar_t* test_string) {
+ }  // namespace
+ 
+ TEST(HStringReferenceTest, Init) {
++  EXPECT_TRUE(ScopedHString::ResolveCoreWinRTStringDelayload());
++
+   const HStringReference string(kTestString);
+   EXPECT_NE(string.Get(), nullptr);
+   VerifyHSTRINGEquals(string.Get(), kTestString);
+diff --git a/base/win/map_unittest.cc b/base/win/map_unittest.cc
+index dc8b9ecf2c864..4a5c7148211b1 100644
+--- a/base/win/map_unittest.cc
++++ b/base/win/map_unittest.cc
+@@ -187,7 +187,8 @@ const std::map<int, double, internal::Less> g_one{{1, 10.7}};
+ const std::map<int, double, internal::Less> g_two{{1, 10.7}, {2, 20.3}};
+ 
+ bool ResolveCoreWinRT() {
+-  return base::win::ResolveCoreWinRTDelayload();
++  return base::win::ResolveCoreWinRTDelayload() &&
++         base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
+ }
+ 
+ HRESULT GetPropertyValueStaticsActivationFactory(
+diff --git a/base/win/scoped_hstring.cc b/base/win/scoped_hstring.cc
+index 042768f2b249e..6a8b7eff01b90 100644
+--- a/base/win/scoped_hstring.cc
++++ b/base/win/scoped_hstring.cc
+@@ -18,24 +18,88 @@
+ 
+ namespace base {
+ 
++namespace {
++
++static bool g_load_succeeded = false;
++
++FARPROC LoadComBaseFunction(const char* function_name) {
++  static HMODULE const handle =
++      ::LoadLibraryEx(L"combase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++  return handle ? ::GetProcAddress(handle, function_name) : nullptr;
++}
++
++decltype(&::WindowsCreateString) GetWindowsCreateString() {
++  static decltype(&::WindowsCreateString) const function =
++      reinterpret_cast<decltype(&::WindowsCreateString)>(
++          LoadComBaseFunction("WindowsCreateString"));
++  return function;
++}
++
++decltype(&::WindowsDeleteString) GetWindowsDeleteString() {
++  static decltype(&::WindowsDeleteString) const function =
++      reinterpret_cast<decltype(&::WindowsDeleteString)>(
++          LoadComBaseFunction("WindowsDeleteString"));
++  return function;
++}
++
++decltype(&::WindowsGetStringRawBuffer) GetWindowsGetStringRawBuffer() {
++  static decltype(&::WindowsGetStringRawBuffer) const function =
++      reinterpret_cast<decltype(&::WindowsGetStringRawBuffer)>(
++          LoadComBaseFunction("WindowsGetStringRawBuffer"));
++  return function;
++}
++
++HRESULT WindowsCreateString(const wchar_t* src,
++                            uint32_t len,
++                            HSTRING* out_hstr) {
++  decltype(&::WindowsCreateString) create_string_func =
++      GetWindowsCreateString();
++  if (!create_string_func)
++    return E_FAIL;
++  return create_string_func(src, len, out_hstr);
++}
++
++HRESULT WindowsDeleteString(HSTRING hstr) {
++  decltype(&::WindowsDeleteString) delete_string_func =
++      GetWindowsDeleteString();
++  if (!delete_string_func)
++    return E_FAIL;
++  return delete_string_func(hstr);
++}
++
++const wchar_t* WindowsGetStringRawBuffer(HSTRING hstr, uint32_t* out_len) {
++  decltype(&::WindowsGetStringRawBuffer) get_string_raw_buffer_func =
++      GetWindowsGetStringRawBuffer();
++  if (!get_string_raw_buffer_func) {
++    *out_len = 0;
++    return nullptr;
++  }
++  return get_string_raw_buffer_func(hstr, out_len);
++}
++
++}  // namespace
++
+ namespace internal {
+ 
+ // static
+ void ScopedHStringTraits::Free(HSTRING hstr) {
+-  ::WindowsDeleteString(hstr);
++  base::WindowsDeleteString(hstr);
+ }
+ 
+ }  // namespace internal
+ 
+ namespace win {
+ 
+-ScopedHString::ScopedHString(HSTRING hstr) : ScopedGeneric(hstr) {}
++ScopedHString::ScopedHString(HSTRING hstr) : ScopedGeneric(hstr) {
++  DCHECK(g_load_succeeded);
++}
+ 
+ // static
+ ScopedHString ScopedHString::Create(std::wstring_view str) {
++  DCHECK(g_load_succeeded);
+   HSTRING hstr;
+-  HRESULT hr = ::WindowsCreateString(str.data(),
+-                                     checked_cast<UINT32>(str.length()), &hstr);
++  HRESULT hr = base::WindowsCreateString(
++      str.data(), checked_cast<UINT32>(str.length()), &hstr);
+   if (SUCCEEDED(hr)) {
+     return ScopedHString(hstr);
+   }
+@@ -57,9 +121,21 @@ ScopedHString ScopedHString::Create(StringPiece str) {
+ }
+ 
+ // static
++bool ScopedHString::ResolveCoreWinRTStringDelayload() {
++  // TODO(finnur): Add AssertIOAllowed once crbug.com/770193 is fixed.
++
++  static const bool load_succeeded = []() {
++    bool success = GetWindowsCreateString() && GetWindowsDeleteString() &&
++                   GetWindowsGetStringRawBuffer();
++    g_load_succeeded = success;
++    return success;
++  }();
++  return load_succeeded;
++}
++
+ std::wstring_view ScopedHString::Get() const {
+   UINT32 length = 0;
+-  const wchar_t* buffer = ::WindowsGetStringRawBuffer(get(), &length);
++  const wchar_t* buffer = base::WindowsGetStringRawBuffer(get(), &length);
+   return std::wstring_view(buffer, length);
+ }
+ 
+diff --git a/base/win/scoped_hstring.h b/base/win/scoped_hstring.h
+index 95bc98bc2cf09..4ba6e23d08272 100644
+--- a/base/win/scoped_hstring.h
++++ b/base/win/scoped_hstring.h
+@@ -27,7 +27,21 @@ struct BASE_EXPORT ScopedHStringTraits {
+ 
+ namespace win {
+ 
+-// ScopedHString is a wrapper around an HSTRING.
++// ScopedHString is a wrapper around an HSTRING. Note that it requires certain
++// functions that are only available on Windows 8 and later, and that these
++// functions need to be delayloaded to avoid breaking Chrome on Windows 7.
++//
++// Callers MUST check the return value of ResolveCoreWinRTStringDelayLoad()
++// *before* using ScopedHString.
++//
++// One-time Initialization for ScopedHString:
++//
++//   bool success = ScopedHString::ResolveCoreWinRTStringDelayload();
++//   if (success) {
++//     // ScopeHString can be used.
++//   } else {
++//     // Handle error.
++//   }
+ //
+ // Example use:
+ //
+@@ -48,6 +62,9 @@ class BASE_EXPORT ScopedHString
+   static ScopedHString Create(std::wstring_view str);
+   static ScopedHString Create(std::string_view str);
+ 
++  // Loads all required HSTRING functions, available from Win8 and onwards.
++  [[nodiscard]] static bool ResolveCoreWinRTStringDelayload();
++
+   // Returns a view into the memory buffer managed by the instance. The returned
+   // std::string_view is only valid during the lifetime of this ScopedHString
+   // instance.
+diff --git a/base/win/win_util.cc b/base/win/win_util.cc
+index e27452b2f2693..29e283facb6cc 100644
+--- a/base/win/win_util.cc
++++ b/base/win/win_util.cc
+@@ -238,7 +238,8 @@ bool IsWindows10OrGreaterTabletMode(HWND hwnd) {
+ // it to always return UserInteractionMode_Touch which as per documentation
+ // indicates tablet mode.
+ bool IsWindows10TabletMode(HWND hwnd) {
+-  if (!ResolveCoreWinRTDelayload()) {
++  if (!ResolveCoreWinRTDelayload() ||
++      !ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return false;
+   }
+ 
+@@ -1390,7 +1390,8 @@ std::optional<std::wstring> GetSerialNumber() {
+   Microsoft::WRL::ComPtr<ABI::Windows::System::Profile::SystemManufacturers::
+                              ISmbiosInformationStatics>
+       symbios_information_statics;
+-  if (!ResolveCoreWinRTDelayload()) {
++  if (!ResolveCoreWinRTDelayload() ||
++      !ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return std::nullopt;
+   }
+ 
+diff --git a/base/win/winrt_storage_util_unittest.cc b/base/win/winrt_storage_util_unittest.cc
+index 8f3f64f29011a..285e8775529b8 100644
+--- a/base/win/winrt_storage_util_unittest.cc
++++ b/base/win/winrt_storage_util_unittest.cc
+@@ -21,7 +21,8 @@ namespace win {
+ TEST(WinrtStorageUtilTest, CreateBufferFromData) {
+   ScopedCOMInitializer com_initializer(ScopedCOMInitializer::kMTA);
+ 
+-  if (!ResolveCoreWinRTDelayload()) {
++  if (!ResolveCoreWinRTDelayload() ||
++      !ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return;
+   }
+ 
+diff --git a/chrome/browser/device_reauth/win/authenticator_win.cc b/chrome/browser/device_reauth/win/authenticator_win.cc
+index c8f89a7ab2623..ea95a014f9a25 100644
+--- a/chrome/browser/device_reauth/win/authenticator_win.cc
++++ b/chrome/browser/device_reauth/win/authenticator_win.cc
+@@ -45,6 +45,11 @@ using ABI::Windows::Security::Credentials::UI::
+     UserConsentVerificationResult;
+ using Microsoft::WRL::ComPtr;
+ 
++bool ResolveCoreWinRT() {
++  return base::win::ResolveCoreWinRTDelayload() &&
++         base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
++}
++
+ BiometricAuthenticationStatusWin ConvertUserConsentVerifierAvailability(
+     UserConsentVerifierAvailability availability) {
+   switch (availability) {
+@@ -89,7 +94,7 @@ void ReportCantCheckAvailability(
+ void GetBiometricAvailabilityFromWindows(
+     AvailabilityCallback callback,
+     scoped_refptr<base::SequencedTaskRunner> thread) {
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!ResolveCoreWinRT()) {
+     ReportCantCheckAvailability(thread, std::move(callback));
+     return;
+   }
+@@ -203,7 +219,7 @@ void PerformWindowsHelloAuthenticationAsync(
+ void PerformWindowsHelloAuthenticationAsync(
+     base::OnceCallback<void(bool)> callback,
+     const std::u16string& message) {
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!ResolveCoreWinRT()) {
+     RecordWindowsHelloAuthenticationResult(
+         AuthenticationResultStatusWin::kFailedToCreateFactory);
+     AuthenticateWithLegacyApi(message, std::move(callback));
+diff --git a/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc b/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc
+index 2eda43cdfb8fd..47ec00c97c248 100644
+--- a/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc
++++ b/chrome/browser/enterprise/platform_auth/cloud_ap_provider_win.cc
+@@ -88,6 +88,8 @@ class WebAccountSupportFinder
+ 
+     if (!base::win::ResolveCoreWinRTDelayload())
+       return;  // Unsupported.
++    if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++      return;  // Unsupported.
+ 
+     // Get the `WebAuthenticationCoreManager`.
+     ComPtr<IWebAuthenticationCoreManagerStatics> auth_manager;
+diff --git a/chrome/browser/notifications/notification_platform_bridge_win.cc b/chrome/browser/notifications/notification_platform_bridge_win.cc
+index fe319e5e4c3a4..246e037374022 100644
+--- a/chrome/browser/notifications/notification_platform_bridge_win.cc
++++ b/chrome/browser/notifications/notification_platform_bridge_win.cc
+@@ -166,7 +166,9 @@ class NotificationPlatformBridgeWinImpl
+  public:
+   explicit NotificationPlatformBridgeWinImpl(
+       scoped_refptr<base::SequencedTaskRunner> notification_task_runner)
+-      : com_functions_initialized_(base::win::ResolveCoreWinRTDelayload()),
++      : com_functions_initialized_(
++            base::win::ResolveCoreWinRTDelayload() &&
++            ScopedHString::ResolveCoreWinRTStringDelayload()),
+         notification_task_runner_(std::move(notification_task_runner)),
+         image_retainer_(std::make_unique<NotificationImageRetainer>()) {
+     // Delete any remaining temp files in the image folder from the previous
+diff --git a/chrome/browser/webshare/win/fake_storage_file_statics.cc b/chrome/browser/webshare/win/fake_storage_file_statics.cc
+index 6308ccec3a576..516e84ab3422f 100644
+--- a/chrome/browser/webshare/win/fake_storage_file_statics.cc
++++ b/chrome/browser/webshare/win/fake_storage_file_statics.cc
+@@ -279,6 +278,12 @@ IFACEMETHODIMP FakeStorageFileStatics::CreateStreamedFileAsync(
+     IStreamedFileDataRequestedHandler* data_requested,
+     IRandomAccessStreamReference* thumbnail,
+     IAsyncOperation<StorageFile*>** operation) {
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
++    ADD_FAILURE() << "Attempted to use FakeStorageFileStatics in an "
++                     "environment that doesn't support ScopedHStrings.";
++    return E_UNEXPECTED;
++  }
++
+   auto fake_iasync_operation =
+       Make<base::win::FakeIAsyncOperation<StorageFile*>>();
+   HRESULT hr = fake_iasync_operation->QueryInterface(IID_PPV_ARGS(operation));
+diff --git a/chrome/browser/webshare/win/fake_storage_file_statics_unittest.cc b/chrome/browser/webshare/win/fake_storage_file_statics_unittest.cc
+index 0521b772caaf7..265c93da36377 100644
+--- a/chrome/browser/webshare/win/fake_storage_file_statics_unittest.cc
++++ b/chrome/browser/webshare/win/fake_storage_file_statics_unittest.cc
+@@ -36,6 +36,9 @@ namespace webshare {
+ 
+ TEST(FakeStorageFileStaticsTest, CreateStreamedFileAsync) {
+   base::test::SingleThreadTaskEnvironment task_environment;
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    GTEST_SKIP();
++
+   auto file_statics = Make<FakeStorageFileStatics>();
+ 
+   // Create a streamed file, populated on-demand by the provided callback.
+diff --git a/chrome/browser/webshare/win/fake_uri_runtime_class_factory_unittest.cc b/chrome/browser/webshare/win/fake_uri_runtime_class_factory_unittest.cc
+index df231b16c31a5..93d442f230288 100644
+--- a/chrome/browser/webshare/win/fake_uri_runtime_class_factory_unittest.cc
++++ b/chrome/browser/webshare/win/fake_uri_runtime_class_factory_unittest.cc
+@@ -18,6 +18,9 @@ using Microsoft::WRL::Make;
+ namespace webshare {
+ 
+ TEST(FakeUriRuntimeClassFactoryTest, CreateUri) {
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    GTEST_SKIP();
++
+   auto factory = Make<FakeUriRuntimeClassFactory>();
+ 
+   auto uri = base::win::ScopedHString::Create("https://www.site.come");
+@@ -31,6 +34,9 @@ TEST(FakeUriRuntimeClassFactoryTest, CreateUri) {
+ }
+ 
+ TEST(FakeUriRuntimeClassFactoryTest, CreateUri_Invalid) {
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    GTEST_SKIP();
++
+   auto factory = Make<FakeUriRuntimeClassFactory>();
+ 
+   auto uri = base::win::ScopedHString::Create("");
+diff --git a/chrome/browser/webshare/win/share_operation.cc b/chrome/browser/webshare/win/share_operation.cc
+index aa2b873d7c242..4d5a21bc4619d 100644
+--- a/chrome/browser/webshare/win/share_operation.cc
++++ b/chrome/browser/webshare/win/share_operation.cc
+@@ -374,7 +374,8 @@ void ShareOperation::Run(blink::mojom::ShareService::ShareCallback callback) {
+   callback_ = std::move(callback);
+ 
+   // Ensure that the required WinRT functionality is available/loaded.
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!base::win::ResolveCoreWinRTDelayload() ||
++      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     Complete(blink::mojom::ShareError::INTERNAL_ERROR);
+     return;
+   }
+diff --git a/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc b/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
+index 7805591b8bb59..a48308ac47576 100644
+--- a/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
++++ b/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
+@@ -41,7 +41,8 @@ HRESULT GetDataTransferManagerHandles(
+     IDataTransferManagerInterop** data_transfer_manager_interop,
+     IDataTransferManager** data_transfer_manager) {
+   // If the required WinRT functionality is not available, fail the operation.
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!base::win::ResolveCoreWinRTDelayload() ||
++      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return E_FAIL;
+   }
+ 
+diff --git a/components/embedder_support/user_agent_utils_unittest.cc b/components/embedder_support/user_agent_utils_unittest.cc
+index 391232b2b781d..7a051417e89d3 100644
+--- a/components/embedder_support/user_agent_utils_unittest.cc
++++ b/components/embedder_support/user_agent_utils_unittest.cc
+@@ -247,11 +247,15 @@ void CheckUserAgentStringOrdering(bool mobile_device) {
+ }
+ 
+ #if BUILDFLAG(IS_WIN)
++bool ResolveCoreWinRT() {
++  return base::win::ResolveCoreWinRTDelayload() &&
++         base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
++}
+ 
+ // On Windows, the client hint sec-ch-ua-platform-version should be
+ // the highest supported version of the UniversalApiContract.
+ void VerifyWinPlatformVersion(std::string version) {
+-  ASSERT_TRUE(base::win::ResolveCoreWinRTDelayload());
++  ASSERT_TRUE(ResolveCoreWinRT());
+   base::win::ScopedWinrtInitializer scoped_winrt_initializer;
+   ASSERT_TRUE(scoped_winrt_initializer.Succeeded());
+ 
+diff --git a/components/system_media_controls/win/system_media_controls_win.cc b/components/system_media_controls/win/system_media_controls_win.cc
+index d3bb9c2ae6651..9291a58c2c003 100644
+--- a/components/system_media_controls/win/system_media_controls_win.cc
++++ b/components/system_media_controls/win/system_media_controls_win.cc
+@@ -91,7 +86,8 @@ bool SystemMediaControlsWin::Initialize() {
+ 
+   attempted_to_initialize_ = true;
+ 
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!base::win::ResolveCoreWinRTDelayload() ||
++      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return false;
+   }
+ 
+diff --git a/content/browser/installedapp/native_win_app_fetcher_impl.cc b/content/browser/installedapp/native_win_app_fetcher_impl.cc
+index 2717ea740f398..2957aa6b07971 100644
+--- a/content/browser/installedapp/native_win_app_fetcher_impl.cc
++++ b/content/browser/installedapp/native_win_app_fetcher_impl.cc
+@@ -112,7 +112,8 @@ void FilterInstalledAppsForWin(
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   callback_ = std::move(callback);
+ 
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload() ||
++      !base::win::ResolveCoreWinRTDelayload()) {
+     return OnFailure();
+   }
+ 
+diff --git a/device/bluetooth/bluetooth_adapter_winrt.cc b/device/bluetooth/bluetooth_adapter_winrt.cc
+index 0fcc4ec97d2c1..d0cea6e30165e 100644
+--- a/device/bluetooth/bluetooth_adapter_winrt.cc
++++ b/device/bluetooth/bluetooth_adapter_winrt.cc
+@@ -105,6 +105,11 @@ using ABI::Windows::Storage::Streams::IDataReaderStatics;
+ using Microsoft::WRL::Callback;
+ using Microsoft::WRL::ComPtr;
+ 
++bool ResolveCoreWinRT() {
++  return base::win::ResolveCoreWinRTDelayload() &&
++         base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
++}
++
+ // Query string for powered Bluetooth radios. GUID Reference:
+ // https://docs.microsoft.com/en-us/windows-hardware/drivers/install/guid-bthport-device-interface
+ // TODO(crbug.com/40567018): Consider adding WindowsCreateStringReference
+@@ -666,7 +671,7 @@ void BluetoothAdapterWinrt::InitForTests(
+     ComPtr<IBluetoothAdapterStatics> bluetooth_adapter_statics,
+     ComPtr<IDeviceInformationStatics> device_information_statics,
+     ComPtr<IRadioStatics> radio_statics) {
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!ResolveCoreWinRT()) {
+     CompleteInit(std::move(init_callback), std::move(bluetooth_adapter_statics),
+                  std::move(device_information_statics),
+                  std::move(radio_statics));
+@@ -696,9 +701,9 @@ void BluetoothAdapterWinrt::InitForTests(
+ BluetoothAdapterWinrt::StaticsInterfaces
+ BluetoothAdapterWinrt::PerformSlowInitTasks() {
+   base::win::AssertComApartmentType(base::win::ComApartmentType::MTA);
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!ResolveCoreWinRT())
+     return BluetoothAdapterWinrt::StaticsInterfaces();
+-  }
++
+   ComPtr<IBluetoothAdapterStatics> adapter_statics;
+   HRESULT hr = base::win::GetActivationFactory<
+       IBluetoothAdapterStatics,
+diff --git a/device/gamepad/wgi_data_fetcher_win_unittest.cc b/device/gamepad/wgi_data_fetcher_win_unittest.cc
+index 348071e2d1844..e78246d16b83e 100644
+--- a/device/gamepad/wgi_data_fetcher_win_unittest.cc
++++ b/device/gamepad/wgi_data_fetcher_win_unittest.cc
+@@ -191,6 +191,7 @@ class WgiDataFetcherWinTest : public DeviceServiceTestBase {
+   }
+ 
+   void SetUpTestEnv(WgiTestErrorCode error_code = WgiTestErrorCode::kOk) {
++    EXPECT_TRUE(base::win::ScopedHString::ResolveCoreWinRTStringDelayload());
+     wgi_environment_ = std::make_unique<FakeWinrtWgiEnvironment>(error_code);
+     SetUpXInputEnv(error_code);
+     auto fetcher = std::make_unique<WgiDataFetcherWin>();
+diff --git a/media/capture/video/win/video_capture_device_factory_win.cc b/media/capture/video/win/video_capture_device_factory_win.cc
+index 467081e86bc23..34468b7c8640f 100644
+--- a/media/capture/video/win/video_capture_device_factory_win.cc
++++ b/media/capture/video/win/video_capture_device_factory_win.cc
+@@ -284,7 +284,8 @@ DevicesInfo::const_iterator FindNonDirectShowDeviceInfoByNameAndModel(
+ }
+ 
+ bool IsEnclosureLocationSupported() {
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!(base::win::ResolveCoreWinRTDelayload() &&
++        ScopedHString::ResolveCoreWinRTStringDelayload())) {
+     DLOG(ERROR) << "Failed loading functions from combase.dll";
+     return false;
+   }
+diff --git a/media/cdm/win/media_foundation_cdm_module.cc b/media/cdm/win/media_foundation_cdm_module.cc
+index 28fbd5d233a83..963314b8c0452 100644
+--- a/media/cdm/win/media_foundation_cdm_module.cc
++++ b/media/cdm/win/media_foundation_cdm_module.cc
+@@ -129,6 +129,10 @@ HRESULT MediaFoundationCdmModule::ActivateCdmFactory() {
+     return kErrorLoadLibrary;
+   }
+ 
++  // Initialization required to call base::win::ScopedHString::Create();
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    return kErrorResolveCoreWinRTStringDelayload;
++
+   // Get function pointer to the activation factory.
+   using GetActivationFactoryFunc =
+       HRESULT(WINAPI*)(_In_ HSTRING activatible_class_id,
+diff --git a/media/midi/midi_manager_winrt.cc b/media/midi/midi_manager_winrt.cc
+index b2f00aba1c8ef..c819674570a8f 100644
+--- a/media/midi/midi_manager_winrt.cc
++++ b/media/midi/midi_manager_winrt.cc
+@@ -822,7 +822,8 @@ void MidiManagerWinrt::InitializeOnComRunner() {
+ 
+   DCHECK(service()->task_service()->IsOnTaskRunner(kComTaskRunner));
+ 
+-  bool preload_success = base::win::ResolveCoreWinRTDelayload();
++  bool preload_success = base::win::ResolveCoreWinRTDelayload() &&
++                         ScopedHString::ResolveCoreWinRTStringDelayload();
+   if (!preload_success) {
+     service()->task_service()->PostBoundTask(
+         kDefaultTaskRunner,
+diff --git a/media/renderers/win/media_foundation_protection_manager.cc b/media/renderers/win/media_foundation_protection_manager.cc
+index cd4b85d979afa..cd27c6f07fd86 100644
+--- a/media/renderers/win/media_foundation_protection_manager.cc
++++ b/media/renderers/win/media_foundation_protection_manager.cc
+@@ -37,6 +37,9 @@ HRESULT MediaFoundationProtectionManager::RuntimeClassInitialize(
+   task_runner_ = std::move(task_runner);
+   waiting_cb_ = std::move(waiting_cb);
+ 
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    return kErrorResolveCoreWinRTStringDelayload;
++
+   // Init an empty |property_set_| as MFMediaEngine could access it via
+   // |get_Properties| before we populate it within SetPMPServer.
+   base::win::ScopedHString property_set_id = base::win::ScopedHString::Create(
+diff --git a/services/device/geolocation/win/location_provider_winrt.cc b/services/device/geolocation/win/location_provider_winrt.cc
+index 86752d8e6f9a3..f2c737a92cb30 100644
+--- a/services/device/geolocation/win/location_provider_winrt.cc
++++ b/services/device/geolocation/win/location_provider_winrt.cc
+@@ -67,6 +67,11 @@ void RecordUmaEvent(WindowsRTLocationRequestEvent event) {
+ // API which will trigger an update.
+ constexpr double kDefaultMovementThresholdMeters = 1.0;
+ 
++bool IsWinRTSupported() {
++  return base::win::ResolveCoreWinRTDelayload() &&
++         base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
++}
++
+ template <typename F>
+ std::optional<DOUBLE> GetOptionalDouble(F&& getter) {
+   DOUBLE value = 0;
+@@ -459,7 +464,7 @@ std::unique_ptr<LocationProvider> NewSystemLocationProvider(
+ std::unique_ptr<LocationProvider> NewSystemLocationProvider() {
+   // TODO: Remove IsSystemLocationSettingEnabled once
+   // system permission manager support for `LocationProviderWinrt` is ready.
+-  if (!base::win::ResolveCoreWinRTDelayload() ||
++  if (!IsWinRTSupported() ||
+       !IsSystemLocationSettingEnabled()) {
+     return nullptr;
+   }
+diff --git a/services/shape_detection/face_detection_provider_win.cc b/services/shape_detection/face_detection_provider_win.cc
+index 19ce2ac8a54d2..d77e8723a13f5 100644
+--- a/services/shape_detection/face_detection_provider_win.cc
++++ b/services/shape_detection/face_detection_provider_win.cc
+@@ -50,7 +50,8 @@ void FaceDetectionProviderWin::CreateFaceDetection(
+     mojo::PendingReceiver<shape_detection::mojom::FaceDetection> receiver,
+     shape_detection::mojom::FaceDetectorOptionsPtr options) {
+   // Loads functions dynamically at runtime to prevent library dependencies.
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!(base::win::ResolveCoreWinRTDelayload() &&
++        ScopedHString::ResolveCoreWinRTStringDelayload())) {
+     DLOG(ERROR) << "Failed loading functions from combase.dll";
+     return;
+   }
+diff --git a/services/shape_detection/text_detection_impl_win.cc b/services/shape_detection/text_detection_impl_win.cc
+index e8191cfce84ac..bc153ea9ab335 100644
+--- a/services/shape_detection/text_detection_impl_win.cc
++++ b/services/shape_detection/text_detection_impl_win.cc
+@@ -43,7 +43,8 @@ using Microsoft::WRL::ComPtr;
+ void TextDetectionImpl::Create(
+     mojo::PendingReceiver<mojom::TextDetection> receiver) {
+   // Loads functions dynamically at runtime to prevent library dependencies.
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!(base::win::ResolveCoreWinRTDelayload() &&
++        ScopedHString::ResolveCoreWinRTStringDelayload())) {
+     DLOG(ERROR) << "Failed loading functions from combase.dll";
+     return;
+   }
+diff --git a/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc b/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc
+index 671fc2926347d..d8ecaf544a862 100644
+--- a/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc
++++ b/ui/base/ime/win/on_screen_keyboard_display_manager_input_pane.cc
+@@ -90,7 +90,8 @@ class OnScreenKeyboardDisplayManagerInputPane::VirtualKeyboardInputPane
+     DCHECK(!main_task_runner_->BelongsToCurrentThread());
+     if (input_pane2_)
+       return true;
+-    if (!base::win::ResolveCoreWinRTDelayload()) {
++    if (!base::win::ResolveCoreWinRTDelayload() ||
++        !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
+       return false;
+     }
+ 
+diff --git a/ui/display/win/uwp_text_scale_factor.cc b/ui/display/win/uwp_text_scale_factor.cc
+index 5c4a70e7d8217..2d2d18c212bca 100644
+--- a/ui/display/win/uwp_text_scale_factor.cc
++++ b/ui/display/win/uwp_text_scale_factor.cc
+@@ -52,8 +52,9 @@ bool g_default_instance_cleaned_up = false;
+ bool CreateUiSettingsComObject(ComPtr<IUISettings2>& ptr) {
+   DCHECK(!ptr);
+ 
+-  // Need to do this check before using WinRT functions.
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  // This is required setup before using ScopedHString.
++  if (!(base::win::ResolveCoreWinRTDelayload() &&
++        base::win::ScopedHString::ResolveCoreWinRTStringDelayload())) {
+     DLOG(ERROR) << "Failed loading functions from combase.dll";
+     return false;
+   }
+diff --git a/ui/native_theme/caption_style_win.cc b/ui/native_theme/caption_style_win.cc
+index c8c432edd88a1..ece5fe25b53e7 100644
+--- a/ui/native_theme/caption_style_win.cc
++++ b/ui/native_theme/caption_style_win.cc
+@@ -174,8 +174,10 @@ absl::optional<CaptionStyle> InitializeFromSystemSettings() {
+ std::optional<CaptionStyle> InitializeFromSystemSettings() {
+   TRACE_EVENT0("ui", "InitializeFromSystemSettings");
+ 
+-  // Need to do this check before using WinRT functions.
+-  bool can_use_scoped_hstring = base::win::ResolveCoreWinRTDelayload();
++  // Need to do this check before using ScopedHString.
++  bool can_use_scoped_hstring =
++      base::win::ResolveCoreWinRTDelayload() &&
++      base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
+ 
+   if (!can_use_scoped_hstring)
+     return std::nullopt;
+diff --git a/services/device/public/cpp/geolocation/system_geolocation_source_win.cc b/services/device/public/cpp/geolocation/system_geolocation_source_win.cc
+index cd4b85d979afa..cd27c6f07fd86 100644
+--- a/services/device/public/cpp/geolocation/system_geolocation_source_win.cc
++++ b/services/device/public/cpp/geolocation/system_geolocation_source_win.cc
+@@ -70,6 +70,9 @@ ComPtr<IAppCapability> CreateAppCapability(std::string_view name) {
+ 
+ // Create an AppCapability object for the capability named `name`.
+ ComPtr<IAppCapability> CreateAppCapability(std::string_view name) {
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    return nullptr;
++
+   using ::ABI::Windows::Security::Authorization::AppCapabilityAccess::
+       IAppCapabilityStatics;
+   ComPtr<IAppCapabilityStatics> app_capability_statics;
+@@ -188,6 +194,9 @@ void SystemGeolocationSourceWin::OpenSystemPermissionSetting() {
+   if (launch_uri_op_) {
+     return;
+   }
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    return;
++
+   ComPtr<IUriRuntimeClassFactory> uri_runtime_class_factory;
+   HRESULT hr =
+       base::win::GetActivationFactory<IUriRuntimeClassFactory,
+@@ -246,6 +255,9 @@ void SystemGeolocationSourceWin::RequestPermission() {
+   if (request_location_access_op_) {
+     return;
+   }
++  if (!base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
++    return;
++
+   ComPtr<IGeolocatorStatics> geolocator_statics;
+   HRESULT hr = base::win::GetActivationFactory<
+       IGeolocatorStatics, RuntimeClass_Windows_Devices_Geolocation_Geolocator>(
+diff --git a/chrome/browser/permissions/system/system_media_source_win.cc b/chrome/browser/permissions/system/system_media_source_win.cc
+index 7d9b045e6dab8..f65a3b662076e 100644
+--- a/chrome/browser/permissions/system/system_media_source_win.cc
++++ b/chrome/browser/permissions/system/system_media_source_win.cc
+@@ -22,7 +22,8 @@ using ::ABI::Windows::Security::Authorization::AppCapabilityAccess::
+ using ::Microsoft::WRL::ComPtr;
+ // Create an AppCapability object for the capability named `name`.
+ ComPtr<IAppCapability> CreateAppCapability(std::string_view name) {
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!base::win::ResolveCoreWinRTDelayload() ||
++      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return nullptr;
+   }
+   using ::ABI::Windows::Security::Authorization::AppCapabilityAccess::
+@@ -94,7 +97,8 @@ void SystemMediaSourceWin::OnLaunchUriFailure(HRESULT result) {
+ // static
+ void SystemMediaSourceWin::OpenSystemPermissionSetting(
+     ContentSettingsType type) {
+-  if (!base::win::ResolveCoreWinRTDelayload()) {
++  if (!base::win::ResolveCoreWinRTDelayload() ||
++      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return;
+   }
+   using ABI::Windows::Foundation::IUriRuntimeClass;

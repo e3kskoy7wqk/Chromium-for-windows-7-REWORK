@@ -1,0 +1,327 @@
+diff --git a/base/allocator/dispatcher/reentry_guard.h b/base/allocator/dispatcher/reentry_guard.h
+index 986cfd2668618..61cbc60f7e787 100644
+--- a/base/allocator/dispatcher/reentry_guard.h
++++ b/base/allocator/dispatcher/reentry_guard.h
+@@ -10,51 +10,89 @@
+ #include "base/compiler_specific.h"
+ #include "build/build_config.h"
+ 
+-#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_POSIX)
+ #include <pthread.h>
+ #endif
+ 
++#if BUILDFLAG(IS_WIN)
++#include <windows.h>
++#endif
++
+ namespace base::allocator::dispatcher {
+ 
+-#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_ANDROID)
++// PoissonAllocationSampler cannot use ThreadLocalStorage, as during thread
++// exiting when TLS storage is already released, there might be a call to
++// |free| which would trigger the profiler hook and would make it access TLS.
++// It instead uses OS primitives directly. As it only stores POD types it
++// does not need thread exit callbacks.
++#if BUILDFLAG(IS_WIN)
++
++using TLSKey = DWORD;
++
++inline void TLSInit(TLSKey* key) {
++  *key = ::TlsAlloc();
++}
++
++inline uintptr_t TLSGetValue(const TLSKey& key) {
++  return reinterpret_cast<uintptr_t>(::TlsGetValue(key));
++}
++
++inline void TLSSetValue(const TLSKey& key, uintptr_t value) {
++  ::TlsSetValue(key, reinterpret_cast<LPVOID>(value));
++}
+ 
+-// The macOS implementation of libmalloc sometimes calls malloc recursively,
++#else  // defined(OS_WIN)
++
++using TLSKey = pthread_key_t;
++
++void TLSInit(TLSKey* key) {
++  int result = pthread_key_create(key, nullptr);
++  CHECK_EQ(0, result);
++}
++
++uintptr_t TLSGetValue(const TLSKey& key) {
++  return reinterpret_cast<uintptr_t>(pthread_getspecific(key));
++}
++
++void TLSSetValue(const TLSKey& key, uintptr_t value) {
++  pthread_setspecific(key, reinterpret_cast<void*>(value));
++}
++
++#endif
++
++// On MacOS the implementation of libmalloc sometimes calls malloc recursively,
+ // delegating allocations between zones. That causes our hooks being called
+ // twice. The scoped guard allows us to detect that.
+-//
+-// Besides that the implementations of thread_local on macOS and Android
+-// seem to allocate memory lazily on the first access to thread_local variables
+-// (and on Android at least thread_local is implemented on top of pthread so is
+-// strictly worse for performance). Make use of pthread TLS instead of C++
+-// thread_local there.
++#if BUILDFLAG(IS_APPLE)
++
+ struct BASE_EXPORT ReentryGuard {
+-  ALWAYS_INLINE ReentryGuard() : allowed_(!pthread_getspecific(entered_key_)) {
+-    pthread_setspecific(entered_key_, reinterpret_cast<void*>(true));
++  ALWAYS_INLINE ReentryGuard() : allowed_(!TLSGetValue(entered_key_)) {
++    TLSSetValue(entered_key_, true);
+   }
+ 
+   ALWAYS_INLINE ~ReentryGuard() {
+     if (allowed_) [[likely]] {
+-      pthread_setspecific(entered_key_, nullptr);
++      TLSSetValue(entered_key_, false);
+     }
+   }
+ 
+   explicit operator bool() const noexcept { return allowed_; }
+ 
+   // This function must be called before installing any allocator hooks because
+   // some TLS implementations may allocate (eg. glibc will require a malloc call
+   // to allocate storage for a higher slot number (>= PTHREAD_KEY_2NDLEVEL_SIZE
+   // == 32). This touches the thread-local storage so that any malloc happens
+   // before installing the hooks.
+-  static void InitTLSSlot();
++  static void InitTLSSlot() { TLSInit(&entered_key_); }
+ 
+   // InitTLSSlot() is called before crash keys are available. At some point
+   // after SetCrashKeyImplementation() is called, this function should be
+   // called to record `entered_key_` to a crash key for debugging. This may
+   // allocate so it must not be called from inside an allocator hook.
+   static void RecordTLSSlotToCrashKey();
+ 
+  private:
+-  static pthread_key_t entered_key_;
++  static TLSKey entered_key_;
+   const bool allowed_;
+ };
+ 
+@@ -55,7 +95,8 @@ struct BASE_EXPORT ReentryGuard {
+ struct [[maybe_unused]] BASE_EXPORT ReentryGuard {
+   constexpr explicit operator bool() const noexcept { return true; }
+ 
+-  static void InitTLSSlot();
++  static void InitTLSSlot() { TLSInit(&entered_key_); }
++  static TLSKey entered_key_;
+   static void RecordTLSSlotToCrashKey();
+ };
+ 
+diff --git a/base/allocator/dispatcher/reentry_guard.cc b/base/allocator/dispatcher/reentry_guard.cc
+index 986cfd2668618..61cbc60f7e787 100644
+--- a/base/allocator/dispatcher/reentry_guard.cc
++++ b/base/allocator/dispatcher/reentry_guard.cc
+@@ -14,7 +14,7 @@
+ // different signs" warnings when comparing with 0.
+ constexpr pthread_key_t kNullKey = 0;
+ 
+-pthread_key_t ReentryGuard::entered_key_ = kNullKey;
++TLSKey ReentryGuard::entered_key_ = kNullKey;
+ 
+ void ReentryGuard::InitTLSSlot() {
+   if (entered_key_ == kNullKey) {
+@@ -28,7 +28,7 @@ void ReentryGuard::InitTLSSlot() {
+ 
+ #else
+ 
+-void ReentryGuard::InitTLSSlot() {}
++TLSKey ReentryGuard::entered_key_ = 0;
+ 
+ #endif
+ 
+diff --git a/base/sampling_heap_profiler/poisson_allocation_sampler.cc b/base/sampling_heap_profiler/poisson_allocation_sampler.cc
+index 1f0aaeb14096e..2a8113c6e04f5 100644
+--- a/base/sampling_heap_profiler/poisson_allocation_sampler.cc
++++ b/base/sampling_heap_profiler/poisson_allocation_sampler.cc
+@@ -73,49 +111,30 @@ class ReentryGuard {
+ 
+ using ::base::allocator::dispatcher::ReentryGuard;
+ 
+-const size_t kDefaultSamplingIntervalBytes = 128 * 1024;
++using ::base::allocator::dispatcher::TLSKey;
++using ::base::allocator::dispatcher::TLSInit;
++using ::base::allocator::dispatcher::TLSGetValue;
++using ::base::allocator::dispatcher::TLSSetValue;
++TLSKey g_tls_internal_reentry_guard;
+ 
+-// Notes on TLS usage:
+-//
+-// * There's no safe way to use TLS in malloc() as both C++ thread_local and
+-//   pthread do not pose any guarantees on whether they allocate or not.
+-// * We think that we can safely use thread_local w/o re-entrancy guard because
+-//   the compiler will use "tls static access model" for static builds of
+-//   Chrome [https://www.uclibc.org/docs/tls.pdf].
+-//   But there's no guarantee that this will stay true, and in practice
+-//   it seems to have problems on macOS/Android. These platforms do allocate
+-//   on the very first access to a thread_local on each thread.
+-// * Directly using/warming-up platform TLS seems to work on all platforms,
+-//   but is also not guaranteed to stay true. We make use of it for reentrancy
+-//   guards on macOS/Android.
+-// * We cannot use Windows Tls[GS]etValue API as it modifies the result of
+-//   GetLastError.
+-//
+-// Android thread_local seems to be using __emutls_get_address from libgcc:
+-// https://github.com/gcc-mirror/gcc/blob/master/libgcc/emutls.c
+-// macOS version is based on _tlv_get_addr from dyld:
+-// https://opensource.apple.com/source/dyld/dyld-635.2/src/threadLocalHelpers.s.auto.html
+-
+-// The guard protects against reentering on platforms other the macOS and
+-// Android.
+-thread_local bool g_tls_internal_reentry_guard = false;
++const size_t kDefaultSamplingIntervalBytes = 128 * 1024;
+ 
+ // Accumulated bytes towards sample thread local key.
+-thread_local intptr_t g_tls_accumulated_bytes = 0;
++TLSKey g_tls_accumulated_bytes;
+ 
+ // Used as a workaround to avoid bias from muted samples. See
+ // ScopedMuteThreadSamples for more details.
+-thread_local intptr_t g_tls_accumulated_bytes_snapshot = 0;
++TLSKey g_tls_accumulated_bytes_snapshot;
+ const intptr_t kAccumulatedBytesOffset = 1 << 29;
+ 
+-// A boolean used to distinguish first allocation on a thread:
+-//   false - first allocation on the thread;
+-//   true  - otherwise.
++// A boolean used to distinguish first allocation on a thread.
++//   false - first allocation on the thread.
++//   true  - otherwise
+ // Since g_tls_accumulated_bytes is initialized with zero the very first
+ // allocation on a thread would always trigger the sample, thus skewing the
+ // profile towards such allocations. To mitigate that we use the flag to
+ // ensure the first allocation is properly accounted.
+-thread_local bool g_tls_sampling_interval_initialized = false;
++TLSKey g_tls_sampling_interval_initialized;
+ 
+ // Controls if sample intervals should not be randomized. Used for testing.
+ bool g_deterministic = false;
+@@ -299,36 +314,36 @@ void PartitionFreeHook(void* address) {
+     const PoissonAllocationSamplerStats&) = default;
+ 
+ PoissonAllocationSampler::ScopedMuteThreadSamples::ScopedMuteThreadSamples() {
+-  was_muted_ = g_tls_internal_reentry_guard;
+-  g_tls_internal_reentry_guard = true;
++  was_muted_ = TLSGetValue(g_tls_internal_reentry_guard);
++  TLSSetValue(g_tls_accumulated_bytes, true);
+ 
+   // We mute thread samples immediately after taking a sample, which is when we
+   // reset g_tls_accumulated_bytes. This breaks the random sampling requirement
+   // of the poisson process, and causes us to systematically overcount all other
+   // allocations. That's because muted allocations rarely trigger a sample
+   // [which would cause them to be ignored] since they occur right after
+   // g_tls_accumulated_bytes is reset.
+   //
+   // To counteract this, we drop g_tls_accumulated_bytes by a large, fixed
+   // amount to lower the probability that a sample is taken to close to 0. Then
+   // we reset it after we're done muting thread samples.
+   if (!was_muted_) {
+-  g_tls_accumulated_bytes_snapshot = g_tls_accumulated_bytes;
+-  g_tls_accumulated_bytes -= kAccumulatedBytesOffset;
++  TLSSetValue(g_tls_accumulated_bytes_snapshot, TLSGetValue(g_tls_accumulated_bytes));
++  TLSSetValue(g_tls_accumulated_bytes, TLSGetValue(g_tls_accumulated_bytes) - kAccumulatedBytesOffset);
+   }
+ }
+ 
+ PoissonAllocationSampler::ScopedMuteThreadSamples::~ScopedMuteThreadSamples() {
+-  DCHECK(g_tls_internal_reentry_guard);
+-  g_tls_internal_reentry_guard = was_muted_;
++  DCHECK(TLSGetValue(g_tls_internal_reentry_guard));
++  TLSSetValue(g_tls_internal_reentry_guard, was_muted_);
+   if (!was_muted_) {
+-  g_tls_accumulated_bytes = g_tls_accumulated_bytes_snapshot;
++  TLSSetValue(g_tls_accumulated_bytes, TLSGetValue(g_tls_accumulated_bytes_snapshot));
+   }
+ }
+ 
+ // static
+ bool PoissonAllocationSampler::ScopedMuteThreadSamples::IsMuted() {
+-  return g_tls_internal_reentry_guard;
++  return TLSGetValue(g_tls_internal_reentry_guard);
+ }
+ 
+ PoissonAllocationSampler::ScopedSuppressRandomnessForTesting::
+@@ -327,8 +342,11 @@ PoissonAllocationSampler::PoissonAllocationSampler() {
+   [[maybe_unused]] static bool init_once = [] {
+     // Touch thread local data on initialization to enforce proper setup of
+     // underlying storage system.
+-    GetThreadLocalData();
+     ReentryGuard::InitTLSSlot();
++    TLSInit(&g_tls_internal_reentry_guard);
++    TLSInit(&g_tls_accumulated_bytes);
++    TLSInit(&g_tls_accumulated_bytes_snapshot);
++    TLSInit(&g_tls_sampling_interval_initialized);
+     return true;
+   }();
+ }
+@@ -406,8 +424,8 @@ void PoissonAllocationSampler::RecordAlloc(void* address,
+     size_t size,
+     base::allocator::dispatcher::AllocationSubsystem type,
+     const char* context) {
+-  g_tls_accumulated_bytes += size;
+-  intptr_t accumulated_bytes = g_tls_accumulated_bytes;
++  intptr_t accumulated_bytes = TLSGetValue(g_tls_accumulated_bytes) + size;
++    TLSSetValue(g_tls_accumulated_bytes, accumulated_bytes);
+   if (accumulated_bytes < 0) [[likely]] {
+     return;
+   }
+@@ -416,8 +434,8 @@ void PoissonAllocationSampler::RecordAlloc(void* address,
+     // rare state when the sampler is stopped after it's started. (The most
+     // common caller of PoissonAllocationSampler starts it and leaves it running
+     // for the rest of the Chrome session.)
+-    g_tls_sampling_interval_initialized = false;
+-    g_tls_accumulated_bytes = 0;
++    TLSSetValue(g_tls_sampling_interval_initialized, false);
++    TLSSetValue(g_tls_accumulated_bytes, 0);
+     return;
+   }
+ 
+@@ -433,16 +433,16 @@ void PoissonAllocationSampler::DoRecordAlloc(intptr_t accumulated_bytes,
+   }
+ 
+   size_t mean_interval = g_sampling_interval.load(std::memory_order_relaxed);
+-  if (!g_tls_sampling_interval_initialized) [[unlikely]] {
+-    g_tls_sampling_interval_initialized = true;
++  if (!TLSGetValue(g_tls_sampling_interval_initialized)) [[unlikely]] {
++    TLSSetValue(g_tls_sampling_interval_initialized, true);
+     // This is the very first allocation on the thread. It always makes it
+     // passing the condition at |RecordAlloc|, because accumulated_bytes
+     // is initialized with zero due to TLS semantics.
+     // Generate proper sampling interval instance and make sure the allocation
+     // has indeed crossed the threshold before counting it as a sample.
+     accumulated_bytes -= GetNextSampleInterval(mean_interval);
+     if (accumulated_bytes < 0) {
+-      g_tls_accumulated_bytes = accumulated_bytes;
++      TLSSetValue(g_tls_accumulated_bytes, accumulated_bytes);
+       return;
+     }
+   }
+@@ -441,9 +459,9 @@ void PoissonAllocationSampler::DoRecordAlloc(intptr_t accumulated_bytes,
+     ++samples;
+   } while (accumulated_bytes >= 0);
+ 
+-  g_tls_accumulated_bytes = accumulated_bytes;
++  TLSSetValue(g_tls_accumulated_bytes, accumulated_bytes);
+ 
+-  if (ScopedMuteThreadSamples::IsMuted()) [[unlikely]] {
++  if (TLSGetValue(g_tls_internal_reentry_guard)) [[unlikely]] {
+     return;
+   }
+ 
+@@ -410,7 +417,7 @@ PoissonAllocationSampler* PoissonAllocationSampler::Get() {
+ 
+ // static
+ intptr_t PoissonAllocationSampler::GetAccumulatedBytesForTesting() {
+-  return g_tls_accumulated_bytes;
++  return (intptr_t)TLSGetValue(g_tls_accumulated_bytes);
+ }
+ 
+ // static

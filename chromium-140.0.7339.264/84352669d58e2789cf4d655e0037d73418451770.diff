@@ -1,0 +1,94 @@
+diff --git a/content/browser/renderer_host/legacy_render_widget_host_win.cc b/content/browser/renderer_host/legacy_render_widget_host_win.cc
+index 475629d48e880..61e1ff3af5a04 100644
+--- a/content/browser/renderer_host/legacy_render_widget_host_win.cc
++++ b/content/browser/renderer_host/legacy_render_widget_host_win.cc
+@@ -609,7 +609,24 @@ LRESULT LegacyRenderWidgetHostHWND::OnSize(UINT message,
+ LRESULT LegacyRenderWidgetHostHWND::OnDestroy(UINT message,
+                                               WPARAM w_param,
+                                               LPARAM l_param) {
++typedef HRESULT (__cdecl *MYPROC)(IRawElementProviderSimple *); 
++ 
++    HINSTANCE hinstLib; 
++    MYPROC ProcAdd = NULL; 
++ 
++    // Get a handle to the DLL module.
++ 
++    hinstLib = LoadLibraryW(L"Uiautomationcore.dll"); 
++ 
++    // If the handle is valid, try to get the function address.
++ 
++    if (hinstLib != NULL) 
++    { 
++        ProcAdd = (MYPROC) GetProcAddress(hinstLib, "UiaDisconnectProvider"); 
++    } 
++
+   if (ax_fragment_root_ &&
++      NULL != ProcAdd &&
+       base::FeatureList::IsEnabled(features::kUiaDisconnectRootProviders)) {
+     // Note that the fragment root's element provider is being disconnected so
+     // that re-entrant WM_GETOBJECT messages are not serviced.
+@@ -617,9 +634,16 @@ LRESULT LegacyRenderWidgetHostHWND::OnDestroy(UINT message,
+ 
+     // Clean up UIA resources associated with this window's fragment root; see
+     // https://learn.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiadisconnectprovider.
+-    ::UiaDisconnectProvider(ax_fragment_root_->GetProvider());
++    ProcAdd(ax_fragment_root_->GetProvider());
+   }
+ 
++    if (hinstLib != NULL) 
++    { 
++        // Free the DLL module.
++ 
++        FreeLibrary(hinstLib); 
++    } 
++
+   if (did_return_uia_object_) {
+     // Disassociate this window from MSAA clients that are observing events; see
+     // https://docs.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiareturnrawelementprovider#remarks
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 42c9a58a65b0f..d14410173e902 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -1944,7 +1944,24 @@ void HWNDMessageHandler::OnDestroy() {
+     map.erase(i);
+   }
+ 
++typedef HRESULT (__cdecl *MYPROC)(IRawElementProviderSimple *); 
++ 
++    HINSTANCE hinstLib; 
++    MYPROC ProcAdd = NULL; 
++ 
++    // Get a handle to the DLL module.
++ 
++    hinstLib = LoadLibraryW(L"Uiautomationcore.dll"); 
++ 
++    // If the handle is valid, try to get the function address.
++ 
++    if (hinstLib != NULL) 
++    { 
++        ProcAdd = (MYPROC) GetProcAddress(hinstLib, "UiaDisconnectProvider"); 
++    } 
++
+   if (ax_fragment_root_ &&
++      NULL != ProcAdd &&
+       base::FeatureList::IsEnabled(features::kUiaDisconnectRootProviders)) {
+     // Note that the fragment root's element provider is being disconnected so
+     // that re-entrant WM_GETOBJECT messages are not serviced.
+@@ -1952,9 +1969,16 @@ void HWNDMessageHandler::OnDestroy() {
+ 
+     // Clean up UIA resources associated with this window's fragment root; see
+     // https://learn.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiadisconnectprovider.
+-    ::UiaDisconnectProvider(ax_fragment_root_->GetProvider());
++    ProcAdd(ax_fragment_root_->GetProvider());
+   }
+ 
++    if (hinstLib != NULL) 
++    { 
++        // Free the DLL module.
++ 
++        FreeLibrary(hinstLib); 
++    } 
++
+   if (did_return_uia_object_) {
+     // Disassociate this window from MSAA clients that are observing events; see
+     // https://docs.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiareturnrawelementprovider#remarks
