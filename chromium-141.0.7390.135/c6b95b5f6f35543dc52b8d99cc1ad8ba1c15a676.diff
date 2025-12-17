@@ -1,0 +1,31 @@
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index c5a54e02332e8..997303706f513 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -11633,26 +11633,6 @@
+             ]
+         }
+     ],
+-    "HeapProfilerMultiKeyHashSet": [
+-        {
+-            "platforms": [
+-                "chromeos",
+-                "chromeos_lacros",
+-                "ios",
+-                "linux",
+-                "mac",
+-                "windows"
+-            ],
+-            "experiments": [
+-                {
+-                    "name": "EnabledMultiKey_20250708",
+-                    "enable_features": [
+-                        "HeapProfilerMultiKeyHashSet"
+-                    ]
+-                }
+-            ]
+-        }
+-    ],
+     "HeatmapPalmDetectionStudy": [
+         {
+             "platforms": [

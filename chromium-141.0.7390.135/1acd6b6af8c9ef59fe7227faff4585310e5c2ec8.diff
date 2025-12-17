@@ -1,0 +1,457 @@
+diff --git a/base/win/win_util.cc b/base/win/win_util.cc
+index 739fa8945e56e..b4cab64cf9f5b 100644
+--- a/base/win/win_util.cc
++++ b/base/win/win_util.cc
+@@ -250,6 +250,12 @@ int main() {
+ }
+ 
+ void EnableHighDPISupport() {
++  // We don't want to set DPI awareness on pre-Win7 because we don't support
++  // DirectWrite there. GDI fonts are kerned very badly, so better to leave
++  // DPI-unaware and at effective 1.0. See also ShouldUseDirectWrite().
++  if (base::win::GetVersion() < base::win::Version::WIN7)
++    return;
++
+   if (!IsUser32AndGdi32Available()) {
+     return;
+   }
+diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
+index 1b64a18..c85ead6 100644
+--- a/chrome/browser/about_flags.cc
++++ b/chrome/browser/about_flags.cc
+@@ -556,6 +556,11 @@ const FeatureEntry kFeatureEntries[] = {
+     {"ignore-gpu-blocklist", flag_descriptions::kIgnoreGpuBlocklistName,
+      flag_descriptions::kIgnoreGpuBlocklistDescription, kOsAll,
+      SINGLE_VALUE_TYPE(switches::kIgnoreGpuBlocklist)},
++#if BUILDFLAG(IS_WIN)
++    {"disable-direct-write", "DirectWrite",
++     "Enables the use of experimental DirectWrite font rendering system.", kOsWin,
++     SINGLE_DISABLE_VALUE_TYPE(switches::kDisableDirectWrite)},
++#endif
+     {"enable-accessibility-on-screen-mode",
+      flag_descriptions::kAccessibilityOnScreenModeName,
+      flag_descriptions::kAccessibilityOnScreenModeDescription, kOsAll,
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 7592d3f..4061947 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -202,6 +202,7 @@
+ #include "ui/base/ui_base_features.h"
+ #include "ui/base/ui_base_switches.h"
+ #include "ui/display/display_switches.h"
++#include "ui/gfx/switches.h"
+ #include "ui/gfx/switches.h"
+ #include "ui/gl/gl_switches.h"
+ #include "url/gurl.h"
+@@ -1544,6 +1544,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+     switches::kRendererWaitForJavaDebugger,
+ #endif
+ #if BUILDFLAG(IS_WIN)
++    switches::kDisableDirectWrite,
+     sandbox::policy::switches::kDisableWin32kLockDown,
+     switches::kDisableHighResTimer,
+     switches::kEnableWin7WebRtcHWH264Decoding,
+diff --git a/sandbox/policy/switches.cc b/sandbox/policy/switches.cc
+index 17caced..d0d5ec7e 100644
+--- a/sandbox/policy/switches.cc
++++ b/sandbox/policy/switches.cc
+@@ -13,6 +13,7 @@
+ #include "build/build_config.h"
+ #include "base/win/windows_version.h"
+ #include "base/command_line.h"
++#include "ui/gfx/win/direct_write.h"
+ 
+ namespace sandbox::policy::switches {
+ 
+@@ -38,6 +39,8 @@ bool IsPinchToZoomEnabled() {
+ namespace sandbox {
+ namespace policy {
+ bool IsWin32kLockdownEnabled() {
++  if (!gfx::win::ShouldUseDirectWrite())
++    return false;
+   return base::win::GetVersion() >= base::win::Version::WIN8 &&
+          !base::CommandLine::ForCurrentProcess()->HasSwitch(
+              switches::kDisableWin32kLockDown);
+diff --git a/sandbox/policy/win/sandbox_win.cc b/sandbox/policy/win/sandbox_win.cc
+index b293ea4..44811d0 100644
+--- a/sandbox/policy/win/sandbox_win.cc
++++ b/sandbox/policy/win/sandbox_win.cc
+@@ -40,6 +40,10 @@
+ #include "sandbox/win/src/process_mitigations.h"
+ #include "sandbox/win/src/sandbox.h"
+ 
++#if !defined(NACL_WIN64)
++#include "ui/gfx/win/direct_write.h" // nogncheck: unused #ifdef NACL_WIN64
++#endif  // !defined(NACL_WIN64)
++
+ namespace sandbox {
+ namespace policy {
+ using sandbox::mojom::Sandbox;
+@@ -703,6 +703,11 @@ base::Process StartSandboxedProcess(
+   // disabled for processes we know are not compatible.
+   if (!delegate->CetCompatible())
+     mitigations |= MITIGATION_CET_DISABLED;
++#if !defined(NACL_WIN64)
++  // Don't block font loading with GDI.
++  if (!gfx::win::ShouldUseDirectWrite())
++    mitigations ^= MITIGATION_NONSYSTEM_FONT_DISABLE;
++#endif
+ 
+   if (delegate->RestrictCoreSharing()) {
+     mitigations |= MITIGATION_RESTRICT_CORE_SHARING;
+diff --git a/content/renderer/renderer_main_platform_delegate_win.cc b/content/renderer/renderer_main_platform_delegate_win.cc
+index 9641b16..a698af4 100644
+--- a/content/renderer/renderer_main_platform_delegate_win.cc
++++ b/content/renderer/renderer_main_platform_delegate_win.cc
+@@ -29,6 +29,18 @@
+ #include "ui/gfx/win/direct_write.h"
+ 
+ namespace content {
++namespace {
++
++// Windows-only skia sandbox support
++// These are used for GDI-path rendering.
++void SkiaPreCacheFont(const LOGFONT& logfont) {
++  RenderThread* render_thread = RenderThread::Get();
++  if (render_thread) {
++    render_thread->PreCacheFont(logfont);
++  }
++}
++
++}  // namespace
+ 
+ RendererMainPlatformDelegate::RendererMainPlatformDelegate(
+     const MainFunctionParams& parameters)
+@@ -46,6 +58,7 @@ void RendererMainPlatformDelegate::PlatformInitialize() {
+   bool no_sandbox =
+       command_line.HasSwitch(sandbox::policy::switches::kNoSandbox);
+ 
++  bool use_direct_write = gfx::win::ShouldUseDirectWrite();
+   if (!no_sandbox) {
+     // ICU DateFormat class (used in base/time_format.cc) needs to get the
+     // Olson timezone ID by accessing the registry keys under
+@@ -55,10 +68,16 @@ void RendererMainPlatformDelegate::PlatformInitialize() {
+   // Fallback to only DWrite if running in single process mode, since there can
+   // only be a single font manager and the browser process always has a DWrite
+   // one.
+-  if (!base::FeatureList::IsEnabled(features::kFontDataServiceAllWebContents) ||
+-      command_line.HasSwitch(switches::kSingleProcess)) {
+-    InitializeDWriteFontProxy();
+-  }
++  if (use_direct_write) {
++    if (!base::FeatureList::IsEnabled(features::kFontDataServiceAllWebContents) ||
++        command_line.HasSwitch(switches::kSingleProcess)) {
++      InitializeDWriteFontProxy();
++    }
++  } else {
++    if ( ! no_sandbox ) LoadLibraryW(L"Usp10.dll");
++    SkTypeface_SetEnsureLOGFONTAccessibleProc(SkiaPreCacheFont);
++  }
++  blink::WebFontRendering::setUseDirectWrite(use_direct_write);
+ }
+ 
+ void RendererMainPlatformDelegate::PlatformUninitialize() {
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+index 7ecd3eb..70c33f6 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -76,6 +76,7 @@ static FallbackListShaperCache* gFallbackListShaperCache = nullptr;
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
++bool FontCache::s_useDirectWrite = false;
+ bool FontCache::antialiased_text_enabled_ = false;
+ bool FontCache::lcd_text_enabled_ = false;
+ bool FontCache::s_useSubpixelPositioning = false;
+@@ -98,7 +98,11 @@ void FontCache::setStatusFontMetrics(const wchar_t* familyName, int32_t fontHeig
+ FontCache::FontCache()
+     : font_manager_(sk_ref_sp(skia::DefaultFontMgr().get())) {
+ 
+-    s_useSubpixelPositioning = true;
++    if (!s_useDirectWrite) {
++        font_manager_ = SkFontMgr_New_GDI();
++    }
++    // Subpixel text positioning is only supported by the DirectWrite backend (not GDI).
++    s_useSubpixelPositioning = s_useDirectWrite;
+ 
+   DCHECK(font_manager_.get());
+ }
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.h b/third_party/blink/renderer/platform/fonts/font_cache.h
+index 0e12c9e..e9e5d67 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.h
++++ b/third_party/blink/renderer/platform/fonts/font_cache.h
+@@ -104,8 +104,10 @@ public:
+   // TODO(https://crbug.com/808221) System font style configuration is not
+   // related to FontCache. Move it somewhere else, e.g. to WebThemeEngine.
+     bool useSubpixelPositioning() const { return s_useSubpixelPositioning; }
++    static bool useDirectWrite() { return s_useDirectWrite; }
+   static bool AntialiasedTextEnabled() { return antialiased_text_enabled_; }
+   static bool LcdTextEnabled() { return lcd_text_enabled_; }
++    static void setUseDirectWrite(bool useDirectWrite) { s_useDirectWrite = useDirectWrite; }
+   static void SetAntialiasedTextEnabled(bool enabled) {
+     antialiased_text_enabled_ = enabled;
+   }
+@@ -187,6 +189,7 @@ private:
+   sk_sp<SkFontMgr> font_manager_;
+ 
+ #if BUILDFLAG(IS_WIN)
++  static bool s_useDirectWrite;
+   static WebFontPrewarmer* prewarmer_;
+   static bool antialiased_text_enabled_;
+   static bool lcd_text_enabled_;
+diff --git a/third_party/blink/renderer/platform/fonts/font_custom_platform_data.cc b/third_party/blink/renderer/platform/fonts/font_custom_platform_data.cc
+index 714fc04..9ad92e8 100644
+--- a/third_party/blink/renderer/platform/fonts/font_custom_platform_data.cc
++++ b/third_party/blink/renderer/platform/fonts/font_custom_platform_data.cc
+@@ -53,6 +53,33 @@ FontCustomPlatformData::~FontCustomPlatformData()
+       return_typeface = palette_typeface;
+     }
+   }
++#if BUILDFLAG(IS_WIN)
++    if (!FontCache::useDirectWrite()) {
++        // FIXME: Skia currently renders synthetic bold and italics with
++        // hinting and without linear metrics on the windows GDI backend
++        // while the DirectWrite backend does the right thing. Using
++        // legacyCreateTypeface and specifying the bold/italics style allows
++        // for proper rendering of synthetic style. Once Skia has been
++        // updated this workaround will no longer be needed.
++        // http://crbug.com/332958
++        bool syntheticBold = synthetic_bold && !return_typeface->isBold();
++        bool syntheticItalic = synthetic_italic && !return_typeface->isItalic();
++        if (syntheticBold || syntheticItalic) {
++            SkString name;
++            return_typeface->getFamilyName(&name);
++
++            SkFontStyle realStyle = return_typeface->fontStyle();
++            SkFontStyle syntheticStyle = SkFontStyle(
++                realStyle.weight() + (syntheticBold ? 200 : 0),
++                realStyle.width(),
++                syntheticItalic ? SkFontStyle::kItalic_Slant : realStyle.slant());
++            sk_sp<SkTypeface> typeface(FontCache::Get().FontManager()->legacyCreateTypeface(name.c_str(), syntheticStyle));
++            syntheticBold = false;
++            syntheticItalic = false;
++            return MakeGarbageCollected<FontPlatformData>(std::move(typeface), "", size, syntheticBold, syntheticItalic, text_rendering, resolved_font_features, orientation);
++        }
++    }
++#endif
+   return MakeGarbageCollected<FontPlatformData>(
+       std::move(return_typeface), std::string(), size,
+       synthetic_bold && !base_typeface_->isBold(),
+diff --git a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+index 54d11cb..5ad1346 100644
+--- a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
++++ b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+@@ -183,6 +183,10 @@ PassRefPtr<SkTypeface> FontCache::createTypeface(const FontDescription& fontDesc
+   }
+ #endif
+ 
++  if(!useDirectWrite()) {
++    return sk_sp<SkTypeface>(font_manager_->legacyCreateTypeface(
++        name.empty() ? nullptr : name.c_str(), font_description.SkiaFontStyle()));
++  }
+   return sk_sp<SkTypeface>(font_manager_->matchFamilyStyle(
+       name.empty() ? nullptr : name.c_str(), font_description.SkiaFontStyle()));
+ }
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc b/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc
+index 91396aa..83e6b44 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc
++++ b/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc
+@@ -49,8 +49,11 @@ static inline bool isFontPresent(const UChar* fontName, SkFontMgr* fontManager)
+ 
+ inline bool IsFontPresent(const char* font_name_utf8,
+                           const SkFontMgr& font_manager) {
+-  sk_sp<SkTypeface> tf(
+-      font_manager.matchFamilyStyle(font_name_utf8, SkFontStyle()));
++    sk_sp<SkTypeface> tf;
++    if (FontCache::useDirectWrite())
++        tf = sk_sp<SkTypeface>(font_manager.matchFamilyStyle(font_name_utf8, SkFontStyle()));
++    else
++        tf = sk_sp<SkTypeface>(font_manager.legacyCreateTypeface(font_name_utf8, SkFontStyle()));
+     if (!tf)
+         return false;
+ 
+diff --git a/third_party/blink/renderer/core/layout/web_font_rendering_win.cc b/third_party/blink/renderer/core/layout/web_font_rendering_win.cc
+index 40d7381..0dfeee4 100644
+--- a/third_party/blink/renderer/core/layout/web_font_rendering_win.cc
++++ b/third_party/blink/renderer/core/layout/web_font_rendering_win.cc
+@@ -9,6 +9,12 @@
+ namespace blink {
+ 
+ // static
++void WebFontRendering::setUseDirectWrite(bool useDirectWrite)
++{
++    FontCache::setUseDirectWrite(useDirectWrite);
++}
++
++// static
+ void WebFontRendering::SetFontPrewarmer(WebFontPrewarmer* prewarmer) {
+   FontCache::SetFontPrewarmer(prewarmer);
+ }
+diff --git a/third_party/blink/public/web/win/web_font_rendering.h b/third_party/blink/public/web/win/web_font_rendering.h
+index 192242f..721b175 100644
+--- a/third_party/blink/public/web/win/web_font_rendering.h
++++ b/third_party/blink/public/web/win/web_font_rendering.h
+@@ -15,6 +15,7 @@ namespace blink {
+ 
+ class BLINK_EXPORT WebFontRendering {
+  public:
++  static void setUseDirectWrite(bool);
+   // Set an instance of |WebFontPrewarmer|. The instance must be kept alive
+   // until the process exits.
+   static void SetFontPrewarmer(WebFontPrewarmer*);
+diff --git a/ui/gfx/font_render_params_win.cc b/ui/gfx/font_render_params_win.cc
+index 1f8ab84..8071323f 100644
+--- a/ui/gfx/font_render_params_win.cc
++++ b/ui/gfx/font_render_params_win.cc
+@@ -12,6 +12,7 @@
+ #include "base/notimplemented.h"
+ #include "base/win/registry.h"
+ #include "skia/ext/legacy_display_globals.h"
++#include "ui/gfx/win/direct_write.h"
+ #include "ui/base/ui_base_features.h"
+ #include "ui/gfx/animation/animation.h"
+ #include "ui/gfx/font_util_win.h"
+@@ -68,7 +68,8 @@ class CachedFontRenderParams {
+     BOOL enabled = false;
+     if (SystemParametersInfo(SPI_GETFONTSMOOTHING, 0, &enabled, 0) && enabled) {
+       params_->antialiasing = true;
+-      params_->subpixel_positioning = true;
++      // GDI does not support subpixel positioning.
++      params_->subpixel_positioning = win::IsDirectWriteEnabled();
+ 
+       UINT type = 0;
+       if (SystemParametersInfo(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0) &&
+diff --git a/ui/gfx/switches.cc b/ui/gfx/switches.cc
+index 748e18c..773ef5c 100644
+--- a/ui/gfx/switches.cc
++++ b/ui/gfx/switches.cc
+@@ -11,6 +11,11 @@ namespace switches {
+ 
+ namespace switches {
+ 
++#if BUILDFLAG(IS_WIN)
++// Disables the DirectWrite font rendering system on windows.
++const char kDisableDirectWrite[] = "disable-direct-write";
++#endif
++
+ // Scale factor to apply to every animation duration. Must be >= 0.0. This will
+ // only apply to LinearAnimation and its subclasses.
+ const char kAnimationDurationScale[] = "animation-duration-scale";
+diff --git a/ui/gfx/switches.h b/ui/gfx/switches.h
+index 87c98d7..d088cae 100644
+--- a/ui/gfx/switches.h
++++ b/ui/gfx/switches.h
+@@ -14,6 +14,10 @@ GFX_EXPORT extern const char kAllowArbitraryScaleFactorInImageSkia[];
+ #include "ui/gfx/switches_export.h"
+ 
+ namespace switches {
++
++#if BUILDFLAG(IS_WIN)
++GFX_SWITCHES_EXPORT extern const char kDisableDirectWrite[];
++#endif
+ 
+ GFX_SWITCHES_EXPORT extern const char kAnimationDurationScale[];
+ GFX_SWITCHES_EXPORT extern const char kDisableFontSubpixelPositioning[];
+diff --git a/ui/gfx/win/direct_write.cc b/ui/gfx/win/direct_write.cc
+index 91ab99b..bf8c881 100644
+--- a/ui/gfx/win/direct_write.cc
++++ b/ui/gfx/win/direct_write.cc
+@@ -17,6 +17,8 @@
+ #include "skia/ext/font_utils.h"
+ #include "third_party/skia/include/core/SkFontMgr.h"
+ #include "third_party/skia/include/ports/SkTypeface_win.h"
++#include "base/command_line.h"
++#include "ui/gfx/switches.h"
+ 
+ namespace gfx {
+ namespace win {
+@@ -17,7 +17,36 @@
+ 
+ }  // anonymous namespace
+
++namespace {
++
++static bool dwrite_enabled = false;
++
++}
++
++bool ShouldUseDirectWrite() {
++  // If the flag is currently on, and we're on Win7 or above, we enable
++  // DirectWrite. Skia does not require the additions to DirectWrite in QFE
++  // 2670838, but a simple 'better than XP' check is not enough.
++  if (!LoadLibraryW(L"dwrite.dll"))
++    return false;
++
++  base::win::OSInfo::VersionNumber os_version =
++      base::win::OSInfo::GetInstance()->version_number();
++  if ((os_version.major == 6) && (os_version.minor == 1)) {
++    // We can't use DirectWrite for pre-release versions of Windows 7.
++    if (os_version.build < 7600)
++      return false;
++  }
++  // If forced off, don't use it.
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  return !command_line.HasSwitch(switches::kDisableDirectWrite);
++}
++
+ void CreateDWriteFactory(IDWriteFactory** factory) {
++  if (!ShouldUseDirectWrite())
++    return;
++
+   using DWriteCreateFactoryProc = decltype(DWriteCreateFactory)*;
+   HMODULE dwrite_dll = LoadLibraryW(L"dwrite.dll");
+   if (!dwrite_dll)
+@@ -55,7 +84,8 @@ void MaybeInitializeDirectWrite() {
+ 
+   Microsoft::WRL::ComPtr<IDWriteFactory> factory;
+   CreateDWriteFactory(&factory);
+-  CHECK(!!factory);
++  if (!factory)
++    return;
+   SetDirectWriteFactory(factory.Get());
+ 
+   // The skia call to create a new DirectWrite font manager instance can fail
+@@ -65,15 +94,20 @@ void MaybeInitializeDirectWrite() {
+                            iteration);
+   // TODO(crbug.com/956064): Move to a CHECK when the cause of the crash is
+   // fixed and remove the if statement that fallback to GDI font manager.
+-  DCHECK(!!direct_write_font_mgr);
+   if (!direct_write_font_mgr)
+     direct_write_font_mgr = SkFontMgr_New_GDI();
++  else
++    dwrite_enabled = true;
+ 
+   // Override the default skia font manager. This must be called before any
+   // use of the skia font manager is done (e.g. before any call to
+   // skia::DefaultFontMgr()).
+   skia::OverrideDefaultSkFontMgr(std::move(direct_write_font_mgr));
+ }
+ 
++bool IsDirectWriteEnabled() {
++  return dwrite_enabled;
++}
++
+ IDWriteFactory* GetDirectWriteFactory() {
+   // Some unittests may access this accessor without any previous call to
+diff --git a/ui/gfx/win/direct_write.h b/ui/gfx/win/direct_write.h
+index 9462c70..ec22a00 100644
+--- a/ui/gfx/win/direct_write.h
++++ b/ui/gfx/win/direct_write.h
+@@ -12,9 +12,15 @@
+ namespace gfx {
+ namespace win {
+ 
++// Returns whether DirectWrite font rendering should be used.
++COMPONENT_EXPORT(GFX) bool ShouldUseDirectWrite();
++
+ COMPONENT_EXPORT(GFX) void InitializeDirectWrite();
+ 
+-// Creates a DirectWrite factory.
++// Returns true if we are using DirectWrite for font metrics and rendering.
++COMPONENT_EXPORT(GFX) bool IsDirectWriteEnabled();
++
++// Creates a DirectWrite factory, if using DirectWrite.
+ COMPONENT_EXPORT(GFX) void CreateDWriteFactory(IDWriteFactory** factory);
+ 
+ // Returns the global DirectWrite factory.

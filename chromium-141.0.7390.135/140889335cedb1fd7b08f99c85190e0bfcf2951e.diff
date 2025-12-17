@@ -1,0 +1,530 @@
+diff --git a/chrome/browser/sync/sync_service_factory.cc b/chrome/browser/sync/sync_service_factory.cc
+index 707691aa4de0e..acb8ddc5a91bb 100644
+--- a/chrome/browser/sync/sync_service_factory.cc
++++ b/chrome/browser/sync/sync_service_factory.cc
+@@ -232,7 +231,6 @@ SyncServiceFactory::SyncServiceFactory()
+   DependsOn(PlusAddressSettingServiceFactory::GetInstance());
+   DependsOn(commerce::ProductSpecificationsServiceFactory::GetInstance());
+   DependsOn(ProfilePasswordStoreFactory::GetInstance());
+-  DependsOn(PowerBookmarkServiceFactory::GetInstance());
+ 
+   DependsOn(SecurityEventRecorderFactory::GetInstance());
+   DependsOn(SendTabToSelfSyncServiceFactory::GetInstance());
+@@ -266,8 +265,6 @@ ChromeSyncClient::ChromeSyncClient(Profile* profile)
+       PlusAddressSettingServiceFactory::GetForBrowserContext(profile),
+       WebDataServiceFactory::GetPlusAddressWebDataForProfile(
+           profile, ServiceAccessType::IMPLICIT_ACCESS));
+-  builder.SetPowerBookmarkService(
+-      PowerBookmarkServiceFactory::GetForBrowserContext(profile));
+   builder.SetPrefService(profile->GetPrefs());
+   builder.SetPrefServiceSyncable(PrefServiceSyncableFromProfile(profile));
+   builder.SetProductSpecificationsService(
+diff --git a/components/browser_sync/common_controller_builder.cc b/components/browser_sync/common_controller_builder.cc
+index 0866603abe6c9..c1c523275fd6e 100644
+--- a/components/browser_sync/common_controller_builder.cc
++++ b/components/browser_sync/common_controller_builder.cc
+@@ -267,7 +267,6 @@ void CommonControllerBuilder::SetPlusAddressServices(
+ 
+ void CommonControllerBuilder::SetPowerBookmarkService(
+     power_bookmarks::PowerBookmarkService* power_bookmark_service) {
+-  power_bookmark_service_.Set(power_bookmark_service);
+ }
+ 
+ void CommonControllerBuilder::SetPrefService(PrefService* pref_service) {
+@@ -457,15 +456,6 @@ CommonControllerBuilder::Build(syncer::ModelTypeSet disabled_types,
+                   bookmark_model_.value(), pref_service_.value())));
+     }
+ 
+-    if (!disabled_types.Has(syncer::POWER_BOOKMARK) &&
+-        power_bookmark_service_.value() &&
+-        base::FeatureList::IsEnabled(power_bookmarks::kPowerBookmarkBackend)) {
+-      // TODO(crbug.com/40261319): Support transport mode for POWER_BOOKMARK.
+-      controllers.push_back(std::make_unique<DataTypeController>(
+-          syncer::POWER_BOOKMARK,
+-          power_bookmark_service_.value()->CreateSyncControllerDelegate(),
+-          /*delegate_for_transport_mode=*/nullptr));
+-    }
+   }
+ 
+   if (!disabled_types.Has(syncer::HISTORY)) {
+diff --git a/components/power_bookmarks/common/power_bookmark_observer.h b/components/power_bookmarks/common/power_bookmark_observer.h
+index 1d20b214aea10..38fa8425056fe 100644
+--- a/components/power_bookmarks/common/power_bookmark_observer.h
++++ b/components/power_bookmarks/common/power_bookmark_observer.h
+@@ -10,8 +10,6 @@ namespace power_bookmarks {
+ // Observer class for any changes to powers.
+ class PowerBookmarkObserver {
+  public:
+-  virtual ~PowerBookmarkObserver() = default;
+-
+   // Called whenever there are changes to Powers.
+   virtual void OnPowersChanged() = 0;
+ };
+diff --git a/components/power_bookmarks/core/power_bookmark_service.cc b/components/power_bookmarks/core/power_bookmark_service.cc
+index 23c058202e0d6..47c6144bfebff 100644
+--- a/components/power_bookmarks/core/power_bookmark_service.cc
++++ b/components/power_bookmarks/core/power_bookmark_service.cc
+@@ -33,25 +32,15 @@ PowerBookmarkService::PowerBookmarkService(
+   if (model_)
+     model_observation_.Observe(model_);
+ 
+-  backend_ = std::make_unique<PowerBookmarkBackend>(
+-      database_dir, frontend_task_runner, weak_ptr_factory_.GetWeakPtr());
+-  backend_task_runner_->PostTask(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::Init,
+-                     base::Unretained(backend_.get()),
+-                     base::FeatureList::IsEnabled(kPowerBookmarkBackend)));
++  backend_ = base::SequenceBound<PowerBookmarkBackend>(
++      backend_task_runner_, database_dir, frontend_task_runner, this);
++  backend_.AsyncCall(&PowerBookmarkBackend::Init)
++      .WithArgs(base::FeatureList::IsEnabled(kPowerBookmarkBackend));
+ }
+ 
+ PowerBookmarkService::~PowerBookmarkService() {
+-  backend_task_runner_->DeleteSoon(FROM_HERE, std::move(backend_));
+-}
+-
+-std::unique_ptr<syncer::DataTypeControllerDelegate>
+-PowerBookmarkService::CreateSyncControllerDelegate() {
+-  return std::make_unique<syncer::ProxyDataTypeControllerDelegate>(
+-      backend_task_runner_,
+-      base::BindRepeating(&PowerBookmarkBackend::GetSyncControllerDelegate,
+-                          base::Unretained(backend_.get())));
++  backend_.AsyncCall(&PowerBookmarkBackend::Shutdown);
++  backend_task_runner_ = nullptr;
+ }
+ 
+ void PowerBookmarkService::GetPowersForURL(
+@@ -62,43 +51,35 @@ void PowerBookmarkService::GetPowersForURL(
+     const sync_pb::PowerBookmarkSpecifics::PowerType& power_type,
+     PowersCallback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::GetPowersForURL,
+-                     base::Unretained(backend_.get()), url, power_type),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::GetPowersForURL)
++      .WithArgs(url, power_type)
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::GetPowerOverviewsForType(
+     const sync_pb::PowerBookmarkSpecifics::PowerType& power_type,
+     PowerOverviewsCallback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::GetPowerOverviewsForType,
+-                     base::Unretained(backend_.get()), power_type),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::GetPowerOverviewsForType)
++      .WithArgs(power_type)
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::SearchPowers(const SearchParams& search_params,
+                                         PowersCallback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::SearchPowers,
+-                     base::Unretained(backend_.get()), search_params),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::SearchPowers)
++      .WithArgs(search_params)
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::SearchPowerOverviews(
+     const SearchParams& search_params,
+     PowerOverviewsCallback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::SearchPowerOverviews,
+-                     base::Unretained(backend_.get()), search_params),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::SearchPowerOverviews)
++      .WithArgs(search_params)
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::CreatePower(std::unique_ptr<Power> power,
+@@ -112,32 +93,26 @@ void PowerBookmarkService::CreatePower(std::unique_ptr<Power> power,
+     power->set_time_added(now);
+   if (power->time_modified().is_null())
+     power->set_time_modified(now);
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::CreatePower,
+-                     base::Unretained(backend_.get()), std::move(power)),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::CreatePower)
++      .WithArgs(std::move(power))
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::UpdatePower(std::unique_ptr<Power> power,
+                                        SuccessCallback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   power->set_time_modified(base::Time::Now());
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::UpdatePower,
+-                     base::Unretained(backend_.get()), std::move(power)),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::UpdatePower)
++      .WithArgs(std::move(power))
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::DeletePower(const base::Uuid& guid,
+                                        SuccessCallback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::DeletePower,
+-                     base::Unretained(backend_.get()), guid),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::DeletePower)
++      .WithArgs(guid)
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::DeletePowersForURL(
+@@ -145,11 +120,9 @@ void PowerBookmarkService::DeletePowersForURL(
+     const sync_pb::PowerBookmarkSpecifics::PowerType& power_type,
+     SuccessCallback callback) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  backend_task_runner_->PostTaskAndReplyWithResult(
+-      FROM_HERE,
+-      base::BindOnce(&PowerBookmarkBackend::DeletePowersForURL,
+-                     base::Unretained(backend_.get()), url, power_type),
+-      std::move(callback));
++  backend_.AsyncCall(&PowerBookmarkBackend::DeletePowersForURL)
++      .WithArgs(url, power_type)
++      .Then(std::move(callback));
+ }
+ 
+ void PowerBookmarkService::AddObserver(PowerBookmarkObserver* observer) {
+diff --git a/components/power_bookmarks/core/power_bookmark_service.h b/components/power_bookmarks/core/power_bookmark_service.h
+index dfe7e9e516fbe..adb477a5c0e4b 100644
+--- a/components/power_bookmarks/core/power_bookmark_service.h
++++ b/components/power_bookmarks/core/power_bookmark_service.h
+@@ -24,10 +24,6 @@ namespace bookmarks {
+ class BookmarkModel;
+ }  // namespace bookmarks
+ 
+-namespace syncer {
+-class DataTypeControllerDelegate;
+-}  // namespace syncer
+-
+ namespace power_bookmarks {
+ 
+ class Power;
+@@ -67,11 +63,6 @@ class PowerBookmarkService : public KeyedService,
+ 
+   ~PowerBookmarkService() override;
+ 
+-  // For sync codebase only: instantiates a controller delegate to interact with
+-  // PowerBookmarkSyncBridge. Must be called from the UI thread.
+-  std::unique_ptr<syncer::DataTypeControllerDelegate>
+-  CreateSyncControllerDelegate();
+-
+   // Returns a vector of Powers for the given `url` through the given
+   // `callback`. Use `power_type` to restrict which type is returned or use
+   // POWER_TYPE_UNSPECIFIED to return everything.
+@@ -148,18 +139,17 @@ class PowerBookmarkService : public KeyedService,
+ 
+  private:
+   raw_ptr<bookmarks::BookmarkModel> model_;
+-  std::unique_ptr<PowerBookmarkBackend> backend_;
++  base::SequenceBound<PowerBookmarkBackend> backend_;
+   scoped_refptr<base::SequencedTaskRunner> backend_task_runner_;
+ 
+   base::ObserverList<PowerBookmarkObserver>::Unchecked observers_;
+   std::vector<raw_ptr<PowerBookmarkDataProvider, VectorExperimental>>
+       data_providers_;
+ 
+   SEQUENCE_CHECKER(sequence_checker_);
+   base::ScopedObservation<bookmarks::BookmarkModel,
+                           bookmarks::BaseBookmarkModelObserver>
+       model_observation_{this};
+-  base::WeakPtrFactory<PowerBookmarkService> weak_ptr_factory_{this};
+ };
+ 
+ }  // namespace power_bookmarks
+diff --git a/components/power_bookmarks/storage/empty_power_bookmark_database.cc b/components/power_bookmarks/storage/empty_power_bookmark_database.cc
+index feaec25080662..fce67fe0e244c 100644
+--- a/components/power_bookmarks/storage/empty_power_bookmark_database.cc
++++ b/components/power_bookmarks/storage/empty_power_bookmark_database.cc
+@@ -101,7 +101,7 @@ bool EmptyPowerBookmarkDatabase::DeletePowerFromSync(const std::string& guid) {
+   return false;
+ }
+ 
+-PowerBookmarkSyncMetadataDatabase*
++syncer::SyncMetadataStore*
+ EmptyPowerBookmarkDatabase::GetSyncMetadataDatabase() {
+   return nullptr;
+ }
+diff --git a/components/power_bookmarks/storage/empty_power_bookmark_database.h b/components/power_bookmarks/storage/empty_power_bookmark_database.h
+index 36f0edf75e48b..fe54cf88d002f 100644
+--- a/components/power_bookmarks/storage/empty_power_bookmark_database.h
++++ b/components/power_bookmarks/storage/empty_power_bookmark_database.h
+@@ -49,7 +49,7 @@ class EmptyPowerBookmarkDatabase : public PowerBookmarkDatabase {
+   std::unique_ptr<Power> GetPowerForGUID(const std::string& guid) override;
+   bool CreateOrMergePowerFromSync(const Power& power) override;
+   bool DeletePowerFromSync(const std::string& guid) override;
+-  PowerBookmarkSyncMetadataDatabase* GetSyncMetadataDatabase() override;
++  syncer::SyncMetadataStore* GetSyncMetadataDatabase() override;
+   std::unique_ptr<Transaction> BeginTransaction() override;
+ };
+ 
+diff --git a/components/power_bookmarks/storage/power_bookmark_backend.cc b/components/power_bookmarks/storage/power_bookmark_backend.cc
+index 606bb50dff4d2..b8995f5850bbd 100644
+--- a/components/power_bookmarks/storage/power_bookmark_backend.cc
++++ b/components/power_bookmarks/storage/power_bookmark_backend.cc
+@@ -17,7 +17,7 @@ namespace power_bookmarks {
+ PowerBookmarkBackend::PowerBookmarkBackend(
+     const base::FilePath& database_dir,
+     scoped_refptr<base::SequencedTaskRunner> frontend_task_runner,
+-    base::WeakPtr<PowerBookmarkObserver> service_observer)
++    PowerBookmarkObserver* service_observer)
+     : database_dir_(database_dir),
+       frontend_task_runner_(frontend_task_runner),
+       service_observer_(service_observer) {
+@@ -47,7 +47,6 @@ namespace power_bookmarks {
+     bridge_ = std::make_unique<PowerBookmarkSyncBridge>(
+         db_->GetSyncMetadataDatabase(), this, std::move(change_processor));
+     if (success) {
+-      bridge_->Init();
+     } else {
+       bridge_->ReportError(
+           {FROM_HERE,
+@@ -53,13 +53,10 @@ void PowerBookmarkBackend::Init(bool use_database) {
+   }
+ }
+ 
+-base::WeakPtr<syncer::DataTypeControllerDelegate>
+-PowerBookmarkBackend::GetSyncControllerDelegate() {
+-  // When the current method is called, the bridge is expected to exist
+-  // (`use_database` in the Init() method is set iff the PowerBookmarkBackend
+-  // feature toggle is enabled).
+-  CHECK(bridge_);
+-  return bridge_->change_processor()->GetControllerDelegate();
++void PowerBookmarkBackend::Shutdown() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++
++  db_.reset();
+ }
+ 
+ std::vector<std::unique_ptr<Power>> PowerBookmarkBackend::GetPowersForURL(
+@@ -197,8 +194,7 @@ bool PowerBookmarkBackend::DeletePowerFromSync(const std::string& guid) {
+   return db_->DeletePowerFromSync(guid);
+ }
+ 
+-PowerBookmarkSyncMetadataDatabase*
+-PowerBookmarkBackend::GetSyncMetadataDatabase() {
++syncer::SyncMetadataStore* PowerBookmarkBackend::GetSyncMetadataDatabase() {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   return db_->GetSyncMetadataDatabase();
+ }
+@@ -228,7 +224,7 @@ void PowerBookmarkBackend::NotifyPowersChanged() {
+   // for the backend and post tasks directly to ensure proper ordering.
+   frontend_task_runner_->PostTask(
+       FROM_HERE, base::BindOnce(&PowerBookmarkObserver::OnPowersChanged,
+-                                service_observer_));
++                                base::Unretained(service_observer_)));
+ }
+ 
+ }  // namespace power_bookmarks
+diff --git a/components/power_bookmarks/storage/power_bookmark_backend.h b/components/power_bookmarks/storage/power_bookmark_backend.h
+index 455c18056a6a2..690f4275ce520 100644
+--- a/components/power_bookmarks/storage/power_bookmark_backend.h
++++ b/components/power_bookmarks/storage/power_bookmark_backend.h
+@@ -9,17 +9,12 @@
+ 
+ #include "base/files/file_path.h"
+ #include "base/memory/raw_ptr.h"
+-#include "base/memory/ref_counted.h"
+ #include "base/sequence_checker.h"
+ #include "components/power_bookmarks/common/power_bookmark_observer.h"
+ #include "components/power_bookmarks/storage/power_bookmark_database.h"
+ #include "components/power_bookmarks/storage/power_bookmark_sync_bridge.h"
+ #include "components/sync/protocol/power_bookmark_specifics.pb.h"
+ 
+-namespace syncer {
+-class DataTypeControllerDelegate;
+-}  // namespace syncer
+-
+ namespace power_bookmarks {
+ 
+ struct SearchParams;
+@@ -37,16 +32,13 @@ class PowerBookmarkBackend : public PowerBookmarkSyncBridge::Delegate {
+   PowerBookmarkBackend(
+       const base::FilePath& database_dir,
+       scoped_refptr<base::SequencedTaskRunner> frontend_task_runner,
+-      base::WeakPtr<PowerBookmarkObserver> service_observer);
++      PowerBookmarkObserver* service_observer);
+   PowerBookmarkBackend(const PowerBookmarkBackend&) = delete;
+   PowerBookmarkBackend& operator=(const PowerBookmarkBackend&) = delete;
+   virtual ~PowerBookmarkBackend();
+ 
+   void Init(bool use_database);
+-
+-  // For sync codebase only: gets a weak reference to the sync controller
+-  // delegate.
+-  base::WeakPtr<syncer::DataTypeControllerDelegate> GetSyncControllerDelegate();
++  void Shutdown();
+ 
+   // Returns a vector of Powers for the given `url`. Use `power_type` to
+   // restrict which type is returned or use POWER_TYPE_UNSPECIFIED to return
+@@ -91,7 +82,7 @@ class PowerBookmarkBackend : public PowerBookmarkSyncBridge::Delegate {
+   std::unique_ptr<Power> GetPowerForGUID(const std::string& guid) override;
+   bool CreateOrMergePowerFromSync(const Power& power) override;
+   bool DeletePowerFromSync(const std::string& guid) override;
+-  PowerBookmarkSyncMetadataDatabase* GetSyncMetadataDatabase() override;
++  syncer::SyncMetadataStore* GetSyncMetadataDatabase() override;
+   std::unique_ptr<Transaction> BeginTransaction() override;
+   void NotifyPowersChanged() override;
+ 
+@@ -113,7 +104,7 @@ class PowerBookmarkBackend : public PowerBookmarkSyncBridge::Delegate {
+ 
+   // Observer that serves the frontend of power bookmarks.
+   // Needs to be called on the frontend task runner.
+-  base::WeakPtr<PowerBookmarkObserver> service_observer_;
++  raw_ptr<PowerBookmarkObserver, DanglingUntriaged> service_observer_;
+ 
+   SEQUENCE_CHECKER(sequence_checker_);
+ };
+diff --git a/components/power_bookmarks/storage/power_bookmark_database_impl.cc b/components/power_bookmarks/storage/power_bookmark_database_impl.cc
+index a14a4f4fd59b5..d6ac2b9d14107 100644
+--- a/components/power_bookmarks/storage/power_bookmark_database_impl.cc
++++ b/components/power_bookmarks/storage/power_bookmark_database_impl.cc
+@@ -693,7 +693,7 @@ bool PowerBookmarkDatabaseImpl::DeletePowerFromSync(const std::string& guid) {
+   return DeletePower(base::Uuid::ParseLowercase(guid));
+ }
+ 
+-PowerBookmarkSyncMetadataDatabase*
++syncer::SyncMetadataStore*
+ PowerBookmarkDatabaseImpl::GetSyncMetadataDatabase() {
+   return sync_db_.get();
+ }
+diff --git a/components/power_bookmarks/storage/power_bookmark_database_impl.h b/components/power_bookmarks/storage/power_bookmark_database_impl.h
+index 8c22bffc558c3..a9b1aba85bfb4 100644
+--- a/components/power_bookmarks/storage/power_bookmark_database_impl.h
++++ b/components/power_bookmarks/storage/power_bookmark_database_impl.h
+@@ -56,7 +56,7 @@ class PowerBookmarkDatabaseImpl : public PowerBookmarkDatabase {
+   std::unique_ptr<Power> GetPowerForGUID(const std::string& guid) override;
+   bool CreateOrMergePowerFromSync(const Power& power) override;
+   bool DeletePowerFromSync(const std::string& guid) override;
+-  PowerBookmarkSyncMetadataDatabase* GetSyncMetadataDatabase() override;
++  syncer::SyncMetadataStore* GetSyncMetadataDatabase() override;
+   std::unique_ptr<Transaction> BeginTransaction() override;
+ 
+  private:
+diff --git a/components/power_bookmarks/storage/power_bookmark_sync_bridge.cc b/components/power_bookmarks/storage/power_bookmark_sync_bridge.cc
+index f2e78bff19175..76136d686e820 100644
+--- a/components/power_bookmarks/storage/power_bookmark_sync_bridge.cc
++++ b/components/power_bookmarks/storage/power_bookmark_sync_bridge.cc
+@@ -32,7 +32,7 @@ void WritePowersToSyncData(const std::vector<std::unique_ptr<Power>>& powers,
+ }  // namespace
+ 
+ PowerBookmarkSyncBridge::PowerBookmarkSyncBridge(
+-    PowerBookmarkSyncMetadataDatabase* meta_db,
++    syncer::SyncMetadataStore* meta_db,
+     Delegate* delegate,
+     std::unique_ptr<syncer::DataTypeLocalChangeProcessor> change_processor)
+     : syncer::DataTypeSyncBridge(std::move(change_processor)),
+@@ -41,18 +41,6 @@ PowerBookmarkSyncBridge::PowerBookmarkSyncBridge(
+ 
+ PowerBookmarkSyncBridge::~PowerBookmarkSyncBridge() = default;
+ 
+-void PowerBookmarkSyncBridge::Init() {
+-  std::unique_ptr<syncer::MetadataBatch> batch = meta_db_->GetAllSyncMetadata();
+-  if (batch) {
+-    initialized_ = true;
+-    change_processor()->ModelReadyToSync(std::move(batch));
+-  } else {
+-    change_processor()->ReportError(
+-        {FROM_HERE,
+-         syncer::ModelError::Type::kPowerBookmarkFailedToLoadMetadata});
+-  }
+-}
+-
+ std::unique_ptr<syncer::MetadataChangeList>
+ PowerBookmarkSyncBridge::CreateMetadataChangeList() {
+   return std::make_unique<syncer::InMemoryMetadataChangeList>();
+diff --git a/components/power_bookmarks/storage/power_bookmark_sync_bridge.h b/components/power_bookmarks/storage/power_bookmark_sync_bridge.h
+index 5e4d1d0c74287..730d6cf6e3016 100644
+--- a/components/power_bookmarks/storage/power_bookmark_sync_bridge.h
++++ b/components/power_bookmarks/storage/power_bookmark_sync_bridge.h
+@@ -10,12 +10,12 @@
+ 
+ namespace syncer {
+ class ModelError;
++class SyncMetadataStore;
+ }  // namespace syncer
+ 
+ namespace power_bookmarks {
+ 
+ class Power;
+-class PowerBookmarkSyncMetadataDatabase;
+ 
+ // Transaction wraps a database transaction. When it's out of scope the
+ // underlying transaction will be cancelled if not committed.
+@@ -51,7 +51,7 @@ class PowerBookmarkSyncBridge : public syncer::ModelTypeSyncBridge {
+     virtual bool DeletePowerFromSync(const std::string& guid) = 0;
+ 
+     // Get the database to store power bookmarks metadata.
+-    virtual PowerBookmarkSyncMetadataDatabase* GetSyncMetadataDatabase() = 0;
++    virtual syncer::SyncMetadataStore* GetSyncMetadataDatabase() = 0;
+ 
+     // Start a transaction. This is used to make sure power bookmark data
+     // and metadata are stored atomically.
+@@ -60,9 +60,8 @@ class PowerBookmarkSyncBridge : public syncer::ModelTypeSyncBridge {
+     // Notify the backend if powers are changed.
+     virtual void NotifyPowersChanged() {}
+   };
+-
+   PowerBookmarkSyncBridge(
+-      PowerBookmarkSyncMetadataDatabase* meta_db,
++      syncer::SyncMetadataStore* meta_db,
+       Delegate* delegate,
+       std::unique_ptr<syncer::DataTypeLocalChangeProcessor> change_processor);
+ 
+@@ -70,8 +71,6 @@ class PowerBookmarkSyncBridge : public syncer::ModelTypeSyncBridge {
+ 
+   ~PowerBookmarkSyncBridge() override;
+ 
+-  void Init();
+-
+   // syncer::DataTypeSyncBridge:
+   std::unique_ptr<syncer::MetadataChangeList> CreateMetadataChangeList()
+       override;
+@@ -107,8 +104,8 @@ class PowerBookmarkSyncBridge : public syncer::ModelTypeSyncBridge {
+       syncer::EntityChangeList& entity_changes,
+       bool is_initial_merge);
+ 
+-  const raw_ptr<PowerBookmarkSyncMetadataDatabase, DanglingUntriaged> meta_db_;
+-  const raw_ptr<Delegate> delegate_;
++  const raw_ptr<syncer::SyncMetadataStore, DanglingUntriaged> meta_db_;
++  const raw_ptr<Delegate, DanglingUntriaged> delegate_;
+   bool initialized_ = false;
+ };
+ 
+diff --git a/components/power_bookmarks/storage/power_bookmark_sync_bridge_unittest.cc b/components/power_bookmarks/storage/power_bookmark_sync_bridge_unittest.cc
+index 6ff4b9e67f1ae..1de5edd039d5c 100644
+--- a/components/power_bookmarks/storage/power_bookmark_sync_bridge_unittest.cc
++++ b/components/power_bookmarks/storage/power_bookmark_sync_bridge_unittest.cc
+@@ -81,7 +81,7 @@ class MockDelegate : public PowerBookmarkSyncBridge::Delegate {
+ 
+   MOCK_METHOD1(CreateOrMergePowerFromSync, bool(const Power& power));
+   MOCK_METHOD1(DeletePowerFromSync, bool(const std::string&));
+-  MOCK_METHOD0(GetSyncMetadataDatabase, PowerBookmarkSyncMetadataDatabase*());
++  MOCK_METHOD0(GetSyncMetadataDatabase, syncer::SyncMetadataStore*());
+   MOCK_METHOD0(NotifyPowersChanged, void());
+ 
+  private:

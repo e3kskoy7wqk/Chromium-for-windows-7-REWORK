@@ -1,0 +1,56 @@
+diff --git a/chrome/browser/ui/views/profiles/profile_menu_view_base.cc b/chrome/browser/ui/views/profiles/profile_menu_view_base.cc
+index 4210e04907540..97ce9aca28483 100644
+--- a/chrome/browser/ui/views/profiles/profile_menu_view_base.cc
++++ b/chrome/browser/ui/views/profiles/profile_menu_view_base.cc
+@@ -107,6 +107,8 @@ constexpr int kMenuEdgeMargin = 16;
+ // Additional empty space between the menu item (e.g. icon or label) and the
+ // edge menu margin.
+ constexpr int kMenuItemLeftInternalPadding = 12;
++// The height of the button(s) with a colored background.
++constexpr int kButtonBackgroundVerticalSize = 36;
+ 
+ constexpr char kProfileMenuClickedActionableItemHistogram[] =
+     "Profile.Menu.ClickedActionableItem";
+@@ -656,9 +655,17 @@ void ProfileMenuViewBase::AddFeatureButton(
+   constexpr int kButtonBackgroundVerticalSize = 40;
+   constexpr int kPromoSeparation = 2;
+ 
+-  std::unique_ptr<HoverButton> button = CreateMenuRowButton(
+-      std::move(action), std::make_unique<FeatureButtonIconView>(icon, 1.0f),
+-      text);
++  std::unique_ptr<FeatureButtonIconView> icon_view;
++  if (&icon != &gfx::VectorIcon::EmptyIcon()) {
++    icon_view =
++        std::make_unique<FeatureButtonIconView>(icon, 1.0f);
++  }
++
++  auto button = std::make_unique<HoverButton>(
++      base::BindRepeating(&ProfileMenuViewBase::ButtonPressed,
++                          base::Unretained(this), std::move(action)),
++      std::move(icon_view), text, /*subtitle=*/std::u16string(),
++      /*secondary_view=*/nullptr, /*add_vertical_label_spacing=*/false);
+ 
+   // The current button being added to the end, we can already set the bottom
+   // corners.
+@@ -554,10 +556,17 @@ void ProfileMenuViewBase::AddPromoButton(const std::u16string& text,
+         views::BoxLayout::Orientation::kVertical));
+   }
+ 
+-  features_container_->AddChildView(CreateMenuRowButton(
+-      std::move(action),
+-      std::make_unique<FeatureButtonIconView>(icon, icon_to_image_ratio),
+-      text));
++  std::unique_ptr<FeatureButtonIconView> icon_view;
++  if (&icon != &gfx::VectorIcon::EmptyIcon()) {
++    icon_view =
++        std::make_unique<FeatureButtonIconView>(icon, icon_to_image_ratio);
++  }
++
++  auto button = std::make_unique<HoverButton>(
++      base::BindRepeating(&ProfileMenuViewBase::ButtonPressed,
++                          base::Unretained(this), std::move(action)),
++      std::move(icon_view), text, /*subtitle=*/std::u16string(),
++      /*secondary_view=*/nullptr, /*add_vertical_label_spacing=*/false);
+ }
+ 
+ void ProfileMenuViewBase::SetProfileManagementHeading(
