@@ -1,0 +1,158 @@
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.cc b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+index b5de535b7a82c..a544d8f34da62 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+@@ -10,6 +10,7 @@
+ #include <memory>
+ #include <utility>
+ 
++#include "base/memory/raw_ref.h"
+ #include "base/scoped_observation.h"
+ #include "base/trace_event/common/trace_event_common.h"
+ #include "base/trace_event/trace_event.h"
+@@ -112,7 +113,7 @@ void LayoutWebAppWindowTitleCommon(const gfx::Rect& available_space,
+ // through the widget, native widget, and desktop window tree host.
+ class BrowserFrameViewWin::CaptionButtonMetrics : public views::WidgetObserver {
+  public:
+-  CaptionButtonMetrics() = default;
++  explicit CaptionButtonMetrics(BrowserFrameViewWin& frame) : frame_(frame) {}
+   CaptionButtonMetrics(const CaptionButtonMetrics&) = delete;
+   void operator=(const CaptionButtonMetrics&) = delete;
+   ~CaptionButtonMetrics() override = default;
+@@ -133,8 +134,12 @@ class BrowserFrameViewWin::CaptionButtonMetrics : public views::WidgetObserver {
+ 
+   void OnDeviceScaleFactorChanged() { minimize_button_metrics_.OnDpiChanged(); }
+ 
+-  int GetMinimizeButtonOffset() const {
+-    return minimize_button_metrics_.GetMinimizeButtonOffsetX();
++  int GetCaptionButtonWidth() const {
++    const int offset = minimize_button_metrics_.GetMinimizeButtonOffsetX();
++    if (frame_->CaptionButtonsOnLeadingEdge()) {
++      return offset;
++    }
++    return frame_->width() - offset;
+   }
+ 
+   // views::WidgetObserver:
+@@ -161,6 +166,7 @@ class BrowserFrameViewWin::CaptionButtonMetrics : public views::WidgetObserver {
+   base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{
+       this};
+   MinimizeButtonMetrics minimize_button_metrics_;
++  const raw_ref<BrowserFrameViewWin> frame_;
+ };
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -169,7 +175,7 @@ class BrowserFrameViewWin::CaptionButtonMetrics : public views::WidgetObserver {
+ BrowserFrameViewWin::BrowserFrameViewWin(BrowserWidget* widget,
+                                          BrowserView* browser_view)
+     : BrowserFrameView(widget, browser_view),
+-      caption_button_metrics_(std::make_unique<CaptionButtonMetrics>()) {
++      caption_button_metrics_(std::make_unique<CaptionButtonMetrics>(*this)) {
+   // We initialize all fields despite some of them being unused in some modes,
+   // since it's possible for modes to flip dynamically (e.g. if the user enables
+   // a high-contrast theme). Throbber icons are only used when ShowSystemIcon()
+@@ -718,14 +724,14 @@ int BrowserFrameViewWin::CaptionButtonsRegionWidth() const {
+   std::optional<int> system_caption_buttons_width;
+   if (!base::FeatureList::IsEnabled(kAvoidUnnecessaryGetMinimizeButtonOffset)) {
+     system_caption_buttons_width =
+-        caption_button_metrics_->GetMinimizeButtonOffset();
++        caption_button_metrics_->GetCaptionButtonWidth();
+   }
+ 
+   int total_width = caption_button_container_->size().width();
+   if (!ShouldBrowserCustomDrawTitlebar(browser_view())) {
+     if (!system_caption_buttons_width.has_value()) {
+       system_caption_buttons_width =
+-          caption_button_metrics_->GetMinimizeButtonOffset();
++          caption_button_metrics_->GetCaptionButtonWidth();
+     }
+     total_width += system_caption_buttons_width.value();
+   }
+@@ -923,7 +929,7 @@ void BrowserFrameViewWin::LayoutCaptionButtons() {
+   const int system_caption_buttons_width =
+       ShouldBrowserCustomDrawTitlebar(browser_view())
+           ? 0
+-          : caption_button_metrics_->GetMinimizeButtonOffset();
++          : caption_button_metrics_->GetCaptionButtonWidth();
+ 
+   const int height =
+       !browser_view()->GetWebAppFrameToolbarPreferredSize().IsEmpty()
+diff --git a/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc b/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc
+index 034506d6fbe0e..9be342dcf03c7 100644
+--- a/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc
++++ b/chrome/browser/ui/views/frame/minimize_button_metrics_win.cc
+@@ -142,10 +142,7 @@ int MinimizeButtonMetrics::GetMinimizeButtonOffsetX() const {
+   // consistant value we cache the last value across instances and use it until
+   // we get the activate.
+   if (was_activated_ || cached_minimize_button_x_delta_ == 0) {
+-    const int minimize_button_offset = GetAndCacheMinimizeButtonOffsetX();
+-    if (minimize_button_offset > 0) {
+-      return minimize_button_offset;
+-    }
++    CalculateAndCacheMinimizeButtonOffsetX();
+   }
+ 
+   // If we fail to get the minimize button offset via the WM_GETTITLEBARINFOEX
+@@ -154,29 +151,22 @@ int MinimizeButtonMetrics::GetMinimizeButtonOffsetX() const {
+   // CacheMinimizeButtonDelta() for more details.
+   DCHECK(cached_minimize_button_x_delta_);
+ 
++  // In RTL the origin (for Views purposes) is the upper-right corner, and the
++  // X axis is reversed.
+   if (base::i18n::IsRTL()) {
+-    return cached_minimize_button_x_delta_;
++    RECT client_rect = {0};
++    GetClientRect(hwnd_, &client_rect);
++    return client_rect.right - cached_minimize_button_x_delta_;
+   }
+ 
+-  RECT client_rect = {0};
+-  GetClientRect(hwnd_, &client_rect);
+-  return client_rect.right - cached_minimize_button_x_delta_;
++  return cached_minimize_button_x_delta_;
+ }
+ 
+-int MinimizeButtonMetrics::GetAndCacheMinimizeButtonOffsetX() const {
++void MinimizeButtonMetrics::CalculateAndCacheMinimizeButtonOffsetX() const {
+   const int minimize_button_offset = GetMinimizeButtonOffsetForWindow();
+   if (minimize_button_offset <= 0) {
+-    return 0;
+-  }
+-
+-  if (base::i18n::IsRTL()) {
+-    cached_minimize_button_x_delta_ = minimize_button_offset;
+-  } else {
+-    RECT client_rect = {0};
+-    GetClientRect(hwnd_, &client_rect);
+-    cached_minimize_button_x_delta_ =
+-        client_rect.right - minimize_button_offset;
++    return;
+   }
++  cached_minimize_button_x_delta_ = minimize_button_offset;
+   last_cached_minimize_button_x_delta_ = cached_minimize_button_x_delta_;
+-  return minimize_button_offset;
+ }
+diff --git a/chrome/browser/ui/views/frame/minimize_button_metrics_win.h b/chrome/browser/ui/views/frame/minimize_button_metrics_win.h
+index 651b7bf6099e1..c8b282c8876d7 100644
+--- a/chrome/browser/ui/views/frame/minimize_button_metrics_win.h
++++ b/chrome/browser/ui/views/frame/minimize_button_metrics_win.h
+@@ -25,6 +25,10 @@ class MinimizeButtonMetrics {
+   // Obtain the X offset of the native minimize button. Since Windows can lie
+   // to us if we call this at the wrong moment, this might come from a cached
+   // value rather than read when called.
++  //
++  // The value is an absolute distance from the leading edge of the frame. So if
++  // the browser is in LtR, this is expected to be a large number and must be
++  // adjusted for the right side of the window.
+   int GetMinimizeButtonOffsetX() const;
+ 
+   // Must be called when hwnd_ is activated to update the minimize button
+@@ -36,7 +40,7 @@ class MinimizeButtonMetrics {
+ 
+  private:
+   // Gets the value for GetMinimizeButtonOffsetX(), caching if found.
+-  int GetAndCacheMinimizeButtonOffsetX() const;
++  void CalculateAndCacheMinimizeButtonOffsetX() const;
+ 
+   int GetButtonBoundsPositionOffset(const RECT& button_bounds,
+                                     const RECT& window_bounds) const;

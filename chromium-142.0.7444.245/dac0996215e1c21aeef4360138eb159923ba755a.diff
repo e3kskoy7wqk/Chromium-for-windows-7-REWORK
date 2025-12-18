@@ -1,0 +1,83 @@
+diff --git a/base/trace_event/trace_logging_minimal_win.cc b/base/trace_event/trace_logging_minimal_win.cc
+index 6a346a0e28100..7c39a0381c77c 100644
+--- a/base/trace_event/trace_logging_minimal_win.cc
++++ b/base/trace_event/trace_logging_minimal_win.cc
+@@ -63,6 +63,59 @@ Details:
+ #define TLM_HAVE_EVENT_SET_INFORMATION 1
+ #endif
+ 
++// Typedefs for use with GetProcAddress
++typedef ULONG(__stdcall* tEventRegister)(LPCGUID ProviderId,
++                                         PENABLECALLBACK EnableCallback,
++                                         PVOID CallbackContext,
++                                         PREGHANDLE RegHandle);
++typedef ULONG(__stdcall* tEventWrite)(REGHANDLE RegHandle,
++                                      PCEVENT_DESCRIPTOR EventDescriptor,
++                                      ULONG UserDataCount,
++                                      PEVENT_DATA_DESCRIPTOR UserData);
++typedef ULONG(__stdcall* tEventUnregister)(REGHANDLE RegHandle);
++
++tEventRegister EventRegisterProc = nullptr;
++tEventWrite EventWriteProc = nullptr;
++tEventUnregister EventUnregisterProc = nullptr;
++
++// Redirector function for EventRegister. Called by macros in
++// chrome_events_win.h
++ULONG g_pfnEventRegister(LPCGUID ProviderId,
++                            PENABLECALLBACK EnableCallback,
++                            PVOID CallbackContext,
++                            PREGHANDLE RegHandle) {
++  if (EventRegisterProc)
++    return EventRegisterProc(ProviderId, EnableCallback, CallbackContext,
++                             RegHandle);
++  *RegHandle = 0;
++  return 0;
++}
++
++// Redirector function for EventWrite. Called by macros in
++// chrome_events_win.h
++ULONG g_pfnEventWrite(REGHANDLE RegHandle,
++                         PCEVENT_DESCRIPTOR EventDescriptor,
++                         ULONG UserDataCount,
++                         PEVENT_DATA_DESCRIPTOR UserData) {
++  if (EventWriteProc)
++    return EventWriteProc(RegHandle, EventDescriptor, UserDataCount, UserData);
++  return 0;
++}
++
++// Redirector function for EventUnregister. Called by macros in
++// chrome_events_win.h
++ULONG g_pfnEventUnregister(REGHANDLE RegHandle) {
++  if (EventUnregisterProc)
++    return EventUnregisterProc(RegHandle);
++  return 0;
++}
++
++#define EventWrite         g_pfnEventWrite
++#define EventWriteTransfer g_pfnEventWriteTransfer
++#define EventRegister      g_pfnEventRegister
++#define EventUnregister    g_pfnEventUnregister
++
++
+ TlmProvider::TlmProvider() noexcept = default;
+ 
+ TlmProvider::~TlmProvider() {
+@@ -129,6 +182,18 @@ int32_t TlmProvider::Register(const char* provider_name,
+   // Fill in MetadataSize field at offset 0.
+   *reinterpret_cast<uint16_t*>(provider_metadata_) = provider_metadata_size_;
+ 
++  // Find Advapi32.dll. This should always succeed.
++  HMODULE AdvapiDLL = ::LoadLibraryW(L"Advapi32.dll");
++  if (AdvapiDLL) {
++    // Try to find the ETW functions. This will fail on XP.
++    EventRegisterProc = reinterpret_cast<tEventRegister>(
++        ::GetProcAddress(AdvapiDLL, "EventRegister"));
++    EventWriteProc = reinterpret_cast<tEventWrite>(
++        ::GetProcAddress(AdvapiDLL, "EventWrite"));
++    EventUnregisterProc = reinterpret_cast<tEventUnregister>(
++        ::GetProcAddress(AdvapiDLL, "EventUnregister"));
++  }
++
+   on_updated_callback_ = std::move(on_updated_callback);
+   ULONG status =
+       EventRegister(&provider_guid, StaticEnableCallback, this, &reg_handle_);

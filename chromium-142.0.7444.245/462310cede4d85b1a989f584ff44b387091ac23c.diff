@@ -1,0 +1,54 @@
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.cc b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+index c5bedd7bcf0e6..cc24f8f9b90b5 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+@@ -195,6 +195,23 @@ int BrowserFrameViewWin::GetTopInset(bool restored) const {
+              : 0;
+ }
+ 
++bool BrowserFrameViewWin::HasVisibleBackgroundTabShapes(
++    BrowserFrameActiveState active_state) const {
++  DCHECK(GetWidget());
++
++  // Enabling high contrast mode disables the custom-drawn titlebar (so the
++  // system-drawn frame will respect the native frame colors) and enables the
++  // IncreasedContrastThemeSupplier (which does not respect the native frame
++  // colors).
++  // TODO(pkasting): https://crbug.com/831769  Change the architecture of the
++  // high contrast support to respect system colors, then remove this.
++  if (GetNativeTheme()->preferred_contrast() == ui::NativeTheme::PreferredContrast::kMore) {
++    return true;
++  }
++
++  return BrowserFrameView::HasVisibleBackgroundTabShapes(active_state);
++}
++
+ SkColor BrowserFrameViewWin::GetCaptionColor(
+     BrowserFrameActiveState active_state) const {
+   return GetColorProvider()->GetColor(ShouldPaintAsActiveForState(active_state)
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.h b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+index 9bcaebbc16d54..51b86baad537b 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+@@ -37,6 +37,8 @@ class BrowserFrameViewWin : public BrowserNonClientFrameView,
+   gfx::Rect GetBoundsForWebAppFrameToolbar(
+       const gfx::Size& toolbar_preferred_size) const override;
+   int GetTopInset(bool restored) const override;
++  bool HasVisibleBackgroundTabShapes(
++      BrowserFrameActiveState active_state) const override;
+   SkColor GetCaptionColor(BrowserFrameActiveState active_state) const override;
+   void UpdateThrobber(bool running) override;
+   gfx::Size GetMinimumSize() const override;
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view.h b/chrome/browser/ui/views/frame/browser_frame_view.h
+index 3ada82d4f1986..e09e21c2ec736 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view.h
+@@ -104,7 +104,7 @@ class BrowserNonClientFrameView : public views::NonClientFrameView {
+   // frame background. This is true if the theme uses a custom tab background
+   // image or if the calculated color for background tabs differs from the frame
+   // color.
+-  bool HasVisibleBackgroundTabShapes(
++  virtual bool HasVisibleBackgroundTabShapes(
+       BrowserFrameActiveState active_state) const;
+ 
+   // Returns true if background tabs are ever visibly distinct from the frame,

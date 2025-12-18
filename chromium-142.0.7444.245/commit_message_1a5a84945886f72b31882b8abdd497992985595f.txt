@@ -1,0 +1,1 @@
+Call RegDeleteKeyEx directly instead of via a wrapper.    2019/7/24 4:32:40    1a5a84945886f72b31882b8abdd497992985595f

@@ -1,0 +1,52 @@
+diff --git a/chrome/browser/win/taskbar_manager.cc b/chrome/browser/win/taskbar_manager.cc
+index 542adc36a00f4..3fa87946bf6e6 100644
+--- a/chrome/browser/win/taskbar_manager.cc
++++ b/chrome/browser/win/taskbar_manager.cc
+@@ -76,7 +76,14 @@ std::optional<bool> IsPinningAllowed(
+ void PinnedRequestResult(ComPtr<ITaskbarManager> taskbar_manager,
+                          ResultMetricCallback callback,
+                          boolean pin_request_result) {
+-  ::SetCurrentProcessExplicitAppUserModelID(L"");
++typedef HRESULT(WINAPI *pfnSetCurrentProcessExplicitAppUserModelID)(PCWSTR AppID);
++    pfnSetCurrentProcessExplicitAppUserModelID fnSetCurrentProcessExplicitAppUserModelID =
++        (pfnSetCurrentProcessExplicitAppUserModelID)GetProcAddress(GetModuleHandleW(L"Shell32.dll"),
++                                                                   "SetCurrentProcessExplicitAppUserModelID");
++
++    if (fnSetCurrentProcessExplicitAppUserModelID != NULL) {
++  fnSetCurrentProcessExplicitAppUserModelID(L"");
++    }
+   std::move(callback).Run(pin_request_result
+                               ? PinResultMetric::kSuccess
+                               : PinResultMetric::kPinCurrentAppFailed);
+@@ -143,7 +150,14 @@ void PinToTaskbarIfAllowedOnUIThread(
+   // Chrome doesn't currently set this, so it will be cleared when the
+   // pinning process is done. ITaskbarManager requires that this be set to the
+   // same value as the window requesting the pinning.
+-  ::SetCurrentProcessExplicitAppUserModelID(app_user_model_id.c_str());
++typedef HRESULT(WINAPI *pfnSetCurrentProcessExplicitAppUserModelID)(PCWSTR AppID);
++    pfnSetCurrentProcessExplicitAppUserModelID fnSetCurrentProcessExplicitAppUserModelID =
++        (pfnSetCurrentProcessExplicitAppUserModelID)GetProcAddress(GetModuleHandleW(L"Shell32.dll"),
++                                                                   "SetCurrentProcessExplicitAppUserModelID");
++
++    if (fnSetCurrentProcessExplicitAppUserModelID != NULL) {
++  fnSetCurrentProcessExplicitAppUserModelID(app_user_model_id.c_str());
++    }
+ 
+   // There must be a shortcut with AUMI `app_user_model_id` in the start menu
+   // for this to return true.
+@@ -237,7 +251,14 @@ void PinAppToTaskbarInternal(const std::wstring& app_user_model_id,
+   ResultMetricCallback pin_result_callback(base::BindOnce(
+       [](PinResultCallback pin_callback, bool check_only,
+          PinResultMetric result) {
+-        ::SetCurrentProcessExplicitAppUserModelID(L"");
++typedef HRESULT(WINAPI *pfnSetCurrentProcessExplicitAppUserModelID)(PCWSTR AppID);
++    pfnSetCurrentProcessExplicitAppUserModelID fnSetCurrentProcessExplicitAppUserModelID =
++        (pfnSetCurrentProcessExplicitAppUserModelID)GetProcAddress(GetModuleHandleW(L"Shell32.dll"),
++                                                                   "SetCurrentProcessExplicitAppUserModelID");
++
++    if (fnSetCurrentProcessExplicitAppUserModelID != NULL) {
++        fnSetCurrentProcessExplicitAppUserModelID(L"");
++    }
+         base::UmaHistogramEnumeration(check_only
+                                           ? "Windows.ShouldPinToTaskbarResult"
+                                           : "Windows.TaskbarPinResult",

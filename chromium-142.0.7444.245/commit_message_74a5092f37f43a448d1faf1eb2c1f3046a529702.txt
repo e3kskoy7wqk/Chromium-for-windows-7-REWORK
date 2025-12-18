@@ -1,0 +1,1 @@
+[Browser Frame] Fix caption button position logic in Windows with Mica    2025/10/17 4:29:32    74a5092f37f43a448d1faf1eb2c1f3046a529702

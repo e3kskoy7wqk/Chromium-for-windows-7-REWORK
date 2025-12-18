@@ -1,0 +1,51 @@
+diff --git a/base/win/hstring_reference.cc b/base/win/hstring_reference.cc
+index f98f1a27817b0..b254fc64310a1 100644
+--- a/base/win/hstring_reference.cc
++++ b/base/win/hstring_reference.cc
+@@ -14,13 +14,16 @@
+ 
+ namespace base::win {
+ 
+-HStringReference::HStringReference(const wchar_t* str) {
++HStringReference::HStringReference(const wchar_t* str, size_t length) {
+   // String must be null terminated for WindowsCreateStringReference.
+   // nullptr str is OK so long as the length is 0.
+-  size_t length = str ? UNSAFE_TODO(wcslen(str)) : 0;
++  DCHECK(str ? str[length] == L'\0' : length == 0);
+   const HRESULT hr = ::WindowsCreateStringReference(
+       str, checked_cast<UINT32>(length), &hstring_header_, &hstring_);
+   DCHECK_EQ(hr, S_OK);
+ }
+ 
++HStringReference::HStringReference(const wchar_t* str)
++    : HStringReference(str, str ? wcslen(str) : 0) {}
++
+ }  // namespace base::win
+diff --git a/base/win/hstring_reference.h b/base/win/hstring_reference.h
+index 41a753daef3f5..3cde4acef6f2e 100644
+--- a/base/win/hstring_reference.h
++++ b/base/win/hstring_reference.h
+@@ -23,7 +23,7 @@ namespace base::win {
+ //
+ class BASE_EXPORT HStringReference {
+  public:
+-  // Creates an HStringReference from `str`, which must be null terminated.
++  HStringReference(const wchar_t* str, size_t len);
+   explicit HStringReference(const wchar_t* str);
+ 
+   HSTRING Get() const { return hstring_; }
+diff --git a/base/win/hstring_reference_unittest.cc b/base/win/hstring_reference_unittest.cc
+index 0a32399fa1285..3f67ff223d87e 100644
+--- a/base/win/hstring_reference_unittest.cc
++++ b/base/win/hstring_reference_unittest.cc
+@@ -35,8 +35,8 @@ TEST(HStringReferenceTest, Init) {
+   EXPECT_EQ(empty_string.Get(), nullptr);
+   VerifyHSTRINGEquals(empty_string.Get(), kEmptyString);
+ 
+-  // Passing a null string should also return a null HSTRING.
+-  const HStringReference null_string(nullptr);
++  // Passing a zero length and null string should also return a null HSTRING.
++  const HStringReference null_string(nullptr, 0);
+   EXPECT_EQ(null_string.Get(), nullptr);
+   VerifyHSTRINGEquals(null_string.Get(), kEmptyString);
+ }

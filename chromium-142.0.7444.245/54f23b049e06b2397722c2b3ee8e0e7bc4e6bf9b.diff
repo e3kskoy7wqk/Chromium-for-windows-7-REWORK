@@ -1,0 +1,13 @@
+diff --git a/third_party/libwebp/src/src/dsp/cpu.h b/third_party/libwebp/src/src/dsp/cpu.h
+index 7c0cb376..f50a81a1 100644
+--- a/third_party/libwebp/src/src/dsp/cpu.h
++++ b/third_party/libwebp/src/src/dsp/cpu.h
+@@ -193,7 +193,7 @@
+ #if defined(_WIN32)
+ #include <windows.h>
+ 
+-#if _WIN32_WINNT >= 0x0600
++#if 0
+ // clang-format off
+ #define WEBP_DSP_INIT_VARS(func)               \
+   static VP8CPUInfo func##_last_cpuinfo_used = \

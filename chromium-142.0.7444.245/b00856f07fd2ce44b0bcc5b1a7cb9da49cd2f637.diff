@@ -1,0 +1,89 @@
+diff --git a/media/gpu/windows/d3d11_decoder_configurator.cc b/media/gpu/windows/d3d11_decoder_configurator.cc
+index 667631b55e7aa..b1ad5f0a11083 100644
+--- a/media/gpu/windows/d3d11_decoder_configurator.cc
++++ b/media/gpu/windows/d3d11_decoder_configurator.cc
+@@ -115,7 +115,12 @@ std::unique_ptr<D3D11DecoderConfigurator> D3D11DecoderConfigurator::Create(
+   GUID decoder_guid =
+       GetD3D11DecoderGUID(config.profile(), bit_depth, chroma_sampling, device);
+ #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+-  if (decoder_guid == DXVA_ModeHEVC_VLD_Main12) {
++  // For D3D11/D3D12, 8b/10b-422 HEVC will share 10b-422 GUID no matter
++  // it is defined by Intel or DXVA spec(as part of Windows SDK).
++  if (decoder_guid == DXVA_ModeHEVC_VLD_Main422_10_Intel ||
++      decoder_guid == DXVA_ModeHEVC_VLD_Main10_422) {
++    decoder_dxgi_format = DXGI_FORMAT_Y210;
++  } else if (decoder_guid == DXVA_ModeHEVC_VLD_Main12) {
+     constexpr UINT kNVIDIADeviceId = 0x10DE;
+     ComDXGIDevice dxgi_device;
+     if (SUCCEEDED(device.As(&dxgi_device)) &&
+diff --git a/media/gpu/windows/d3d11_texture_selector.cc b/media/gpu/windows/d3d11_texture_selector.cc
+index 3f100a4d1bff7..93711ea46b30c 100644
+--- a/media/gpu/windows/d3d11_texture_selector.cc
++++ b/media/gpu/windows/d3d11_texture_selector.cc
+@@ -79,19 +79,18 @@ std::unique_ptr<TextureSelector> TextureSelector::Create(
+   };
+ 
+   switch (decoder_output_format) {
+-    case DXGI_FORMAT_YUY2:
+     case DXGI_FORMAT_AYUV: {
+       MEDIA_LOG(INFO, media_log) << "D3D11VideoDecoder producing "
+                                  << DxgiFormatToString(decoder_output_format);
+-      // YUY2/AYUV output from decoder is always 8-bit 4:2:2/4:4:4 which we
+-      // prefer to be rendered in ARGB formats to avoid chroma downsampling. For
+-      // HDR contents, we should not let YUV to RGB conversion happens inside
+-      // D3D11VideoDecoder, the only place for the conversion should be
+-      // Gfx::ColorTransform or SwapChainPresenter. For color spaces that VP
+-      // isn't able to handle the correct color conversion, the current
+-      // workaround is to output a 4:2:0 YUV format and let viz handle the
+-      // conversion at the expense of losing 4:2:2/4:4:4 chroma sampling. See
+-      // https://crbug.com/343014700.
++      // AYUV output from decoder is always 8-bit 4:4:4 which we prefer to
++      // be rendered in ARGB formats to avoid chroma downsampling. For
++      // HDR contents, we should not let YUV to RGB conversion happens
++      // inside D3D11VideoDecoder, the only place for the conversion
++      // should be Gfx::ColorTransform or SwapChainPresenter. For color
++      // spaces that VP isn't able to handle the correct color conversion,
++      // the current workaround is to output a 4:2:0 YUV format and let
++      // viz handle the conversion at the expense of losing 4:4:4 chroma
++      // sampling. See https://crbug.com/343014700.
+       if (!input_color_space.IsHDR() &&
+           gfx::ColorSpaceWin::CanConvertToDXGIColorSpace(input_color_space) &&
+           supports_fmt(DXGI_FORMAT_B8G8R8A8_UNORM)) {
+@@ -135,13 +134,13 @@ std::unique_ptr<TextureSelector> TextureSelector::Create(
+                                  << DxgiFormatToString(decoder_output_format);
+       // Y416/Y216/Y410/Y210 output from decoder is always 10/12-bit 4:2:2/4:4:4
+       // which we prefer to be rendered in ARGB formats to avoid chroma
+-      // downsampling. For HDR contents, we should not let YUV to RGB conversion
+-      // happens inside D3D11VideoDecoder, the only place for the conversion
+-      // should be Gfx::ColorTransform or SwapChainPresenter. For color spaces
+-      // that VP isn't able to handle the correct color conversion, the current
+-      // workaround is to output a 4:2:0 YUV format and let viz handle the
+-      // conversion at the expense of losing 4:2:2/4:4:4 chroma sampling. See
+-      // https://crbug.com/343014700.
++      // downsampling. For HDR contents, we should not let YUV to RGB
++      // conversion happens inside D3D11VideoDecoder, the only place
++      // for the conversion should be Gfx::ColorTransform or
++      // SwapChainPresenter. For color spaces that VP isn't able to handle
++      // the correct color conversion, the current workaround is to output
++      // a 4:2:0 YUV format and let viz handle the conversion at the expense
++      // of losing 4:4:4 chroma sampling. See https://crbug.com/343014700.
+       if (!input_color_space.IsHDR() &&
+           gfx::ColorSpaceWin::CanConvertToDXGIColorSpace(input_color_space) &&
+           supports_fmt(DXGI_FORMAT_R10G10B10A2_UNORM)) {
+diff --git a/media/gpu/windows/d3d12_video_decoder_wrapper.cc b/media/gpu/windows/d3d12_video_decoder_wrapper.cc
+index d8c2294669740..42a7fa7c08e32 100644
+--- a/media/gpu/windows/d3d12_video_decoder_wrapper.cc
++++ b/media/gpu/windows/d3d12_video_decoder_wrapper.cc
+@@ -373,7 +373,11 @@ std::unique_ptr<D3D12VideoDecoderWrapper> D3D12VideoDecoderWrapper::Create(
+       GetD3D12VideoDecodeGUID(config.profile(), bit_depth, chroma_sampling);
+   DXGI_FORMAT decode_format = GetOutputDXGIFormat(bit_depth, chroma_sampling);
+ #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+-  if (guid == DXVA_ModeHEVC_VLD_Main12) {
++  // For D3D11/D3D12, 8b/10b-422 HEVC will share 10b-422 GUID no matter
++  // it is defined by Intel or DXVA spec(as part of Windows SDK).
++  if (guid == DXVA_ModeHEVC_VLD_Main10_422) {
++    decode_format = DXGI_FORMAT_Y210;
++  } else if (guid == DXVA_ModeHEVC_VLD_Main12) {
+     constexpr UINT kNVIDIADeviceId = 0x10DE;
+     ComDXGIDevice dxgi_device;
+     if (SUCCEEDED(video_device.As(&dxgi_device)) &&

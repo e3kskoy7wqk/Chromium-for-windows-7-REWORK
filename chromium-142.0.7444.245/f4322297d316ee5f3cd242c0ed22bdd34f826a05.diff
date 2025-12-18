@@ -1,0 +1,47 @@
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index 26b26f5b6ed41..456bcd08163d5 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -9989,42 +9989,6 @@
+             ]
+         }
+     ],
+-    "FontDataServiceAllWebContents": [
+-        {
+-            "platforms": [
+-                "windows"
+-            ],
+-            "experiments": [
+-                {
+-                    "name": "DWrite_Enabled",
+-                    "params": {
+-                        "typeface": "DWrite"
+-                    },
+-                    "enable_features": [
+-                        "FontDataServiceAllWebContents"
+-                    ]
+-                },
+-                {
+-                    "name": "Freetype_Enabled",
+-                    "params": {
+-                        "typeface": "Freetype"
+-                    },
+-                    "enable_features": [
+-                        "FontDataServiceAllWebContents"
+-                    ]
+-                },
+-                {
+-                    "name": "Fontations_Enabled",
+-                    "params": {
+-                        "typeface": "Fontations"
+-                    },
+-                    "enable_features": [
+-                        "FontDataServiceAllWebContents"
+-                    ]
+-                }
+-            ]
+-        }
+-    ],
+     "ForceMigrateSyncingUserToSignedIn": [
+         {
+             "platforms": [

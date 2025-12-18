@@ -1,0 +1,328 @@
+diff --git a/chrome/browser/ash/policy/core/device_policy_decoder.cc b/chrome/browser/ash/policy/core/device_policy_decoder.cc
+index 915712be2eea6..5796a558b5c11 100644
+--- a/chrome/browser/ash/policy/core/device_policy_decoder.cc
++++ b/chrome/browser/ash/policy/core/device_policy_decoder.cc
+@@ -357,6 +357,16 @@ void DecodeLoginPolicies(const em::ChromeDeviceSettingsProto& policy,
+                   base::Value(std::move(apps)), nullptr);
+   }
+ 
++  if (policy.has_login_screen_extension_manifest_v2_availability()) {
++    const em::LoginScreenExtensionManifestV2AvailabilityProto& proto(
++        policy.login_screen_extension_manifest_v2_availability());
++    policies->Set(
++        key::kDeviceLoginScreenExtensionManifestV2Availability,
++        POLICY_LEVEL_MANDATORY, POLICY_SCOPE_MACHINE, POLICY_SOURCE_CLOUD,
++        base::Value(proto.login_screen_extension_manifest_v2_availability()),
++        nullptr);
++  }
++
+   if (policy.has_login_screen_power_management()) {
+     const em::LoginScreenPowerManagementProto& container(
+         policy.login_screen_power_management());
+diff --git a/chrome/browser/ash/policy/login/login_profile_policy_provider.cc b/chrome/browser/ash/policy/login/login_profile_policy_provider.cc
+index 61a961792a71f..1d92a549457f6 100644
+--- a/chrome/browser/ash/policy/login/login_profile_policy_provider.cc
++++ b/chrome/browser/ash/policy/login/login_profile_policy_provider.cc
+@@ -69,6 +69,8 @@ const DevicePolicyToUserPolicyMapEntry kDevicePoliciesWithPolicyOptionsMap[] = {
+     {key::kDeviceLoginScreenWebUsbAllowDevicesForUrls,
+      key::kWebUsbAllowDevicesForUrls},
+     {key::kDeviceLoginScreenExtensions, key::kExtensionInstallForcelist},
++    {key::kDeviceLoginScreenExtensionManifestV2Availability,
++     key::kExtensionManifestV2Availability},
+     {key::kDeviceLoginScreenPromptOnMultipleMatchingCertificates,
+      key::kPromptOnMultipleMatchingCertificates},
+     {key::kDeviceLoginScreenContextAwareAccessSignalsAllowlist,
+diff --git a/chrome/browser/extensions/manifest_v2_experiment_manager_browsertest.cc b/chrome/browser/extensions/manifest_v2_experiment_manager_browsertest.cc
+index 7db7d2b9d8b41..8e23c49c3e14b 100644
+--- a/chrome/browser/extensions/manifest_v2_experiment_manager_browsertest.cc
++++ b/chrome/browser/extensions/manifest_v2_experiment_manager_browsertest.cc
+@@ -15,6 +15,11 @@
+ #include "chrome/browser/extensions/mv2_experiment_stage.h"
+ #include "chrome/browser/extensions/unpacked_installer.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "components/policy/core/browser/browser_policy_connector.h"
++#include "components/policy/core/common/mock_configuration_policy_provider.h"
++#include "components/policy/core/common/policy_map.h"
++#include "components/policy/core/common/policy_types.h"
++#include "components/policy/policy_constants.h"
+ #include "components/ukm/test_ukm_recorder.h"
+ #include "content/public/test/browser_test.h"
+ #include "extensions/browser/extension_prefs.h"
+@@ -71,6 +76,12 @@ MV2ExperimentStage GetExperimentStageForTest(std::string_view test_name) {
+       {"PRE_MarkingGlobalNoticeAsAcknowledged", MV2ExperimentStage::kWarning},
+       {"MarkingGlobalNoticeAsAcknowledged",
+        MV2ExperimentStage::kDisableWithReEnable},
++      {"PRE_PRE_ExtensionsAreReEnabledIfPolicyChangesOnStartup",
++       MV2ExperimentStage::kWarning},
++      {"PRE_ExtensionsAreReEnabledIfPolicyChangesOnStartup",
++       MV2ExperimentStage::kDisableWithReEnable},
++      {"ExtensionsAreReEnabledIfPolicyChangesOnStartup",
++       MV2ExperimentStage::kDisableWithReEnable},
+       {"PRE_PRE_ExtensionsAreReEnabledIfExperimentDisabled",
+        MV2ExperimentStage::kWarning},
+       {"PRE_ExtensionsAreReEnabledIfExperimentDisabled",
+@@ -108,6 +119,38 @@ MV2ExperimentStage GetExperimentStageForTest(std::string_view test_name) {
+       << "You need to add a new test stage entry into this collection.";
+ }
+ 
++enum class MV2PolicyLevel {
++  kUnset,
++  kAllowed,
++  kDisallowed,
++  kAllowedForAdminInstalledOnly,
++};
++
++// Each test may have a different desired policy setting. Store them here so the
++// test harness properly instantiates them. If a test isn't specified, it
++// defaults to not setting the policy.
++MV2PolicyLevel GetPolicyLevelForTest(std::string_view test_name) {
++  struct {
++    const char* test_name;
++    MV2PolicyLevel policy_level;
++  } test_stages[] = {
++      {"PRE_PRE_ExtensionsAreReEnabledIfPolicyChangesOnStartup",
++       MV2PolicyLevel::kUnset},
++      {"PRE_ExtensionsAreReEnabledIfPolicyChangesOnStartup",
++       MV2PolicyLevel::kUnset},
++      {"ExtensionsAreReEnabledIfPolicyChangesOnStartup",
++       MV2PolicyLevel::kAllowed},
++  };
++
++  for (const auto& test_stage : test_stages) {
++    if (test_stage.test_name == test_name) {
++      return test_stage.policy_level;
++    }
++  }
++
++  return MV2PolicyLevel::kUnset;
++}
++
+ }  // namespace
+ 
+ class ManifestV2ExperimentManagerBrowserTest : public ExtensionBrowserTest {
+@@ -159,15 +202,24 @@ class ManifestV2ExperimentManagerBrowserTest : public ExtensionBrowserTest {
+ 
+     feature_list_.InitWithFeatures(enabled_features, disabled_features);
+ 
++    policy_provider_.SetDefaultReturns(
++        /*is_initialization_complete_return=*/true,
++        /*is_first_policy_load_complete_return=*/true);
++    policy::BrowserPolicyConnector::SetPolicyProviderForTesting(
++        &policy_provider_);
++
+     ExtensionBrowserTest::SetUp();
+   }
+ 
+   void TearDown() override {
++    policy::BrowserPolicyConnector::SetPolicyProviderForTesting(nullptr);
+     ExtensionBrowserTest::TearDown();
+   }
+ 
+   void SetUpCommandLine(base::CommandLine* command_line) override {
+     ExtensionBrowserTest::SetUpCommandLine(command_line);
++    SetMV2PolicyLevel(GetPolicyLevelForTest(
++        testing::UnitTest::GetInstance()->current_test_info()->name()));
+   }
+ 
+   void SetUpOnMainThread() override {
+@@ -184,6 +236,36 @@ class ManifestV2ExperimentManagerBrowserTest : public ExtensionBrowserTest {
+   // bypass their disabling for testing.
+   bool ShouldAllowMV2Extensions() override { return false; }
+ 
++  // Sets the current level of the MV2 admin policy.
++  void SetMV2PolicyLevel(MV2PolicyLevel policy_level) {
++    std::optional<internal::GlobalSettings::ManifestV2Setting> pref_value;
++    switch (policy_level) {
++      case MV2PolicyLevel::kUnset:
++        break;
++      case MV2PolicyLevel::kAllowed:
++        pref_value = internal::GlobalSettings::ManifestV2Setting::kEnabled;
++        break;
++      case MV2PolicyLevel::kDisallowed:
++        pref_value = internal::GlobalSettings::ManifestV2Setting::kDisabled;
++        break;
++      case MV2PolicyLevel::kAllowedForAdminInstalledOnly:
++        pref_value = internal::GlobalSettings::ManifestV2Setting::
++            kEnabledForForceInstalled;
++        break;
++    }
++
++    if (!pref_value) {
++      return;
++    }
++
++    policy::PolicyMap policies;
++    policies.Set(policy::key::kExtensionManifestV2Availability,
++                 policy::POLICY_LEVEL_MANDATORY, policy::POLICY_SCOPE_USER,
++                 policy::POLICY_SOURCE_CLOUD,
++                 base::Value(static_cast<int>(*pref_value)), nullptr);
++    policy_provider_.UpdateChromePolicy(policies);
++  }
++
+   void WaitForExtensionSystemReady() {
+     base::RunLoop run_loop;
+     ExtensionSystem::Get(profile())->ready().Post(
+@@ -258,6 +340,7 @@ class ManifestV2ExperimentManagerBrowserTest : public ExtensionBrowserTest {
+       std::vector<base::test::FeatureRef>& disabled_features) {}
+ 
+   base::test::ScopedFeatureList feature_list_;
++  testing::NiceMock<policy::MockConfigurationPolicyProvider> policy_provider_;
+   base::HistogramTester histogram_tester_;
+   std::optional<ukm::TestAutoSetUkmRecorder> ukm_recorder_;
+ };
+@@ -542,6 +625,59 @@ IN_PROC_BROWSER_TEST_F(ManifestV2ExperimentManagerBrowserTest,
+   EXPECT_TRUE(experiment_manager()->DidUserAcknowledgeNoticeGlobally());
+ }
+ 
++// Tests that extensions are properly re-enabled on startup if they should no
++// longer be disabled because the policy setting changed.
++// First stage: Install an MV2 extension.
++IN_PROC_BROWSER_TEST_F(ManifestV2ExperimentManagerBrowserTest,
++                       PRE_PRE_ExtensionsAreReEnabledIfPolicyChangesOnStartup) {
++  EXPECT_EQ(MV2ExperimentStage::kWarning, GetActiveExperimentStage());
++
++  const Extension* extension = AddMV2Extension("Test MV2 Extension");
++  ASSERT_TRUE(extension);
++}
++// Second stage: MV2 deprecation experiment takes effect; extension is disabled.
++IN_PROC_BROWSER_TEST_F(ManifestV2ExperimentManagerBrowserTest,
++                       PRE_ExtensionsAreReEnabledIfPolicyChangesOnStartup) {
++  EXPECT_EQ(MV2ExperimentStage::kDisableWithReEnable,
++            GetActiveExperimentStage());
++
++  WaitForExtensionSystemReady();
++
++  const Extension* extension = GetExtensionByName(
++      "Test MV2 Extension", extension_registry()->disabled_extensions());
++  ASSERT_TRUE(extension);
++  const ExtensionId extension_id = extension->id();
++  EXPECT_THAT(extension_prefs()->GetDisableReasons(extension_id),
++              testing::UnorderedElementsAre(
++                  disable_reason::DISABLE_UNSUPPORTED_MANIFEST_VERSION));
++}
++// Third stage: The enterprise policy was changed to allow all MV2 extensions.
++// The extension should be automatically re-enabled.
++IN_PROC_BROWSER_TEST_F(ManifestV2ExperimentManagerBrowserTest,
++                       ExtensionsAreReEnabledIfPolicyChangesOnStartup) {
++  EXPECT_EQ(MV2ExperimentStage::kDisableWithReEnable,
++            GetActiveExperimentStage());
++
++  WaitForExtensionSystemReady();
++
++  const Extension* extension = GetExtensionByName(
++      "Test MV2 Extension", extension_registry()->enabled_extensions());
++  ASSERT_TRUE(extension);
++  const ExtensionId extension_id = extension->id();
++
++  EXPECT_TRUE(extension_prefs()->GetDisableReasons(extension_id).empty());
++  // The user didn't re-enable the extension, so it shouldn't be marked as such.
++  EXPECT_FALSE(WasExtensionReEnabledByUser(extension_id));
++
++  // The extension is reported as "unaffected" since it is now exempt from
++  // the experiments.
++  histogram_tester().ExpectTotalCount(
++      "Extensions.MV2Deprecation.MV2ExtensionState.Internal", 1);
++  histogram_tester().ExpectBucketCount(
++      "Extensions.MV2Deprecation.MV2ExtensionState.Internal",
++      ManifestV2ExperimentManager::MV2ExtensionState::kUnaffected, 1);
++}
++
+ // Tests that if a user moves from a later experiment stage (disable with
+ // re-enable) to an earlier one (warning), any disabled extensions will be
+ // automatically re-enabled.
+diff --git a/chrome/browser/policy/configuration_policy_handler_list_factory.cc b/chrome/browser/policy/configuration_policy_handler_list_factory.cc
+index eabe0b6a2c8e3..8b0523932a9aa 100644
+--- a/chrome/browser/policy/configuration_policy_handler_list_factory.cc
++++ b/chrome/browser/policy/configuration_policy_handler_list_factory.cc
+@@ -3255,6 +3255,10 @@ std::unique_ptr<ConfigurationPolicyHandlerList> BuildHandlerList(
+       extensions::pref_names::kExtensionUnpublishedAvailability,
+       /*min=*/0, /*max=*/1, /*clamp=*/false));
+   handlers->AddHandler(std::make_unique<ExtensionDeveloperModePolicyHandler>());
++  handlers->AddHandler(std::make_unique<IntRangePolicyHandler>(
++      key::kExtensionManifestV2Availability,
++      extensions::pref_names::kManifestV2Availability, /*min=*/0, /*max=*/3,
++      /*clamp=*/false));
+   handlers->AddHandler(std::make_unique<SimplePolicyHandler>(
+       key::kExtensionInstallCloudPolicyChecksEnabled,
+       extensions::pref_names::kExtensionInstallCloudPolicyChecksEnabled,
+diff --git a/components/policy/resources/templates/policy_definitions/Extensions/DeviceLoginScreenExtensionManifestV2Availability.yaml b/components/policy/resources/templates/policy_definitions/Extensions/DeviceLoginScreenExtensionManifestV2Availability.yaml
+index 35f02ccd0a9f3..2e4b9cc25ad0a 100644
+--- a/components/policy/resources/templates/policy_definitions/Extensions/DeviceLoginScreenExtensionManifestV2Availability.yaml
++++ b/components/policy/resources/templates/policy_definitions/Extensions/DeviceLoginScreenExtensionManifestV2Availability.yaml
+@@ -17,8 +17,7 @@ desc: |-
+ 
+   Extensions availability are still controlled by other policies.
+ supported_on:
+-- chrome_os:111-138
+-deprecated: true
++- chrome_os:111-
+ device_only: true
+ features:
+   dynamic_refresh: true
+diff --git a/components/policy/resources/templates/policy_definitions/Extensions/ExtensionManifestV2Availability.yaml b/components/policy/resources/templates/policy_definitions/Extensions/ExtensionManifestV2Availability.yaml
+index 7077a777e15d1..55b0f91bb189d 100644
+--- a/components/policy/resources/templates/policy_definitions/Extensions/ExtensionManifestV2Availability.yaml
++++ b/components/policy/resources/templates/policy_definitions/Extensions/ExtensionManifestV2Availability.yaml
+@@ -17,9 +17,8 @@ desc: |-
+ 
+   Extensions availability are still controlled by other policies.
+ supported_on:
+-- chrome.*:110-138
+-- chrome_os:110-138
+-deprecated: true
++- chrome.*:110-
++- chrome_os:110-
+ features:
+   dynamic_refresh: true
+   per_profile: true
+diff --git a/components/policy/test/data/pref_mapping/DeviceLoginScreenExtensionManifestV2Availability.json b/components/policy/test/data/pref_mapping/DeviceLoginScreenExtensionManifestV2Availability.json
+index 5868d7956b4f4..01f5ad2527338 100644
+--- a/components/policy/test/data/pref_mapping/DeviceLoginScreenExtensionManifestV2Availability.json
++++ b/components/policy/test/data/pref_mapping/DeviceLoginScreenExtensionManifestV2Availability.json
+@@ -1,5 +1,18 @@
+ [
+   {
+-    "reason_for_missing_test": "Policy was removed"
++    "os": [
++      "chromeos"
++    ],
++    "simple_policy_pref_mapping_test": {
++      "pref_name": "extensions.manifest_v2",
++      "pref_location": "signin_profile",
++      "default_value": 0,
++      "values_to_test": [
++        0,
++        1,
++        2,
++        3
++      ]
++    }
+   }
+ ]
+diff --git a/components/policy/test/data/pref_mapping/ExtensionManifestV2Availability.json b/components/policy/test/data/pref_mapping/ExtensionManifestV2Availability.json
+index 5868d7956b4f4..2f47273f63d0c 100644
+--- a/components/policy/test/data/pref_mapping/ExtensionManifestV2Availability.json
++++ b/components/policy/test/data/pref_mapping/ExtensionManifestV2Availability.json
+@@ -1,5 +1,21 @@
+ [
+   {
+-    "reason_for_missing_test": "Policy was removed"
++    "os": [
++      "win",
++      "linux",
++      "mac",
++      "chromeos",
++      "fuchsia"
++    ],
++    "simple_policy_pref_mapping_test": {
++      "pref_name": "extensions.manifest_v2",
++      "default_value": 0,
++      "values_to_test": [
++        0,
++        1,
++        2,
++        3
++      ]
++    }
+   }
+ ]
