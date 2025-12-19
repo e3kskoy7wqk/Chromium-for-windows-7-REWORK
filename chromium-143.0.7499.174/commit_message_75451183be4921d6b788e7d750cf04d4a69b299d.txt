@@ -1,0 +1,1 @@
+win7dep: Call GetFirmwareType directly    2023/2/22 0:44:32    75451183be4921d6b788e7d750cf04d4a69b299d

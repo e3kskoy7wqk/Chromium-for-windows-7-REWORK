@@ -1,0 +1,1 @@
+win7dep: call RegisterSuspendResumeNotification directly    2023/2/9 1:15:27    294dfebbaadbc4f808091f9ab0ecfff3e791d936

@@ -1,0 +1,174 @@
+diff --git a/media/gpu/windows/d3d11_av1_accelerator.cc b/media/gpu/windows/d3d11_av1_accelerator.cc
+index 5cb4395b45c2f..f575b22ed8bff 100644
+--- a/media/gpu/windows/d3d11_av1_accelerator.cc
++++ b/media/gpu/windows/d3d11_av1_accelerator.cc
+@@ -88,7 +88,7 @@ bool D3D11AV1Accelerator::SubmitDecoderBuffer(
+     return false;
+   }
+ 
+-  params_buffer.data().copy_prefix_from(base::byte_span_from_ref(pic_params));
++  memcpy(params_buffer.data(), &pic_params, sizeof(pic_params));
+ 
+   // Buffer #2 - Slice control data.
+   const auto tile_size = sizeof(DXVA_Tile_AV1) * tile_buffers.size();
+@@ -98,7 +98,7 @@ bool D3D11AV1Accelerator::SubmitDecoderBuffer(
+     return false;
+   }
+ 
+-  auto* tiles = reinterpret_cast<DXVA_Tile_AV1*>(tile_buffer.data().data());
++  auto* tiles = reinterpret_cast<DXVA_Tile_AV1*>(tile_buffer.data());
+ 
+   // Buffer #3 - Tile buffer bitstream data.
+   const size_t bitstream_size = std::accumulate(
+diff --git a/media/gpu/windows/d3d11_h264_accelerator.cc b/media/gpu/windows/d3d11_h264_accelerator.cc
+index b90d5ff98515b..c462f7ef219cc 100644
+--- a/media/gpu/windows/d3d11_h264_accelerator.cc
++++ b/media/gpu/windows/d3d11_h264_accelerator.cc
+@@ -302,7 +302,7 @@ H264DecoderStatus D3D11H264Accelerator::SubmitSlice(
+       return H264DecoderStatus::kFail;
+     }
+ 
+-    params_buffer.data().copy_prefix_from(base::byte_span_from_ref(pic_param));
++    memcpy(params_buffer.data(), &pic_param, sizeof(pic_param));
+ 
+     if (!params_buffer.Commit()) {
+       return H264DecoderStatus::kFail;
+@@ -359,8 +359,7 @@ H264DecoderStatus D3D11H264Accelerator::SubmitSlice(
+       return H264DecoderStatus::kFail;
+     }
+ 
+-    iq_matrix_buffer.data().copy_prefix_from(
+-        base::byte_span_from_ref(iq_matrix));
++    memcpy(iq_matrix_buffer.data(), &iq_matrix, sizeof(iq_matrix));
+ 
+     if (!iq_matrix_buffer.Commit()) {
+       return H264DecoderStatus::kFail;
+diff --git a/media/gpu/windows/d3d11_h265_accelerator.cc b/media/gpu/windows/d3d11_h265_accelerator.cc
+index 4eeba9bb276d4..11f52e3636548 100644
+--- a/media/gpu/windows/d3d11_h265_accelerator.cc
++++ b/media/gpu/windows/d3d11_h265_accelerator.cc
+@@ -544,8 +544,9 @@ H265DecoderStatus D3D11H265Accelerator::SubmitSlice(
+ 
+     std::visit(
+         [&](const auto& param) {
+-          params_buffer.data().copy_prefix_from(
+-              base::byte_span_from_ref(param).first(pic_params_size));
++          base::span<uint8_t>(params_buffer.data(), pic_params_size)
++              .copy_from(base::span<const uint8_t>(
++                  reinterpret_cast<const uint8_t*>(&param), pic_params_size));
+         },
+         pic_param);
+ 
+@@ -652,8 +653,7 @@ H265DecoderStatus D3D11H265Accelerator::SubmitSlice(
+       return H265DecoderStatus::kFail;
+     }
+ 
+-    iq_matrix_buffer.data().copy_prefix_from(
+-        base::byte_span_from_ref(iq_matrix));
++    memcpy(iq_matrix_buffer.data(), &iq_matrix, sizeof(iq_matrix));
+ 
+     if (!iq_matrix_buffer.Commit()) {
+       return H265DecoderStatus::kFail;
+diff --git a/media/gpu/windows/d3d11_video_decoder_wrapper.cc b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+index 4d3e777e82916..77f38f70193a2 100644
+--- a/media/gpu/windows/d3d11_video_decoder_wrapper.cc
++++ b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+@@ -138,7 +138,7 @@ class D3D11VideoDecoderWrapperImpl : public D3D11VideoDecoderWrapper {
+         return false;
+       }
+ 
+-      buffer.data().copy_prefix_from(slice_info_bytes_);
++      memcpy(buffer.data(), slice_info_bytes_.data(), slice_info_bytes_.size());
+       slice_info_bytes_.clear();
+ 
+       if (!buffer.Commit()) {
+diff --git a/media/gpu/windows/d3d11_vp9_accelerator.cc b/media/gpu/windows/d3d11_vp9_accelerator.cc
+index 0992ed57d1e99..d672c9f8df633 100644
+--- a/media/gpu/windows/d3d11_vp9_accelerator.cc
++++ b/media/gpu/windows/d3d11_vp9_accelerator.cc
+@@ -211,8 +211,7 @@ bool D3D11VP9Accelerator::SubmitDecoderBuffer(
+     return false;
+   }
+ 
+-  pic_params_buffer.data().copy_prefix_from(
+-      base::byte_span_from_ref(pic_params));
++  memcpy(pic_params_buffer.data(), &pic_params, sizeof(pic_params));
+ 
+   if (!pic_params_buffer.Commit()) {
+     return false;
+diff --git a/media/gpu/windows/scoped_d3d_buffers.cc b/media/gpu/windows/scoped_d3d_buffers.cc
+index 0731d52e12e97..d675b71c25f65 100644
+--- a/media/gpu/windows/scoped_d3d_buffers.cc
++++ b/media/gpu/windows/scoped_d3d_buffers.cc
+@@ -1,6 +1,12 @@
+ // Copyright 2023 The Chromium Authors
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
++
++#ifdef UNSAFE_BUFFERS_BUILD
++// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
++#pragma allow_unsafe_buffers
++#endif
++
+ #include "media/gpu/windows/scoped_d3d_buffers.h"
+ 
+ #include <algorithm>
+@@ -32,9 +38,7 @@ size_t ScopedSequenceD3DInputBuffer::BytesAvailable() const {
+ 
+ size_t ScopedSequenceD3DInputBuffer::Write(base::span<const uint8_t> source) {
+   size_t bytes_to_write = std::min(source.size(), BytesAvailable());
+-  buffer_->data()
+-      .subspan(offset_, bytes_to_write)
+-      .copy_from(source.first(bytes_to_write));
++  memcpy(buffer_->data() + offset_, source.data(), bytes_to_write);
+   offset_ += bytes_to_write;
+   return bytes_to_write;
+ }
+diff --git a/media/gpu/windows/scoped_d3d_buffers.h b/media/gpu/windows/scoped_d3d_buffers.h
+index 41fb5756f55b3..ecc630d9c82a8 100644
+--- a/media/gpu/windows/scoped_d3d_buffers.h
++++ b/media/gpu/windows/scoped_d3d_buffers.h
+@@ -22,7 +22,9 @@ class MEDIA_GPU_EXPORT ScopedD3DBuffer {
+  public:
+   explicit ScopedD3DBuffer(base::span<uint8_t> data = {});
+   virtual ~ScopedD3DBuffer();
+-  base::span<uint8_t> data() { return data_; }
++  uint8_t* data() { return data_.data(); }
++  size_t size() const { return data_.size(); }
++  bool empty() const { return data_.empty(); }
+ 
+   // Declare that we have done the access to the buffer. It will also
+   // automatically be called when this object destructs. In a
+@@ -43,8 +45,8 @@ class MEDIA_GPU_EXPORT D3DInputBuffer {
+  public:
+   explicit D3DInputBuffer(std::unique_ptr<ScopedD3DBuffer> buffer);
+   virtual ~D3DInputBuffer();
+-  size_t size() const { return buffer_->data().size(); }
+-  bool empty() const { return buffer_->data().empty(); }
++  size_t size() const { return buffer_->size(); }
++  bool empty() const { return buffer_->empty(); }
+   [[nodiscard]] virtual bool Commit();
+ 
+  protected:
+@@ -60,7 +62,7 @@ class MEDIA_GPU_EXPORT ScopedRandomAccessD3DInputBuffer
+       std::unique_ptr<ScopedD3DBuffer> buffer)
+       : D3DInputBuffer(std::move(buffer)) {}
+   ~ScopedRandomAccessD3DInputBuffer() override = default;
+-  base::span<uint8_t> data() const { return buffer_->data(); }
++  uint8_t* data() const { return buffer_->data(); }
+ };
+ 
+ // A sequence buffer, which provides only a sequential Write() method like a
+diff --git a/media/gpu/windows/scoped_d3d_buffers_unittest.cc b/media/gpu/windows/scoped_d3d_buffers_unittest.cc
+index a622a0bf5f328..0e7195d8c4549 100644
+--- a/media/gpu/windows/scoped_d3d_buffers_unittest.cc
++++ b/media/gpu/windows/scoped_d3d_buffers_unittest.cc
+@@ -48,7 +48,7 @@ TEST_F(ScopedD3DBufferTest, D3DInputBuffer) {
+ TEST_F(ScopedD3DBufferTest, ScopedRandomAccessD3DInputBuffer) {
+   ScopedRandomAccessD3DInputBuffer buffer(
+       std::unique_ptr<ScopedD3DBuffer>(new MemoryBuffer(size_)));
+-  EXPECT_FALSE(buffer.data().empty());
++  EXPECT_NE(buffer.data(), nullptr);
+   EXPECT_TRUE(buffer.Commit());
+ }
+ 
