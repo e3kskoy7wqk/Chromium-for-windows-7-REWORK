@@ -1,0 +1,42 @@
+diff --git a/base/win/win_util.cc b/base/win/win_util.cc
+index 42d3fa3bc82b4..4ccdeafc30cf4 100644
+--- a/base/win/win_util.cc
++++ b/base/win/win_util.cc
+@@ -436,6 +436,37 @@ bool SetClsidForPropertyStore(IPropertyStore* property_store,
+                               const PROPERTYKEY& property_key,
+                               const CLSID& property_clsid_value) {
+   ScopedPropVariant property_value;
++typedef int (__cdecl *MYPROC)(LPCWSTR);
++
++    HINSTANCE hinstLib;
++    MYPROC ProcAdd;
++    BOOL fRunTimeLinkSuccess = FALSE;
++
++    // Get a handle to the DLL module.
++
++    hinstLib = LoadLibraryW(L"Propsys.dll");
++
++    // If the handle is valid, try to get the function address.
++
++    if (hinstLib != NULL)
++    {
++        ProcAdd = (MYPROC) GetProcAddress(hinstLib, "InitPropVariantFromCLSID");
++
++        // If the function address is valid, call the function.
++
++        if (NULL != ProcAdd)
++        {
++            fRunTimeLinkSuccess = TRUE;
++        }
++        // Free the DLL module.
++
++        FreeLibrary(hinstLib);
++    }
++
++    // If unable to call the DLL function, use an alternative.
++    if (! fRunTimeLinkSuccess)
++        return false;
++
+   if (FAILED(InitPropVariantFromCLSID(property_clsid_value,
+                                       property_value.Receive()))) {
+     return false;

@@ -1,0 +1,64 @@
+diff --git a/content/browser/renderer_host/legacy_render_widget_host_win.cc b/content/browser/renderer_host/legacy_render_widget_host_win.cc
+index 475629d48e880..61e1ff3af5a04 100644
+--- a/content/browser/renderer_host/legacy_render_widget_host_win.cc
++++ b/content/browser/renderer_host/legacy_render_widget_host_win.cc
+@@ -609,9 +609,26 @@ LRESULT LegacyRenderWidgetHostHWND::OnSize(UINT message,
+     // Clean up UIA resources associated with this window's fragment root if all
+     // providers have not previously been disconnected; see
+     // https://learn.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiadisconnectprovider.
++typedef HRESULT (__cdecl *MYPROC)(IRawElementProviderSimple *); 
++ 
++    HINSTANCE hinstLib; 
++    MYPROC ProcAdd = NULL; 
++ 
++    // Get a handle to the DLL module.
++ 
++    hinstLib = LoadLibraryW(L"Uiautomationcore.dll"); 
++ 
++    // If the handle is valid, try to get the function address.
++ 
++    if (hinstLib != NULL) 
++    { 
++        ProcAdd = (MYPROC) GetProcAddress(hinstLib, "UiaDisconnectProvider"); 
++    } 
++
+     if (ax_platform.IsUiaProviderEnabled() &&
++        NULL != ProcAdd &&
+         base::FeatureList::IsEnabled(features::kUiaDisconnectRootProviders)) {
+-      ::UiaDisconnectProvider(ax_fragment_root_->GetProvider());
++      ProcAdd(ax_fragment_root_->GetProvider());
+     }
+ 
+     // Disassociate this window from MSAA clients that are observing events; see
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 42c9a58a65b0f..d14410173e902 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -1944,9 +1944,26 @@ void HWNDMessageHandler::OnDestroy() {
+     // Clean up UIA resources associated with this window's fragment root if all
+     // providers have not previously been disconnected; see
+     // https://learn.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiadisconnectprovider.
++typedef HRESULT (__cdecl *MYPROC)(IRawElementProviderSimple *); 
++ 
++    HINSTANCE hinstLib; 
++    MYPROC ProcAdd = NULL; 
++ 
++    // Get a handle to the DLL module.
++ 
++    hinstLib = LoadLibraryW(L"Uiautomationcore.dll"); 
++ 
++    // If the handle is valid, try to get the function address.
++ 
++    if (hinstLib != NULL) 
++    { 
++        ProcAdd = (MYPROC) GetProcAddress(hinstLib, "UiaDisconnectProvider"); 
++    } 
++
+     if (ax_platform.IsUiaProviderEnabled() &&
++        NULL != ProcAdd &&
+         base::FeatureList::IsEnabled(features::kUiaDisconnectRootProviders)) {
+-      ::UiaDisconnectProvider(ax_fragment_root_->GetProvider());
++      ProcAdd(ax_fragment_root_->GetProvider());
+     }
+ 
+     // Disassociate this window from MSAA clients that are observing events; see
