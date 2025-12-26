@@ -1,0 +1,27 @@
+diff --git a/skia/BUILD.gn b/skia/BUILD.gn
+index aa87474c94c84..365f13240016e 100644
+--- a/skia/BUILD.gn
++++ b/skia/BUILD.gn
+@@ -406,6 +406,7 @@ component("skia") {
+ 
+   if (is_win) {
+     # See SK_TYPEFACE_FACTORY_DIRECTWRITE
++    sources +=  ["//third_party/skia/src/ports/SkFontHost_win.cpp"]
+     sources += skia_ports_windows_fonts_sources
+     sources += skia_ports_windows_sources
+   } else {
+diff --git a/ui/gfx/win/direct_write.cc b/ui/gfx/win/direct_write.cc
+index 6e091a20069c0..bc17d6e4ccd4b 100644
+--- a/ui/gfx/win/direct_write.cc
++++ b/ui/gfx/win/direct_write.cc
+@@ -62,7 +62,9 @@ void InitializeDirectWrite() {
+ 
+   sk_sp<SkFontMgr> direct_write_font_mgr =
+       SkFontMgr_New_DirectWrite(factory.Get());
+-  CHECK(!!direct_write_font_mgr);
++  if (!direct_write_font_mgr) {
++    direct_write_font_mgr = SkFontMgr_New_GDI();
++  }
+ 
+   // Override the default skia font manager. This must be called before any
+   // use of the skia font manager is done (e.g. before any call to

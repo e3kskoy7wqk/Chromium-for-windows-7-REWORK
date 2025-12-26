@@ -1,0 +1,34 @@
+diff --git a/third_party/libc++/src/src/thread.cpp b/third_party/libc++/src/src/thread.cpp
+index e494574ec..0e84e3d26 100644
+--- a/third_party/libc++/src/src/thread.cpp
++++ b/third_party/libc++/src/src/thread.cpp
+@@ -74,7 +74,28 @@ unsigned thread::hardware_concurrency() noexcept {
+     return 0;
+   return static_cast<unsigned>(result);
+ #elif defined(_LIBCPP_WIN32API)
+-  return static_cast<unsigned>(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
++    /* Process groups (W7+). */
++    typedef DWORD (WINAPI *PFNGETACTIVEPROCESSORCOUNT)(DWORD);
++    PFNGETACTIVEPROCESSORCOUNT pfnGetActiveProcessorCount;
++    pfnGetActiveProcessorCount = (PFNGETACTIVEPROCESSORCOUNT)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
++                                                                            "GetActiveProcessorCount");
++    if (pfnGetActiveProcessorCount)
++  return static_cast<unsigned>(pfnGetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
++    /* Legacy (<= Vista). */
++    else
++      {
++    int cpus;
++        int i;
++        SYSTEM_INFO si;
++        GetSystemInfo(&si);
++        for (i = cpus = 0; i < sizeof(si.dwActiveProcessorMask) * 8; i++)
++          {
++            if (si.dwActiveProcessorMask & 1)
++              cpus++;
++            si.dwActiveProcessorMask >>= 1;
++          }
++  return static_cast<unsigned>(cpus);
++      }
+ #else // defined(CTL_HW) && defined(HW_NCPU)
+   // TODO: grovel through /proc or check cpuid on x86 and similar
+   // instructions on other architectures.
