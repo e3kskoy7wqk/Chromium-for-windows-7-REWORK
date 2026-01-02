@@ -1,0 +1,25 @@
+diff --git a/mojo/core/ipcz_driver/invitation.cc b/mojo/core/ipcz_driver/invitation.cc
+index e4ff56b7a9201..3267742c149c9 100644
+--- a/mojo/core/ipcz_driver/invitation.cc
++++ b/mojo/core/ipcz_driver/invitation.cc
+@@ -111,11 +111,17 @@ base::Process OpenRemoteProcess(const MojoInvitationTransportEndpoint& endpoint,
+   // transport endpoint.
+   HANDLE handle =
+       LongToHandle(static_cast<long>(endpoint.platform_handles[0].value));
+-  auto get_remote_pid = remote_is_server ? &GetNamedPipeServerProcessId
+-                                         : &GetNamedPipeClientProcessId;
++typedef	BOOL (WINAPI *GetNamedPipeClientProcessIdfunc)(HANDLE, PULONG);
++GetNamedPipeClientProcessIdfunc pfnGetNamedPipeClientProcessId = NULL;
++GetNamedPipeClientProcessIdfunc pfnGetNamedPipeServerProcessId = NULL;
++  HMODULE hmod = GetModuleHandleW(L"Kernel32.dll");
++  pfnGetNamedPipeClientProcessId = (GetNamedPipeClientProcessIdfunc)GetProcAddress(hmod, "GetNamedPipeClientProcessId");
++  pfnGetNamedPipeServerProcessId = (GetNamedPipeClientProcessIdfunc)GetProcAddress(hmod, "GetNamedPipeServerProcessId");
++  auto get_remote_pid = remote_is_server ? pfnGetNamedPipeServerProcessId
++                                         : pfnGetNamedPipeClientProcessId;
+   // Try to get the remote client process id given the extracted handle via
+   // GetNamedPipe(Server|Client)ProcessId API.
+-  if ((!get_remote_pid(handle, &remote_process_id) ||
++  if (get_remote_pid && (!get_remote_pid(handle, &remote_process_id) ||
+        remote_process_id == base::Process::Current().Pid())) {
+     DVLOG(2) << "Failed to get remote process id via the connected named pipe";
+     return base::Process();

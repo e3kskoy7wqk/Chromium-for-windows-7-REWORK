@@ -1,0 +1,1 @@
+Fix 'Image will be cropped if WindowCapturerWinGdi used'    2024/1/11 3:52:44    844225a76a98aa3be5aca09c19ab72a5e7b6c38a

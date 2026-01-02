@@ -1,0 +1,318 @@
+diff --git a/ui/accessibility/platform/ax_platform_node_win.cc b/ui/accessibility/platform/ax_platform_node_win.cc
+index 77c0f3ad625ed..c58ffa2a7b6eb 100644
+--- a/ui/accessibility/platform/ax_platform_node_win.cc
++++ b/ui/accessibility/platform/ax_platform_node_win.cc
+@@ -2506,7 +2506,7 @@ IFACEMETHODIMP AXPlatformNodeWin::get_Target(
+ 
+   // If there is no reverse relation target, IAnnotationProvider
+   // should not be exposed in the first place.
+-  DCHECK_GT(reverse_relations.size(), 0u);
++  DCHECK(reverse_relations.size() > 0);
+   AXPlatformNodeWin* target_node;
+   auto iter = reverse_relations.begin();
+   target_node = static_cast<AXPlatformNodeWin*>(*iter);
+@@ -5244,26 +5244,42 @@ HRESULT AXPlatformNodeWin::GetPropertyValueImpl(PROPERTYID property_id,
+       // if the internal role cannot be accurately described by its UIA Control
+       // Type or aria role, we should instead provide our own localized
+       // description.
+-      if (GetUIARoleProperties().localization_strategy ==
+-          UIALocalizationStrategy::kSupply) {
+-        // According to the HTML-AAM, UIA expects <output> to have a
+-        // Localized Control Type of "output" whereas the Core-AAM states
+-        // the Localized Control Type of the ARIA status role should be
+-        // "status".
+-        const std::string& html_tag =
+-            GetStringAttribute(ax::mojom::StringAttribute::kHtmlTag);
+-        std::u16string localized_control_type =
+-            html_tag == "output" ? l10n_util::GetStringUTF16(IDS_AX_ROLE_OUTPUT)
+-                                 : GetRoleDescription();
+-
+-        if (!localized_control_type.empty()) {
+-          result->vt = VT_BSTR;
+-          result->bstrVal =
+-              SysAllocString(base::as_wcstr(localized_control_type));
+-        }
+-      }  // If a role description has not been provided, leave as VT_EMPTY.
+-      break;
+-    }
++      UIALocalizationStrategy localization_strategy =
++          GetUIARoleProperties().localization_strategy;
++      switch (localization_strategy) {
++        case UIALocalizationStrategy::kDeferToControlType:
++          break;
++        case UIALocalizationStrategy::kDeferToAriaRole:
++          if (base::win::GetVersion() >= base::win::Version::WIN8) {
++            // On Windows 8 onward, UIA can provide localization from the
++            // aria role.
++            break;
++          }
++          // On versions before 8, we should not rely on UIA to generate
++          // localization from the aria role, instead we should supply our own
++          // localization.
++          ABSL_FALLTHROUGH_INTENDED;
++        case UIALocalizationStrategy::kSupply:
++          // According to the HTML-AAM, UIA expects <output> to have a
++          // Localized Control Type of "output" whereas the Core-AAM states
++          // the Localized Control Type of the ARIA status role should be
++          // "status".
++          const std::string& html_tag =
++              GetStringAttribute(ax::mojom::StringAttribute::kHtmlTag);
++          std::u16string localized_control_type =
++              html_tag == "output"
++                  ? l10n_util::GetStringUTF16(IDS_AX_ROLE_OUTPUT)
++                  : GetRoleDescription();
++
++          if (!localized_control_type.empty()) {
++            result->vt = VT_BSTR;
++            result->bstrVal =
++                SysAllocString(base::as_wcstr(localized_control_type));
++          }
++          // If a role description has not been provided, leave as VT_EMPTY.
++      }
++    } break;
++
+     case UIA_NamePropertyId:
+       if (IsNameExposed()) {
+         result->vt = VT_BSTR;
+diff --git a/ui/accessibility/platform/inspect/ax_inspect_test_helper.cc b/ui/accessibility/platform/inspect/ax_inspect_test_helper.cc
+index 6ba75b1f78f42..682f35c11f8d4 100644
+--- a/ui/accessibility/platform/inspect/ax_inspect_test_helper.cc
++++ b/ui/accessibility/platform/inspect/ax_inspect_test_helper.cc
+@@ -4,9 +4,6 @@
+ 
+ #include "ui/accessibility/platform/inspect/ax_inspect_test_helper.h"
+ 
+-#include <string>
+-#include <vector>
+-
+ #include "base/command_line.h"
+ #include "base/files/file_util.h"
+ #include "base/logging.h"
+@@ -20,6 +17,9 @@
+ #include "ui/accessibility/platform/inspect/ax_inspect_scenario.h"
+ #include "ui/base/buildflags.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
+ #if BUILDFLAG(USE_ATK)
+ extern "C" {
+ #include <atk/atk.h>
+@@ -352,6 +352,15 @@ FilePath::StringType AXInspectTestHelper::GetExpectedFileSuffix(
+ 
+ FilePath::StringType AXInspectTestHelper::GetVersionSpecificExpectedFileSuffix(
+     const base::FilePath::StringType& expectations_qualifier) const {
++#if BUILDFLAG(IS_WIN)
++  if (expectation_type_ == "uia" &&
++      base::win::GetVersion() == base::win::Version::WIN7) {
++    FilePath::StringType suffix;
++    if (!expectations_qualifier.empty())
++      suffix = FILE_PATH_LITERAL("-") + expectations_qualifier;
++    return suffix + FILE_PATH_LITERAL("-expected-uia-win7.txt");
++  }
++#endif
+ #if BUILDFLAG(USE_ATK)
+   if (expectation_type_ == "linux") {
+     FilePath::StringType version_name;
+diff --git a/ui/aura/native_window_occlusion_tracker_win.cc b/ui/aura/native_window_occlusion_tracker_win.cc
+index 41c3d067b72d4..a4fea246c5295 100644
+--- a/ui/aura/native_window_occlusion_tracker_win.cc
++++ b/ui/aura/native_window_occlusion_tracker_win.cc
+@@ -22,6 +22,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/task_traits.h"
+ #include "base/task/thread_pool.h"
++#include "base/win/windows_version.h"
+ #include "ui/aura/window_occlusion_tracker.h"
+ #include "ui/aura/window_tree_host.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+@@ -427,6 +428,7 @@ NativeWindowOcclusionTrackerWin::WindowOcclusionCalculator::
+     return true;
+ 
+   if (!virtual_desktop_manager_) {
++  if (base::win::GetVersion() >= base::win::Version::WIN10)
+     if (FAILED(::CoCreateInstance(__uuidof(VirtualDesktopManager), nullptr,
+                                   CLSCTX_ALL,
+                                   IID_PPV_ARGS(&virtual_desktop_manager_)))) {
+diff --git a/ui/base/ime/init/input_method_factory.cc b/ui/base/ime/init/input_method_factory.cc
+index 5d4a41a4d64c2..31ad0c6590ab7 100644
+--- a/ui/base/ime/init/input_method_factory.cc
++++ b/ui/base/ime/init/input_method_factory.cc
+@@ -13,6 +13,7 @@
+ #include "ui/gfx/switches.h"
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
+ #include "ui/base/ime/win/input_method_win_imm32.h"
+ #include "ui/base/ime/win/input_method_win_tsf.h"
+ #elif BUILDFLAG(IS_APPLE)
+@@ -54,7 +55,8 @@ std::unique_ptr<InputMethod> CreateInputMethod(
+     return base::WrapUnique(new MockInputMethod(ime_key_event_dispatcher));
+ 
+ #if BUILDFLAG(IS_WIN)
+-  if (base::FeatureList::IsEnabled(features::kTSFImeSupport)) {
++  if (base::FeatureList::IsEnabled(features::kTSFImeSupport) &&
++      base::win::GetVersion() > base::win::Version::WIN7) {
+     return std::make_unique<InputMethodWinTSF>(ime_key_event_dispatcher,
+                                                widget);
+   }
+diff --git a/ui/base/ime/win/input_method_win_base.cc b/ui/base/ime/win/input_method_win_base.cc
+index 39211bbd51040..56db6e995aaa3 100644
+--- a/ui/base/ime/win/input_method_win_base.cc
++++ b/ui/base/ime/win/input_method_win_base.cc
+@@ -40,10 +37,11 @@ std::unique_ptr<VirtualKeyboardController> CreateKeyboardController(
+   if (base::win::GetVersion() >= base::win::Version::WIN10_RS4) {
+     return std::make_unique<OnScreenKeyboardDisplayManagerInputPane>(
+         attached_window_handle);
+-  } else {
++  } else if (base::win::GetVersion() >= base::win::Version::WIN8) {
+     return std::make_unique<OnScreenKeyboardDisplayManagerTabTip>(
+         attached_window_handle);
+   }
++  return nullptr;
+ }
+ 
+ // Checks if a given primary language ID is a RTL language.
+diff --git a/ui/base/ime/win/on_screen_keyboard_display_manager_tab_tip.cc b/ui/base/ime/win/on_screen_keyboard_display_manager_tab_tip.cc
+index b555d53332335..fb7dd1270f7c9 100644
+--- a/ui/base/ime/win/on_screen_keyboard_display_manager_tab_tip.cc
++++ b/ui/base/ime/win/on_screen_keyboard_display_manager_tab_tip.cc
+@@ -20,6 +20,7 @@
+ #include "base/win/registry.h"
+ #include "base/win/scoped_co_mem.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ #include "ui/base/ime/virtual_keyboard_controller_observer.h"
+ #include "ui/base/win/hidden_window.h"
+ #include "ui/display/win/screen_win.h"
+@@ -255,7 +256,9 @@ void OnScreenKeyboardDetector::HandleKeyboardHidden() {
+ // OnScreenKeyboardDisplayManagerTabTip member definitions.
+ OnScreenKeyboardDisplayManagerTabTip::OnScreenKeyboardDisplayManagerTabTip(
+     HWND hwnd)
+-    : hwnd_(hwnd) {}
++    : hwnd_(hwnd) {
++  DCHECK_GE(base::win::GetVersion(), base::win::Version::WIN8);
++}
+ 
+ OnScreenKeyboardDisplayManagerTabTip::~OnScreenKeyboardDisplayManagerTabTip() {}
+ 
+diff --git a/ui/base/ime/win/on_screen_keyboard_display_manager_unittest.cc b/ui/base/ime/win/on_screen_keyboard_display_manager_unittest.cc
+index 97fc29307d550..2af05b9961e5a 100644
+--- a/ui/base/ime/win/on_screen_keyboard_display_manager_unittest.cc
++++ b/ui/base/ime/win/on_screen_keyboard_display_manager_unittest.cc
+@@ -141,6 +141,10 @@ class OnScreenKeyboardTest : public ::testing::Test {
+ // This test validates the on screen keyboard path (tabtip.exe) which is read
+ // from the registry.
+ TEST_F(OnScreenKeyboardTest, OSKPath) {
++  // The on screen keyboard is only available on Windows 8+.
++  if (base::win::GetVersion() < base::win::Version::WIN8)
++    return;
++
+   std::unique_ptr<OnScreenKeyboardDisplayManagerTabTip>
+       keyboard_display_manager(CreateTabTip());
+   EXPECT_NE(nullptr, keyboard_display_manager);
+diff --git a/ui/base/ime/win/tsf_input_scope.cc b/ui/base/ime/win/tsf_input_scope.cc
+index b138707be2238..bbedf1e33ac53 100644
+--- a/ui/base/ime/win/tsf_input_scope.cc
++++ b/ui/base/ime/win/tsf_input_scope.cc
+@@ -10,8 +10,10 @@
+ #include "base/containers/contains.h"
+ #include "base/task/current_thread.h"
+ #include "base/trace_event/trace_event.h"
++#include "base/win/windows_version.h"
+ 
+-namespace ui::tsf_inputscope {
++namespace ui {
++namespace tsf_inputscope {
+ namespace {
+ 
+ void AppendNonTrivialInputScope(std::vector<InputScope>* input_scopes,
+@@ -187,8 +189,9 @@ ITfInputScope* CreateInputScope(TextInputType text_input_type,
+                                 bool should_do_learning) {
+   std::vector<InputScope> input_scopes;
+   // Should set input scope to IS_PRIVATE if we are in "incognito" or "guest"
+-  // mode.
+-  if (!should_do_learning) {
++  // mode. Note that the IS_PRIVATE input scope is only support from WIN10.
++  if (!should_do_learning &&
++      (base::win::GetVersion() >= base::win::Version::WIN10)) {
+     input_scopes.push_back(IS_PRIVATE);
+   } else {
+     input_scopes = GetInputScopes(text_input_type, text_input_mode);
+@@ -208,4 +211,5 @@ void SetInputScopeForTsfUnawareWindow(HWND window_handle,
+                      NULL, 0, NULL, NULL);
+ }
+ 
+-}  // namespace ui::tsf_inputscope
++}  // namespace tsf_inputscope
++}  // namespace ui
+diff --git a/ui/base/ime/win/tsf_input_scope_unittest.cc b/ui/base/ime/win/tsf_input_scope_unittest.cc
+index e222981ea01a4..57c891c45d456 100644
+--- a/ui/base/ime/win/tsf_input_scope_unittest.cc
++++ b/ui/base/ime/win/tsf_input_scope_unittest.cc
+@@ -8,6 +8,7 @@
+ #include <stddef.h>
+ #include <wrl/client.h>
+ 
++#include "base/win/windows_version.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace ui {
+@@ -133,6 +134,8 @@ const CreateInputScopesTestCase kCreateInputScopesTestCases[] = {
+     {TEXT_INPUT_TYPE_NUMBER, TEXT_INPUT_MODE_NUMERIC, false, 1, {IS_PRIVATE}},
+ };
+ TEST_P(TSFCreateInputScopeTest, CreateInputScopes) {
++  if (base::win::GetVersion() < base::win::Version::WIN10)
++    return;
+   const CreateInputScopesTestCase& test_case = GetParam();
+   Microsoft::WRL::ComPtr<ITfInputScope> input_scope =
+       tsf_inputscope::CreateInputScope(test_case.input_type,
+diff --git a/ui/base/pointer/touch_ui_controller.cc b/ui/base/pointer/touch_ui_controller.cc
+index 9d2f88df875ab..d3e582ed3c27e 100644
+--- a/ui/base/pointer/touch_ui_controller.cc
++++ b/ui/base/pointer/touch_ui_controller.cc
+@@ -18,6 +18,7 @@
+ 
+ #include "base/callback_list.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ #include "ui/gfx/win/singleton_hwnd.h"
+ #endif
+ 
+@@ -78,7 +79,8 @@ TouchUiController* TouchUiController::Get() {
+ 
+ TouchUiController::TouchUiController(TouchUiState touch_ui_state)
+     : touch_ui_state_(touch_ui_state) {
+-  if (base::CurrentUIThread::IsSet()) {
++  if (base::CurrentUIThread::IsSet() &&
++      base::win::GetVersion() >= base::win::Version::WIN10) {
+ #if BUILDFLAG(USE_BLINK)
+     // Pass the work to a separate task to avoid affecting browser startup time.
+     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+diff --git a/ui/base/win/lock_state.cc b/ui/base/win/lock_state.cc
+index e2136ed96ee92..791720d4a9b79 100644
+--- a/ui/base/win/lock_state.cc
++++ b/ui/base/win/lock_state.cc
+@@ -9,6 +9,7 @@
+ 
+ #include "base/functional/bind.h"
+ #include "base/no_destructor.h"
++#include "base/win/windows_version.h"
+ #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+ #include "ui/base/win/session_change_observer.h"
+ 
+@@ -24,7 +25,13 @@ bool IsSessionLocked() {
+ 
+   absl::Cleanup wts_deleter = [buffer] { ::WTSFreeMemory(buffer); };
+   auto* info = reinterpret_cast<WTSINFOEXW*>(buffer);
+-  return info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK;
++    auto session_flags = info->Data.WTSInfoExLevel1.SessionFlags;
++    // For Windows 7 SessionFlags has inverted logic:
++    // https://msdn.microsoft.com/en-us/library/windows/desktop/ee621019.
++    if (base::win::GetVersion() == base::win::Version::WIN7)
++      return session_flags == WTS_SESSIONSTATE_UNLOCK;
++    else
++      return session_flags == WTS_SESSIONSTATE_LOCK;
+ }
+ 
+ // Observes the screen lock state of Windows and caches the current state. This
