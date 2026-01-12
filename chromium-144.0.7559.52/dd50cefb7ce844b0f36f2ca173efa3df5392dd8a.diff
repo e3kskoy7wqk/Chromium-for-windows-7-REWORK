@@ -1,0 +1,768 @@
+diff --git a/chrome/app/chromium_strings.grd b/chrome/app/chromium_strings.grd
+index 108d4a5da3797..df8f08182f8c4 100644
+--- a/chrome/app/chromium_strings.grd
++++ b/chrome/app/chromium_strings.grd
+@@ -710,6 +710,9 @@ Chromium is unable to recover your settings.
+         <message name="IDS_UNINSTALL_DELETE_PROFILE" desc="Text to show user to ask whether to delete all the profile data also during uninstallation.">
+           Also delete your browsing data?
+         </message>
++        <message name="IDS_UNINSTALL_SET_DEFAULT_BROWSER" desc="Text to ask whether to set another browser as default when Chromium is uninstalled.">
++          Change default browser to:
++        </message>
+         <message name="IDS_UNINSTALL_BUTTON_TEXT" desc="Label for uninstall button on Uninstall confirmation dialog.">
+           Uninstall
+         </message>
+diff --git a/chrome/app/google_chrome_strings.grd b/chrome/app/google_chrome_strings.grd
+index f3b9e0e3c23f5..7bcccba3b0153 100644
+--- a/chrome/app/google_chrome_strings.grd
++++ b/chrome/app/google_chrome_strings.grd
+@@ -688,6 +688,9 @@ Google Chrome is unable to recover your settings.
+         <message name="IDS_UNINSTALL_DELETE_PROFILE" desc="Text to show user to ask whether to delete all the profile data also during uninstallation.">
+           Also delete your browsing data?
+         </message>
++        <message name="IDS_UNINSTALL_SET_DEFAULT_BROWSER" desc="Text to ask whether to set another browser as default when Chromium is uninstalled.">
++          Change default browser to:
++        </message>
+         <message name="IDS_UNINSTALL_BUTTON_TEXT" desc="Label for uninstall button on Uninstall confirmation dialog.">
+           Uninstall
+         </message>
+diff --git a/chrome/browser/shell_integration_win.cc b/chrome/browser/shell_integration_win.cc
+index cd908cc99b523..13d404cc84ef9 100644
+--- a/chrome/browser/shell_integration_win.cc
++++ b/chrome/browser/shell_integration_win.cc
+@@ -38,6 +38,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool.h"
+ #include "base/threading/platform_thread.h"
++#include "base/threading/scoped_blocking_call.h"
+ #include "base/time/time.h"
+ #include "base/timer/timer.h"
+ #include "base/win/registry.h"
+@@ -652,11 +653,49 @@ std::wstring GetHttpSchemeUserChoiceProgId() {
+ }  // namespace
+ 
+ bool SetAsDefaultBrowser() {
+-  return false;
++  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
++                                                base::BlockingType::MAY_BLOCK);
++
++  base::FilePath chrome_exe;
++  if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
++    LOG(ERROR) << "Error getting app exe path";
++    return false;
++  }
++
++  // From UI currently we only allow setting default browser for current user.
++  if (!ShellUtil::MakeChromeDefault(ShellUtil::CURRENT_USER, chrome_exe,
++                                    true /* elevate_if_not_admin */)) {
++    LOG(ERROR) << "Chrome could not be set as default browser.";
++    return false;
++  }
++
++  VLOG(1) << "Chrome registered as default browser.";
++  return true;
+ }
+ 
+ bool SetAsDefaultClientForScheme(const std::string& scheme) {
+-  return false;
++  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
++                                                base::BlockingType::MAY_BLOCK);
++
++  if (scheme.empty()) {
++    return false;
++  }
++
++  base::FilePath chrome_exe;
++  if (!base::PathService::Get(base::FILE_EXE, &chrome_exe)) {
++    LOG(ERROR) << "Error getting app exe path";
++    return false;
++  }
++
++  std::wstring wscheme(base::UTF8ToWide(scheme));
++  if (!ShellUtil::MakeChromeDefaultProtocolClient(chrome_exe, wscheme)) {
++    LOG(ERROR) << "Chrome could not be set as default handler for " << scheme
++               << ".";
++    return false;
++  }
++
++  VLOG(1) << "Chrome registered as default handler for " << scheme << ".";
++  return true;
+ }
+ 
+ std::u16string GetApplicationNameForScheme(const GURL& url) {
+@@ -720,7 +759,11 @@ DefaultWebClientSetPermission GetPlatformSpecificDefaultWebClientSetPermission(
+   if (!install_static::SupportsSetAsDefaultBrowser()) {
+     return SET_DEFAULT_NOT_ALLOWED;
+   }
+-  // Setting the default web client generally requires user interaction.
++  if (ShellUtil::CanMakeChromeDefaultUnattended()) {
++    return SET_DEFAULT_UNATTENDED;
++  }
++  // Setting the default web client generally requires user interaction in
++  // Windows 8+ with permitted exceptions above.
+   return SET_DEFAULT_INTERACTIVE;
+ }
+ 
+diff --git a/chrome/browser/ui/views/uninstall_view.cc b/chrome/browser/ui/views/uninstall_view.cc
+index fbe2041ecf7e4..abf47da382d63 100644
+--- a/chrome/browser/ui/views/uninstall_view.cc
++++ b/chrome/browser/ui/views/uninstall_view.cc
+@@ -4,17 +4,21 @@
+ 
+ #include "chrome/browser/ui/views/uninstall_view.h"
+ 
++#include "base/process/launch.h"
+ #include "base/run_loop.h"
+ #include "base/task/current_thread.h"
++#include "chrome/browser/shell_integration.h"
+ #include "chrome/browser/ui/uninstall_browser_prompt.h"
+ #include "chrome/browser/ui/views/chrome_layout_provider.h"
+ #include "chrome/common/chrome_result_codes.h"
+ #include "chrome/grit/branded_strings.h"
++#include "chrome/installer/util/shell_util.h"
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/base/mojom/dialog_button.mojom.h"
+ #include "ui/views/accessibility/accessibility_paint_checks.h"
+ #include "ui/views/controls/button/checkbox.h"
++#include "ui/views/controls/combobox/combobox.h"
+ #include "ui/views/controls/label.h"
+ #include "ui/views/layout/box_layout.h"
+ #include "ui/views/layout/box_layout_view.h"
+@@ -38,6 +42,10 @@ void UninstallView::SetupControls() {
+       provider->GetDistanceMetric(DISTANCE_SUBSECTION_HORIZONTAL_INDENT);
+   const int unrelated_vertical_spacing =
+       provider->GetDistanceMetric(views::DISTANCE_UNRELATED_CONTROL_VERTICAL);
++  const int related_vertical_spacing =
++      provider->GetDistanceMetric(views::DISTANCE_RELATED_CONTROL_VERTICAL);
++  const int related_horizontal_spacing =
++      provider->GetDistanceMetric(views::DISTANCE_RELATED_CONTROL_HORIZONTAL);
+   const int related_vertical_small =
+       provider->GetDistanceMetric(DISTANCE_RELATED_CONTROL_VERTICAL_SMALL);
+ 
+@@ -72,6 +80,42 @@ void UninstallView::SetupControls() {
+                   .SetProperty(views::kMarginsKey,
+                                gfx::Insets::TLBR(0, checkbox_indent, 0, 0)));
+ 
++  // Set default browser combo box. If the default should not or cannot be
++  // changed, widgets are not shown. We assume here that if Chrome cannot
++  // be set programatically as default, neither can any other browser (for
++  // instance because the OS doesn't permit that).
++  if (ShellUtil::CanMakeChromeDefaultUnattended() &&
++      shell_integration::GetDefaultBrowser() == shell_integration::IS_DEFAULT) {
++    browsers_ = std::make_unique<BrowsersMap>();
++    ShellUtil::GetRegisteredBrowsers(browsers_.get());
++    if (!browsers_->empty()) {
++      builder.AddChildren(
++          views::Builder<views::View>().SetProperty(
++              views::kMarginsKey,
++              gfx::Insets::TLBR(related_vertical_spacing, 0, 0, 0)),
++          views::Builder<views::BoxLayoutView>()
++              .SetOrientation(views::BoxLayout::Orientation::kHorizontal)
++              .SetBetweenChildSpacing(related_horizontal_spacing)
++              .AddChildren(
++                  views::Builder<views::Checkbox>()
++                      .CopyAddressTo(&change_default_browser_)
++                      .SetText(l10n_util::GetStringUTF16(
++                          IDS_UNINSTALL_SET_DEFAULT_BROWSER))
++                      .SetCallback(base::BindRepeating(
++                          [](UninstallView* view) {
++                            view->browsers_combo_->SetEnabled(
++                                view->change_default_browser_->GetChecked());
++                          },
++                          base::Unretained(this)))
++                      .SetProperty(views::kMarginsKey,
++                                   gfx::Insets::TLBR(0, checkbox_indent, 0, 0)),
++                  views::Builder<views::Combobox>()
++                      .CopyAddressTo(&browsers_combo_)
++                      .SetModel(this)
++                      .SetEnabled(false)));
++    }
++  }
++
+   std::move(builder)
+       .AddChild(views::Builder<views::View>().SetProperty(
+           views::kMarginsKey,
+@@ -84,12 +128,31 @@ void UninstallView::OnDialogAccepted() {
+   if (delete_profile_->GetChecked()) {
+     *user_selection_ = CHROME_RESULT_CODE_UNINSTALL_DELETE_PROFILE;
+   }
++  if (change_default_browser_ && change_default_browser_->GetChecked()) {
++    BrowsersMap::const_iterator i = browsers_->begin();
++    std::advance(i, browsers_combo_->GetSelectedIndex().value());
++    base::LaunchOptions options;
++    options.start_hidden = true;
++    base::LaunchProcess(i->second, options);
++  }
+ }
+ 
+ void UninstallView::OnDialogCancelled() {
+   *user_selection_ = CHROME_RESULT_CODE_UNINSTALL_USER_CANCEL;
+ }
+ 
++size_t UninstallView::GetItemCount() const {
++  DCHECK(!browsers_->empty());
++  return browsers_->size();
++}
++
++std::u16string UninstallView::GetItemAt(size_t index) const {
++  DCHECK_LT(index, browsers_->size());
++  BrowsersMap::const_iterator i = browsers_->begin();
++  std::advance(i, index);
++  return base::WideToUTF16(i->first);
++}
++
+ BEGIN_METADATA(UninstallView)
+ END_METADATA
+ 
+diff --git a/chrome/browser/ui/views/uninstall_view.h b/chrome/browser/ui/views/uninstall_view.h
+index 531cb7ee7faf2..ee25fe1dae3c2 100644
+--- a/chrome/browser/ui/views/uninstall_view.h
++++ b/chrome/browser/ui/views/uninstall_view.h
+@@ -5,20 +5,27 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_UNINSTALL_VIEW_H_
+ #define CHROME_BROWSER_UI_VIEWS_UNINSTALL_VIEW_H_
+ 
++#include <map>
++#include <string>
++
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/raw_ref.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/models/combobox_model.h"
+ #include "ui/views/metadata/view_factory.h"
+ #include "ui/views/window/dialog_delegate.h"
+ 
+ namespace views {
+ class Checkbox;
++class Combobox;
+ }  // namespace views
+ 
+ // UninstallView implements the dialog that confirms Chrome uninstallation
+-// and asks whether to delete Chrome profile.
+-class UninstallView : public views::DialogDelegateView {
++// and asks whether to delete Chrome profile. Also if currently Chrome is set
++// as default browser, it asks users whether to set another browser as default.
++class UninstallView : public views::DialogDelegateView,
++                      public ui::ComboboxModel {
+   METADATA_HEADER(UninstallView, views::DialogDelegateView)
+ 
+  public:
+@@ -28,7 +35,13 @@ class UninstallView : public views::DialogDelegateView {
+   UninstallView& operator=(const UninstallView&) = delete;
+   ~UninstallView() override;
+ 
++  // Overridden from ui::ComboboxModel:
++  size_t GetItemCount() const override;
++  std::u16string GetItemAt(size_t index) const override;
++
+  private:
++  typedef std::map<std::wstring, std::wstring> BrowsersMap;
++
+   // Initializes the controls on the dialog.
+   void SetupControls();
+ 
+@@ -36,6 +49,9 @@ class UninstallView : public views::DialogDelegateView {
+   void OnDialogCancelled();
+ 
+   raw_ptr<views::Checkbox> delete_profile_ = nullptr;
++  raw_ptr<views::Checkbox> change_default_browser_ = nullptr;
++  raw_ptr<views::Combobox> browsers_combo_ = nullptr;
++  std::unique_ptr<BrowsersMap> browsers_;
+   const raw_ref<int> user_selection_;
+   base::RepeatingClosure quit_closure_;
+ };
+diff --git a/chrome/installer/setup/install.cc b/chrome/installer/setup/install.cc
+index ae14822b308e4..8a4103a0c338e 100644
+--- a/chrome/installer/setup/install.cc
++++ b/chrome/installer/setup/install.cc
+@@ -472,8 +472,13 @@ void CreateOrUpdateShortcuts(const base::FilePath& target,
+                                  start_menu_properties, shortcut_operation);
+ }
+ 
+-// Registers Chrome on the system.
++// Registers Chrome on this machine.
++// If |make_chrome_default|, also attempts to make Chrome default where doing so
++// requires no more user interaction than a UAC prompt. In practice, this means
++// on versions of Windows prior to Windows 8.
++// |version| the current version of this install.
+ void RegisterChromeOnMachine(const InstallerState& installer_state,
++                             bool make_chrome_default,
+                              const base::Version& version) {
+   // Try to add Chrome to Media Player shim inclusion list. We don't do any
+   // error checking here because this operation will fail if user doesn't
+@@ -485,11 +490,20 @@ void RegisterChromeOnMachine(const InstallerState& installer_state,
+   if (installer_state.system_install())
+     RegisterEventLogProvider(installer_state.target_path(), version);
+ 
+-  // Register Chrome as a browser with Windows.
++  // Make Chrome the default browser if desired when possible. Otherwise, only
++  // register it with Windows.
+   const base::FilePath chrome_exe(
+       installer_state.target_path().Append(kChromeExe));
+   VLOG(1) << "Registering Chrome as browser: " << chrome_exe.value();
+-  ShellUtil::RegisterChromeBrowserBestEffort(chrome_exe);
++  if (make_chrome_default && install_static::SupportsSetAsDefaultBrowser() &&
++      ShellUtil::CanMakeChromeDefaultUnattended()) {
++    int level = ShellUtil::CURRENT_USER;
++    if (installer_state.system_install())
++      level = level | ShellUtil::SYSTEM_LEVEL;
++    ShellUtil::MakeChromeDefault(level, chrome_exe, true);
++  } else {
++    ShellUtil::RegisterChromeBrowserBestEffort(chrome_exe);
++  }
+ }
+ 
+ // Run a child process that will create/update a shortcut for an
+@@ -596,10 +610,27 @@ InstallStatus InstallOrUpdateProduct(const InstallParams& install_params,
+                           : std::nullopt,
+         install_level, install_operation);
+ 
+-    // Register Chrome on the system.
++    // Register Chrome and, if requested, make Chrome the default browser.
+     installer_state.SetStage(REGISTERING_CHROME);
+ 
+-    RegisterChromeOnMachine(installer_state, new_version);
++    bool make_chrome_default = false;
++    prefs.GetBool(initial_preferences::kMakeChromeDefault,
++                  &make_chrome_default);
++
++    // If this is not the user's first Chrome install, but they have chosen
++    // Chrome to become their default browser on the download page, we must
++    // force it here because the initial preferences file will not get copied
++    // into the build.
++    bool force_chrome_default_for_user = false;
++    if (result == NEW_VERSION_UPDATED || result == INSTALL_REPAIRED ||
++        result == OLD_VERSION_DOWNGRADE || result == IN_USE_DOWNGRADE) {
++      prefs.GetBool(initial_preferences::kMakeChromeDefaultForUser,
++                    &force_chrome_default_for_user);
++    }
++
++    RegisterChromeOnMachine(
++        installer_state, make_chrome_default || force_chrome_default_for_user,
++        new_version);
+ 
+     if (!installer_state.system_install()) {
+       UpdateDefaultBrowserBeaconForPath(
+@@ -666,7 +697,7 @@ void HandleOsUpgradeForBrowser(const InstallerState& installer_state,
+       INSTALL_SHORTCUT_REPLACE_EXISTING);
+ 
+   // Adapt Chrome registrations to this new OS.
+-  RegisterChromeOnMachine(installer_state, installed_version);
++  RegisterChromeOnMachine(installer_state, false, installed_version);
+ 
+   // Active Setup registrations are sometimes lost across OS update, make sure
+   // they're back in place. Note: when Active Setup registrations in HKLM are
+diff --git a/chrome/installer/setup/setup_main.cc b/chrome/installer/setup/setup_main.cc
+index c800f54617221..bf5b9a610a7cd 100644
+--- a/chrome/installer/setup/setup_main.cc
++++ b/chrome/installer/setup/setup_main.cc
+@@ -777,15 +777,20 @@ installer::InstallStatus RegisterDevChrome(
+ 
+   installer::InstallStatus status = installer::FIRST_INSTALL_SUCCESS;
+   if (base::PathExists(chrome_exe)) {
+-    // Create the Start menu shortcut and pin it to the taskbar.
++    // Create the Start menu shortcut and pin it to the Win7+ taskbar.
+     ShellUtil::ShortcutProperties shortcut_properties(ShellUtil::CURRENT_USER);
+     ShellUtil::AddDefaultShortcutProperties(chrome_exe, &shortcut_properties);
+     shortcut_properties.set_pin_to_taskbar(true);
+     ShellUtil::CreateOrUpdateShortcut(
+         ShellUtil::SHORTCUT_LOCATION_START_MENU_ROOT, shortcut_properties,
+         ShellUtil::SHELL_SHORTCUT_CREATE_ALWAYS);
+-    // Register Chrome at user-level.
+-    ShellUtil::ShowMakeChromeDefaultSystemUI(chrome_exe);
++
++    // Register Chrome at user-level and make it default.
++    if (ShellUtil::CanMakeChromeDefaultUnattended()) {
++      ShellUtil::MakeChromeDefault(ShellUtil::CURRENT_USER, chrome_exe, true);
++    } else {
++      ShellUtil::ShowMakeChromeDefaultSystemUI(chrome_exe);
++    }
+   } else {
+     LOG(ERROR) << "Path not found: " << chrome_exe.value();
+     status = installer::INSTALL_FAILED;
+@@ -1477,7 +1482,8 @@ int SetupMain() {
+   // Some switches only apply for modes that can be made the user's default
+   // browser.
+   if (!install_static::SupportsSetAsDefaultBrowser() &&
+-      cmd_line.HasSwitch(installer::switches::kRegisterChromeBrowser)) {
++      (cmd_line.HasSwitch(installer::switches::kMakeChromeDefault) ||
++       cmd_line.HasSwitch(installer::switches::kRegisterChromeBrowser))) {
+     return installer::SXS_OPTION_NOT_SUPPORTED;
+   }
+   // Some command line options are no longer supported and must error out.
+diff --git a/chrome/installer/util/initial_preferences.cc b/chrome/installer/util/initial_preferences.cc
+index c1ecc73d63705..1135c7f85abc2 100644
+--- a/chrome/installer/util/initial_preferences.cc
++++ b/chrome/installer/util/initial_preferences.cc
+@@ -139,6 +139,8 @@ void InitialPreferences::InitializeFromCommandLine(
+        installer::initial_preferences::kDoNotRegisterForUpdateLaunch},
+       {installer::switches::kDoNotLaunchChrome,
+        installer::initial_preferences::kDoNotLaunchChrome},
++      {installer::switches::kMakeChromeDefault,
++       installer::initial_preferences::kMakeChromeDefault},
+       {installer::switches::kSystemLevel,
+        installer::initial_preferences::kSystemLevel},
+       {installer::switches::kVerboseLogging,
+diff --git a/chrome/installer/util/initial_preferences.h b/chrome/installer/util/initial_preferences.h
+index e5dc6ab6d412f..98cbbab05bed6 100644
+--- a/chrome/installer/util/initial_preferences.h
++++ b/chrome/installer/util/initial_preferences.h
+@@ -34,6 +34,7 @@ namespace installer {
+ //      "create_all_shortcuts": true,
+ //      "do_not_launch_chrome": false,
+ //      "import_bookmarks_from_file": "c:\\path",
++//      "make_chrome_default": false,
+ //      "make_chrome_default_for_user": true,
+ //      "ping_delay": 40,
+ //      "require_eula": true,
+diff --git a/chrome/installer/util/initial_preferences_constants.h b/chrome/installer/util/initial_preferences_constants.h
+index 77f64cdf36079..f55ba60fc88d9 100644
+--- a/chrome/installer/util/initial_preferences_constants.h
++++ b/chrome/installer/util/initial_preferences_constants.h
+@@ -51,6 +51,8 @@ inline constexpr char kDoNotRegisterForUpdateLaunch[] =
+     "do_not_register_for_update_launch";
+ // String.  Specifies the file path to write logging info to.
+ inline constexpr char kLogFile[] = "log_file";
++// Boolean. Register Chrome as default browser. Cmd line override present.
++inline constexpr char kMakeChromeDefault[] = "make_chrome_default";
+ // Boolean. Register Chrome as default browser for the current user.
+ inline constexpr char kMakeChromeDefaultForUser[] =
+     "make_chrome_default_for_user";
+diff --git a/chrome/installer/util/initial_preferences_unittest.cc b/chrome/installer/util/initial_preferences_unittest.cc
+index a4451a933f749..a33effa0be29b 100644
+--- a/chrome/installer/util/initial_preferences_unittest.cc
++++ b/chrome/installer/util/initial_preferences_unittest.cc
+@@ -80,6 +80,7 @@ TEST_F(InitialPreferencesTest, ParseDistroParams) {
+       "do_not_create_quick_launch_shortcut": true,
+       "do_not_create_taskbar_shortcut": true,
+       "do_not_launch_chrome": true,
++      "make_chrome_default": true,
+       "make_chrome_default_for_user": true,
+       "program_files_dir": "c:\\bar",
+       "system_level": true,
+@@ -101,6 +102,7 @@ TEST_F(InitialPreferencesTest, ParseDistroParams) {
+       installer::initial_preferences::kDoNotCreateQuickLaunchShortcut,
+       installer::initial_preferences::kDoNotCreateTaskbarShortcut,
+       installer::initial_preferences::kDoNotLaunchChrome,
++      installer::initial_preferences::kMakeChromeDefault,
+       installer::initial_preferences::kMakeChromeDefaultForUser,
+       installer::initial_preferences::kSystemLevel,
+       installer::initial_preferences::kVerboseLogging,
+@@ -153,6 +155,7 @@ TEST_F(InitialPreferencesTest, ParseMissingDistroParams) {
+ 
+   const char* const missing_bools[] = {
+       installer::initial_preferences::kDoNotRegisterForUpdateLaunch,
++      installer::initial_preferences::kMakeChromeDefault,
+       installer::initial_preferences::kMakeChromeDefaultForUser,
+   };
+ 
+diff --git a/chrome/installer/util/shell_util.cc b/chrome/installer/util/shell_util.cc
+index 910e85e1596f3..20676da390a7a 100644
+--- a/chrome/installer/util/shell_util.cc
++++ b/chrome/installer/util/shell_util.cc
+@@ -1849,6 +1849,41 @@ std::wstring ShellUtil::GetChromeDelegateCommand(
+   return L"\"" + chrome_exe.value() + L"\" -- %*";
+ }
+ 
++void ShellUtil::GetRegisteredBrowsers(
++    std::map<std::wstring, std::wstring>* browsers) {
++  DCHECK(browsers);
++
++  const std::wstring base_key(kRegStartMenuInternet);
++  std::wstring client_path;
++  RegKey key;
++  std::wstring name;
++  std::wstring command;
++
++  // HKCU has precedence over HKLM for these registrations: http://goo.gl/xjczJ.
++  // Look in HKCU second to override any identical values found in HKLM.
++  const HKEY roots[] = {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER};
++  for (const HKEY root : roots) {
++    for (base::win::RegistryKeyIterator iter(root, base_key.c_str());
++         iter.Valid(); ++iter) {
++      client_path = base::StrCat({base_key, kFilePathSeparator, iter.Name()});
++      // Read the browser's name (localized according to install language).
++      if (key.Open(root, client_path.c_str(), KEY_QUERY_VALUE) !=
++              ERROR_SUCCESS ||
++          key.ReadValue(nullptr, &name) != ERROR_SUCCESS || name.empty() ||
++          name.find(install_static::GetBaseAppName()) != std::wstring::npos) {
++        continue;
++      }
++      // Read the browser's reinstall command.
++      if (key.Open(root, (client_path + L"\\InstallInfo").c_str(),
++                   KEY_QUERY_VALUE) == ERROR_SUCCESS &&
++          key.ReadValue(kReinstallCommand, &command) == ERROR_SUCCESS &&
++          !command.empty()) {
++        (*browsers)[name] = command;
++      }
++    }
++  }
++}
++
+ std::wstring ShellUtil::GetCurrentInstallationSuffix(
+     const base::FilePath& chrome_exe) {
+   // This method is somewhat the opposite of GetInstallationSpecificSuffix().
+@@ -1973,6 +2008,73 @@ ShellUtil::DefaultState ShellUtil::GetChromeDefaultFileHandlerState(
+   return ProbeSingleCurrentDefaultHandler(file_extension, AT_FILEEXTENSION);
+ }
+ 
++// static
++bool ShellUtil::CanMakeChromeDefaultUnattended() {
++  return base::win::GetVersion() < base::win::Version::WIN8;
++}
++
++bool ShellUtil::MakeChromeDefault(int shell_change,
++                                  const base::FilePath& chrome_exe,
++                                  bool elevate_if_not_admin) {
++  DCHECK(!(shell_change & SYSTEM_LEVEL) || IsUserAnAdmin());
++
++  if (!install_static::SupportsSetAsDefaultBrowser())
++    return false;
++
++  // Windows 8 does not permit making a browser default just like that.
++  // This process needs to be routed through the system's UI. Use
++  // ShowMakeChromeDefaultSystemUI instead (below).
++  if (!CanMakeChromeDefaultUnattended()) {
++    return false;
++  }
++
++  if (!RegisterChromeBrowser(chrome_exe, std::wstring(),
++                             elevate_if_not_admin)) {
++    return false;
++  }
++
++  bool ret = true;
++  // First use the new "recommended" way on Vista to make Chrome default
++  // browser.
++  std::wstring app_name = GetApplicationName(chrome_exe);
++
++  // On Windows 7 we still can set ourselves via the the
++  // IApplicationAssociationRegistration interface.
++  VLOG(1) << "Registering Chrome as default browser on Windows 7.";
++  Microsoft::WRL::ComPtr<IApplicationAssociationRegistration> pAAR;
++  HRESULT hr = ::CoCreateInstance(CLSID_ApplicationAssociationRegistration,
++                                  nullptr, CLSCTX_INPROC, IID_PPV_ARGS(&pAAR));
++  if (SUCCEEDED(hr)) {
++    for (int i = 0; kBrowserProtocolAssociations[i] != nullptr; i++) {
++      hr = pAAR->SetAppAsDefault(
++          app_name.c_str(), kBrowserProtocolAssociations[i], AT_URLPROTOCOL);
++      if (!SUCCEEDED(hr)) {
++        ret = false;
++        LOG(ERROR) << "Failed to register as default for protocol "
++                   << kBrowserProtocolAssociations[i] << " (" << hr << ")";
++      }
++    }
++
++    for (int i = 0; kDefaultFileAssociations[i] != nullptr; i++) {
++      hr = pAAR->SetAppAsDefault(app_name.c_str(), kDefaultFileAssociations[i],
++                                 AT_FILEEXTENSION);
++      if (!SUCCEEDED(hr)) {
++        ret = false;
++        LOG(ERROR) << "Failed to register as default for file extension "
++                   << kDefaultFileAssociations[i] << " (" << hr << ")";
++      }
++    }
++  }
++
++  if (!RegisterChromeAsDefaultXPStyle(shell_change, chrome_exe))
++    ret = false;
++
++  // Send Windows notification event so that it can update icons for
++  // file associations.
++  SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
++  return ret;
++}
++
+ // static
+ bool ShellUtil::LaunchUninstallAppsSettings() {
+   return base::win::LaunchSettingsUri(L"page=SettingsPageAppsSizes");
+@@ -1980,6 +2082,8 @@ bool ShellUtil::LaunchUninstallAppsSettings() {
+ 
+ bool ShellUtil::ShowMakeChromeDefaultSystemUI(
+     const base::FilePath& chrome_exe) {
++  DCHECK(!CanMakeChromeDefaultUnattended());
++
+   if (!install_static::SupportsSetAsDefaultBrowser())
+     return false;
+ 
+@@ -2044,9 +2148,57 @@ bool ShellUtil::ShowSetDefaultForFileExtensionSystemUI(
+                             : ShellUtil::ShowSystemUIResult::kError;
+ }
+ 
++bool ShellUtil::MakeChromeDefaultProtocolClient(
++    const base::FilePath& chrome_exe,
++    const std::wstring& protocol) {
++  if (!install_static::SupportsSetAsDefaultBrowser())
++    return false;
++
++  if (!RegisterChromeForProtocols(
++          chrome_exe, std::wstring(),
++          GetBrowserProtocolAssociation(protocol, chrome_exe), true)) {
++    return false;
++  }
++
++  // Windows 8 does not permit making a browser default just like that.
++  // This process needs to be routed through the system's UI. Use
++  // ShowMakeChromeDefaultProtocolClientSystemUI instead (below).
++  if (!CanMakeChromeDefaultUnattended())
++    return false;
++
++  bool ret = true;
++  // First use the "recommended" way introduced in Vista to make Chrome default
++  // protocol handler.
++  VLOG(1) << "Registering Chrome as default handler for " << protocol
++          << " on Windows 7.";
++  Microsoft::WRL::ComPtr<IApplicationAssociationRegistration> pAAR;
++  HRESULT hr = ::CoCreateInstance(CLSID_ApplicationAssociationRegistration,
++                                  nullptr, CLSCTX_INPROC, IID_PPV_ARGS(&pAAR));
++  if (SUCCEEDED(hr)) {
++    std::wstring app_name = GetApplicationName(chrome_exe);
++    hr = pAAR->SetAppAsDefault(app_name.c_str(), protocol.c_str(),
++                               AT_URLPROTOCOL);
++  }
++  if (!SUCCEEDED(hr)) {
++    ret = false;
++    LOG(ERROR) << "Could not make Chrome default protocol client (Windows 7):"
++               << " HRESULT=" << hr << ".";
++  }
++
++  // Now use the old way to associate Chrome with the desired protocol. This
++  // should not be required on Vista+, but since some applications still read
++  // Software\Classes\<protocol> key directly, do this on Vista+ also.
++  if (!RegisterChromeAsDefaultProtocolClientXPStyle(chrome_exe, protocol))
++    ret = false;
++
++  return ret;
++}
++
+ bool ShellUtil::ShowMakeChromeDefaultProtocolClientSystemUI(
+     const base::FilePath& chrome_exe,
+     const std::wstring& protocol) {
++  DCHECK(!CanMakeChromeDefaultUnattended());
++
+   if (!install_static::SupportsSetAsDefaultBrowser())
+     return false;
+ 
+diff --git a/chrome/installer/util/shell_util.h b/chrome/installer/util/shell_util.h
+index a26add12bba4e..e29b6defcbe83 100644
+--- a/chrome/installer/util/shell_util.h
++++ b/chrome/installer/util/shell_util.h
+@@ -12,6 +12,7 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <map>
+ #include <memory>
+ #include <optional>
+ #include <set>
+@@ -444,6 +445,15 @@ class ShellUtil {
+   static std::wstring GetChromeDelegateCommand(
+       const base::FilePath& chrome_exe);
+ 
++  // Gets a mapping of all registered browser names (excluding the current
++  // browser) and their reinstall command (which usually sets browser as
++  // default).
++  // Given browsers can be registered in HKCU (as of Win7) and/or in HKLM, this
++  // method looks in both and gives precedence to values in HKCU as per the msdn
++  // standard: http://goo.gl/xjczJ.
++  static void GetRegisteredBrowsers(
++      std::map<std::wstring, std::wstring>* browsers);
++
+   // Returns the suffix this user's Chrome install is registered with.
+   // Always returns the empty string on system-level installs.
+   //
+@@ -477,6 +487,11 @@ class ShellUtil {
+   static std::wstring BuildAppUserModelId(
+       const std::vector<std::wstring>& components);
+ 
++  // Returns true if Chrome can make itself the default browser without relying
++  // on the Windows shell to prompt the user. This is the case for versions of
++  // Windows prior to Windows 8.
++  static bool CanMakeChromeDefaultUnattended();
++
+   // Returns the DefaultState of Chrome for HTTP and HTTPS and updates the
+   // default browser beacons as appropriate.
+   static DefaultState GetChromeDefaultState();
+@@ -495,6 +510,27 @@ class ShellUtil {
+   static DefaultState GetChromeDefaultFileHandlerState(
+       base::wcstring_view file_extension);
+ 
++  // Make Chrome the default browser. This function works by going through
++  // the url protocols and file associations that are related to general
++  // browsing, e.g. http, https, .html etc., and requesting to become the
++  // default handler for each. If any of these fails the operation will return
++  // false to indicate failure, which is consistent with the return value of
++  // shell_integration::GetDefaultBrowser.
++  //
++  // In the case of failure any successful changes will be left, however no
++  // more changes will be attempted.
++  // TODO(benwells): Attempt to undo any changes that were successfully made.
++  // http://crbug.com/83970
++  //
++  // shell_change: Defined whether to register as default browser at system
++  //               level or user level. If value has ShellChange::SYSTEM_LEVEL
++  //               we should be running as admin user.
++  // chrome_exe: The chrome.exe path to register as default browser.
++  // elevate_if_not_admin: On Vista if user is not admin, try to elevate for
++  //                       Chrome registration.
++  static bool MakeChromeDefault(int shell_change,
++                                const base::FilePath& chrome_exe,
++                                bool elevate_if_not_admin);
+ 
+   // Opens the Apps & Features page in the Windows settings in branded builds.
+   //
+@@ -527,6 +563,12 @@ class ShellUtil {
+       base::wcstring_view file_extension,
+       HWND parent_hwnd);
+ 
++  // Make Chrome the default application for a protocol.
++  // chrome_exe: The chrome.exe path to register as default browser.
++  // protocol: The protocol to register as the default handler for.
++  static bool MakeChromeDefaultProtocolClient(const base::FilePath& chrome_exe,
++                                              const std::wstring& protocol);
++
+   // Shows and waits for the Windows 8 "How do you want to open links of this
+   // type?" dialog if Chrome is not already the default |protocol|
+   // handler. Also does XP-era registrations if Chrome is chosen or was already
+diff --git a/chrome/installer/util/util_constants.cc b/chrome/installer/util/util_constants.cc
+index 649e0d5f4db51..45e4ccfb248b6 100644
+--- a/chrome/installer/util/util_constants.cc
++++ b/chrome/installer/util/util_constants.cc
+@@ -94,6 +94,12 @@ const char kInstallLevel[] = "install-level";
+ // If present, specify file path to write logging info.
+ const char kLogFile[] = "log-file";
+ 
++// Register Chrome as default browser on the system. Usually this will require
++// that setup is running as admin. If running as admin we try to register
++// as default browser at system level, if running as non-admin we try to
++// register as default browser only for the current user.
++const char kMakeChromeDefault[] = "make-chrome-default";
++
+ // Tells installer to expect to be run as a subsidiary to an MSI.
+ const char kMsi[] = "msi";
+ 
+diff --git a/chrome/installer/util/util_constants.h b/chrome/installer/util/util_constants.h
+index eb24d9675dc22..aa736392a7060 100644
+--- a/chrome/installer/util/util_constants.h
++++ b/chrome/installer/util/util_constants.h
+@@ -179,6 +179,7 @@ extern const char kInstallArchive[];
+ extern const char kInstallerData[];
+ extern const char kInstallLevel[];
+ extern const char kLogFile[];
++extern const char kMakeChromeDefault[];
+ extern const char kMsi[];
+ extern const char kNewSetupExe[];
+ extern const char kNonce[];
+diff --git a/chrome/test/enterprise/e2e/infra/installer_data b/chrome/test/enterprise/e2e/infra/installer_data
+index 3c7583f8cebfd..9a704b94ddca1 100644
+--- a/chrome/test/enterprise/e2e/infra/installer_data
++++ b/chrome/test/enterprise/e2e/infra/installer_data
+@@ -1,5 +1,6 @@
+ {
+   "distribution":{
++     "make_chrome_default":true,
+      "system_level":true,
+      "verbose_logging":true,
+      "chrome":true,

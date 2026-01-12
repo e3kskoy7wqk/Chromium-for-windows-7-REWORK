@@ -1,0 +1,1 @@
+Implement handling for MS PowerPoint Presentation Mode.    2019/12/4 3:17:24    b588353543b1abab54fc22f3f248c0c816bfefdc

@@ -1,0 +1,73 @@
+diff --git a/sandbox/win/src/win_utils.cc b/sandbox/win/src/win_utils.cc
+index 97d4e5a0590b0..7e25ffa5f68e8 100644
+--- a/sandbox/win/src/win_utils.cc
++++ b/sandbox/win/src/win_utils.cc
+@@ -10,11 +10,22 @@
+ #include "sandbox/win/src/nt_internals.h"
+ #include "sandbox/win/src/sandbox_nt_util.h"
+ 
+-// Prototype for ProcessPrng.
+-// See: https://learn.microsoft.com/en-us/windows/win32/seccng/processprng
+-extern "C" {
+-BOOL WINAPI ProcessPrng(PBYTE pbData, SIZE_T cbData);
+-}
++// Note: do not copy this to add new uses of RtlGenRandom.
++// Prefer: crypto::RandBytes, base::RandBytes or bcryptprimitives!ProcessPrng.
++// #define needed to link in RtlGenRandom(), a.k.a. SystemFunction036.  See the
++// "Community Additions" comment on MSDN here:
++// http://msdn.microsoft.com/en-us/library/windows/desktop/aa387694.aspx
++#define RtlGenRandom                    SystemFunction036
++
++extern "C" {
++BOOL WINAPI
++RtlGenRandom(
++    OUT PVOID RandomBuffer,
++    IN  ULONG RandomBufferLength
++    );
++}
++
++#undef SystemFunction036
+ 
+ namespace {
+ 
+@@ -28,17 +31,5 @@ std::unique_ptr<std::vector<uint8_t>> QueryObjectInformation(
+   return data;
+ }
+ 
+-// Import bcryptprimitives!ProcessPrng rather than cryptbase!RtlGenRandom to
+-// avoid opening a handle to \\Device\KsecDD in the renderer.
+-decltype(&ProcessPrng) GetProcessPrng() {
+-  HMODULE hmod = LoadLibraryW(L"bcryptprimitives.dll");
+-  CHECK(hmod);
+-  decltype(&ProcessPrng) process_prng_fn =
+-      reinterpret_cast<decltype(&ProcessPrng)>(
+-          GetProcAddress(hmod, "ProcessPrng"));
+-  CHECK(process_prng_fn);
+-  return process_prng_fn;
+-}
+-
+ }  // namespace
+ 
+@@ -28,12 +31,16 @@ LCID HookedGetUserDefaultLCID() {
+ }
+ 
+ void WarmupRandomnessInfrastructure() {
+-  BYTE data[1];
+-  // TODO(crbug.com/40088338) Call a warmup function exposed by boringssl.
+-  static decltype(&ProcessPrng) process_prng_fn = GetProcessPrng();
+-  BOOL success = process_prng_fn(data, sizeof(data));
+-  // ProcessPrng is documented to always return TRUE.
+-  CHECK(success);
++  // This loads advapi!SystemFunction036 which is forwarded to
++  // cryptbase!SystemFunction036. This allows boringsll and Chrome to call
++  // RtlGenRandom from within the sandbox. This has the unfortunate side effect
++  // of opening a handle to \\Device\KsecDD which we will later close in
++  // processes that do not need this. Ideally everyone would call ProcessPrng in
++  // bcryptprimitives instead and this warmup can change to load that directly.
++  // TODO(crbug.com/40088338) swap boringssl to ProcessPrng from RtlGenRandom.
++  // TODO(crbug.com/40088338) swap Chrome to ProcessPrng from RtlGenRandom.
++  char data[1];
++  RtlGenRandom(data, sizeof(data));
+ }
+ 
+ }  // namespace sandbox

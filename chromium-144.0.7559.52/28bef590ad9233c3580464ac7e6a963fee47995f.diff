@@ -1,0 +1,340 @@
+diff --git a/gpu/command_buffer/service/webgpu_decoder_unittest.cc b/gpu/command_buffer/service/webgpu_decoder_unittest.cc
+index 811786385d67d..082bfb627f80f 100644
+--- a/gpu/command_buffer/service/webgpu_decoder_unittest.cc
++++ b/gpu/command_buffer/service/webgpu_decoder_unittest.cc
+@@ -32,6 +32,9 @@ class WebGPUDecoderTest : public ::testing::Test {
+   WebGPUDecoderTest() {}
+ 
+   void SetUp() override {
++    if (!WebGPUSupported()) {
++      GTEST_SKIP() << "Test skipped because WebGPU isn't supported";
++    }
+     decoder_client_ = std::make_unique<FakeDecoderClient>();
+     command_buffer_service_ = std::make_unique<FakeCommandBufferServiceBase>();
+ 
+@@ -47,6 +50,11 @@ class WebGPUDecoderTest : public ::testing::Test {
+     ASSERT_EQ(decoder_->Initialize(GpuFeatureInfo()), ContextResult::kSuccess);
+   }
+ 
++  bool WebGPUSupported() const {
++    // WebGPU does not work on Win7 because there is no D3D12 on Win7
++    return !GPUTestBotConfig::CurrentConfigMatches("Win7");
++  }
++
+   template <typename T>
+   error::Error ExecuteCmd(const T& cmd) {
+     static_assert(T::kArgFlags == cmd::kFixed,
+diff --git a/gpu/command_buffer/tests/webgpu_test.cc b/gpu/command_buffer/tests/webgpu_test.cc
+index f206d94bf0a6d..00bf33a9f0f0a 100644
+--- a/gpu/command_buffer/tests/webgpu_test.cc
++++ b/gpu/command_buffer/tests/webgpu_test.cc
+@@ -49,6 +49,11 @@ WebGPUTest::WebGPUTest() = default;
+ WebGPUTest::~WebGPUTest() = default;
+ 
+ bool WebGPUTest::WebGPUSupported() const {
++  // Win7 does not support WebGPU
++  if (GPUTestBotConfig::CurrentConfigMatches("Win7")) {
++    return false;
++  }
++
+   // Nexus 5X does not support WebGPU
+   if (GPUTestBotConfig::CurrentConfigMatches("Android Qualcomm 0x4010800")) {
+     return false;
+diff --git a/gpu/config/gpu_driver_bug_list.json b/gpu/config/gpu_driver_bug_list.json
+index ce3bba53b7734..0d717d69e86c7 100644
+--- a/gpu/config/gpu_driver_bug_list.json
++++ b/gpu/config/gpu_driver_bug_list.json
+@@ -2370,6 +2370,23 @@
+         "max_msaa_sample_count_4"
+       ]
+     },
++    {
++      "id": 261,
++      "cr_bugs": [817286],
++      "description": "Fallback to D3D9 if basic info collection fails on Win7",
++      "os": {
++        "type": "win",
++        "version": {
++          "op": "=",
++          "value": "6.1"
++        }
++      },
++      "vendor_id": "0xffff",
++      "device_id": ["0xfffe"],
++      "features": [
++        "disable_d3d11"
++      ]
++    },
+     {
+       "id": 262,
+       "description": "Program fails in PowerVR*GX6250 drivers if gl_Position is not set",
+diff --git a/gpu/config/gpu_test_config.cc b/gpu/config/gpu_test_config.cc
+index c5a9941d55685..ac14d682e6148 100644
+--- a/gpu/config/gpu_test_config.cc
++++ b/gpu/config/gpu_test_config.cc
+@@ -35,8 +35,16 @@ GPUTestConfig::OS GetCurrentOS() {
+   int32_t major_version = 0;
+   int32_t minor_version = 0;
+   int32_t bugfix_version = 0;
+-  base::SysInfo::OperatingSystemVersionNumbers(&major_version, &minor_version,
+-                                               &bugfix_version);
++  base::SysInfo::OperatingSystemVersionNumbers(
++      &major_version, &minor_version, &bugfix_version);
++  if (major_version == 5)
++    return GPUTestConfig::kOsWinXP;
++  if (major_version == 6 && minor_version == 0)
++    return GPUTestConfig::kOsWinVista;
++  if (major_version == 6 && minor_version == 1)
++    return GPUTestConfig::kOsWin7;
++  if (major_version == 6 && (minor_version == 2 || minor_version == 3))
++    return GPUTestConfig::kOsWin8;
+   if (major_version == 10)
+     return GPUTestConfig::kOsWin10;
+   return GPUTestConfig::kOsUnknown;
+@@ -208,6 +216,10 @@ bool GPUTestBotConfig::SetGPUInfo(const GPUInfo& gpu_info) {
+ 
+ bool GPUTestBotConfig::IsValid() const {
+   switch (os()) {
++    case kOsWinXP:
++    case kOsWinVista:
++    case kOsWin7:
++    case kOsWin8:
+     case kOsWin10:
+     case kOsMacSnowLeopard:
+     case kOsMacLion:
+diff --git a/gpu/config/gpu_test_config.h b/gpu/config/gpu_test_config.h
+index 2aa863eb3a31d..6a3335043157a 100644
+--- a/gpu/config/gpu_test_config.h
++++ b/gpu/config/gpu_test_config.h
+@@ -21,8 +21,12 @@ class GPU_EXPORT GPUTestConfig {
+  public:
+   enum OS {
+     kOsUnknown = 0,
+-    kOsWin10 = 1 << 1,
+-    kOsWin = kOsWin10,
++    kOsWinXP = 1 << 0,
++    kOsWinVista = 1 << 1,
++    kOsWin7 = 1 << 2,
++    kOsWin8 = 1 << 3,
++    kOsWin10 = 1 << 4,
++    kOsWin = kOsWinXP | kOsWinVista | kOsWin7 | kOsWin8 | kOsWin10,
+     // Jump over a few bits for future Windows versions.
+     // Versions after Sonoma are now at the top of the list, replacing obsolete
+     // versions.
+diff --git a/gpu/config/gpu_test_config_unittest.cc b/gpu/config/gpu_test_config_unittest.cc
+index ce93f7e2b9ebf..961e32948c29b 100644
+--- a/gpu/config/gpu_test_config_unittest.cc
++++ b/gpu/config/gpu_test_config_unittest.cc
+@@ -60,7 +60,7 @@ TEST_F(GPUTestConfigTest, IsValid) {
+   {
+     GPUTestBotConfig config;
+     config.set_build_type(GPUTestConfig::kBuildTypeRelease);
+-    config.set_os(GPUTestConfig::kOsWin10);
++    config.set_os(GPUTestConfig::kOsWin7);
+     config.set_gpu_device_id(0x0640);
+     EXPECT_FALSE(config.IsValid());
+     config.AddGPUVendor(0x10de);
+@@ -70,13 +70,17 @@ TEST_F(GPUTestConfigTest, IsValid) {
+     config.set_gpu_device_id(0);
+     config.set_os(GPUTestConfig::kOsMacBigSur);
+     EXPECT_TRUE(config.IsValid());
+-    config.set_os(GPUTestConfig::kOsWin10);
++    config.set_os(GPUTestConfig::kOsWin7);
+     EXPECT_FALSE(config.IsValid());
+ 
+     config.set_gpu_device_id(0x0640);
+     EXPECT_TRUE(config.IsValid());
+ 
+-    config.set_os(GPUTestConfig::kOsWin10);
++    config.set_os(GPUTestConfig::kOsWin);
++    EXPECT_FALSE(config.IsValid());
++    config.set_os(GPUTestConfig::kOsWin7 | GPUTestConfig::kOsWinXP);
++    EXPECT_FALSE(config.IsValid());
++    config.set_os(GPUTestConfig::kOsWin7);
+     EXPECT_TRUE(config.IsValid());
+ 
+     config.set_build_type(GPUTestConfig::kBuildTypeUnknown);
+@@ -88,7 +92,7 @@ TEST_F(GPUTestConfigTest, IsValid) {
+ 
+ TEST_F(GPUTestConfigTest, Matches) {
+   GPUTestBotConfig config;
+-  config.set_os(GPUTestConfig::kOsWin10);
++  config.set_os(GPUTestConfig::kOsWin7);
+   config.set_build_type(GPUTestConfig::kBuildTypeRelease);
+   config.AddGPUVendor(0x10de);
+   config.set_gpu_device_id(0x0640);
+@@ -101,11 +105,11 @@ TEST_F(GPUTestConfigTest, Matches) {
+     EXPECT_TRUE(config.Matches(config2));
+     config2.set_os(GPUTestConfig::kOsWin);
+     EXPECT_TRUE(config.Matches(config2));
+-    config2.set_os(GPUTestConfig::kOsWin10);
++    config2.set_os(GPUTestConfig::kOsWin7);
+     EXPECT_TRUE(config.Matches(config2));
+     config2.set_os(GPUTestConfig::kOsMac);
+     EXPECT_FALSE(config.Matches(config2));
+-    config2.set_os(GPUTestConfig::kOsWin10 | GPUTestConfig::kOsLinux);
++    config2.set_os(GPUTestConfig::kOsWin7 | GPUTestConfig::kOsLinux);
+     EXPECT_TRUE(config.Matches(config2));
+   }
+ 
+@@ -137,7 +141,7 @@ TEST_F(GPUTestConfigTest, Matches) {
+ 
+   {  // exact matching
+     GPUTestConfig config2;
+-    config2.set_os(GPUTestConfig::kOsWin10);
++    config2.set_os(GPUTestConfig::kOsWin7);
+     config2.set_build_type(GPUTestConfig::kBuildTypeRelease);
+     config2.AddGPUVendor(0x10de);
+     config2.set_gpu_device_id(0x0640);
+@@ -176,7 +180,7 @@ TEST_F(GPUTestConfigTest, Matches) {
+ 
+ TEST_F(GPUTestConfigTest, StringMatches) {
+   GPUTestBotConfig config;
+-  config.set_os(GPUTestConfig::kOsWin10);
++  config.set_os(GPUTestConfig::kOsWin7);
+   config.set_build_type(GPUTestConfig::kBuildTypeRelease);
+   config.AddGPUVendor(0x10de);
+   config.set_gpu_device_id(0x0640);
+@@ -188,9 +192,9 @@ TEST_F(GPUTestConfigTest, StringMatches) {
+ 
+   // os matching
+   EXPECT_TRUE(config.Matches("WIN"));
+-  EXPECT_TRUE(config.Matches("WIN10"));
++  EXPECT_TRUE(config.Matches("WIN7"));
+   EXPECT_FALSE(config.Matches("MAC"));
+-  EXPECT_TRUE(config.Matches("WIN10 LINUX"));
++  EXPECT_TRUE(config.Matches("WIN7 LINUX"));
+ 
+   // gpu vendor matching
+   EXPECT_TRUE(config.Matches("NVIDIA"));
+@@ -203,8 +207,8 @@ TEST_F(GPUTestConfigTest, StringMatches) {
+   EXPECT_FALSE(config.Matches("DEBUG"));
+ 
+   // exact matching
+-  EXPECT_TRUE(config.Matches("WIN10 RELEASE NVIDIA 0X0640"));
+-  EXPECT_FALSE(config.Matches("WIN10 RELEASE NVIDIA 0X0641"));
++  EXPECT_TRUE(config.Matches("WIN7 RELEASE NVIDIA 0X0640"));
++  EXPECT_FALSE(config.Matches("WIN7 RELEASE NVIDIA 0X0641"));
+ 
+   // api matching
+   EXPECT_TRUE(config.Matches("D3D11"));
+@@ -217,25 +221,25 @@ TEST_F(GPUTestConfigTest, StringMatches) {
+ 
+ TEST_F(GPUTestConfigTest, OverlapsWith) {
+   {  // os
+-      // win vs win10
+-      GPUTestConfig config;
+-      config.set_os(GPUTestConfig::kOsWin);
+-      GPUTestConfig config2;
+-      config2.set_os(GPUTestConfig::kOsWin10);
+-      EXPECT_TRUE(config.OverlapsWith(config2));
+-      EXPECT_TRUE(config2.OverlapsWith(config));
+-      // win vs win10+linux
+-      config2.set_os(GPUTestConfig::kOsWin10 | GPUTestConfig::kOsLinux);
+-      EXPECT_TRUE(config.OverlapsWith(config2));
+-      EXPECT_TRUE(config2.OverlapsWith(config));
+-      // win vs mac
+-      config2.set_os(GPUTestConfig::kOsMac);
+-      EXPECT_FALSE(config.OverlapsWith(config2));
+-      EXPECT_FALSE(config2.OverlapsWith(config));
+-      // win vs unknown
+-      config2.set_os(GPUTestConfig::kOsUnknown);
+-      EXPECT_TRUE(config.OverlapsWith(config2));
+-      EXPECT_TRUE(config2.OverlapsWith(config));
++    // win vs win7
++    GPUTestConfig config;
++    config.set_os(GPUTestConfig::kOsWin);
++    GPUTestConfig config2;
++    config2.set_os(GPUTestConfig::kOsWin7);
++    EXPECT_TRUE(config.OverlapsWith(config2));
++    EXPECT_TRUE(config2.OverlapsWith(config));
++    // win vs win7+linux
++    config2.set_os(GPUTestConfig::kOsWin7 | GPUTestConfig::kOsLinux);
++    EXPECT_TRUE(config.OverlapsWith(config2));
++    EXPECT_TRUE(config2.OverlapsWith(config));
++    // win vs mac
++    config2.set_os(GPUTestConfig::kOsMac);
++    EXPECT_FALSE(config.OverlapsWith(config2));
++    EXPECT_FALSE(config2.OverlapsWith(config));
++    // win vs unknown
++    config2.set_os(GPUTestConfig::kOsUnknown);
++    EXPECT_TRUE(config.OverlapsWith(config2));
++    EXPECT_TRUE(config2.OverlapsWith(config));
+   }
+ 
+   {  // gpu vendor
+@@ -274,9 +278,9 @@ TEST_F(GPUTestConfigTest, OverlapsWith) {
+     EXPECT_TRUE(config2.OverlapsWith(config));
+   }
+ 
+-  {  // win10 vs nvidia
++  {  // win7 vs nvidia
+     GPUTestConfig config;
+-    config.set_os(GPUTestConfig::kOsWin10);
++    config.set_os(GPUTestConfig::kOsWin7);
+     GPUTestConfig config2;
+     config2.AddGPUVendor(0x10de);
+     EXPECT_TRUE(config.OverlapsWith(config2));
+diff --git a/gpu/config/gpu_test_expectations_parser.cc b/gpu/config/gpu_test_expectations_parser.cc
+index 93e6319ffa718..7bae6f4d6cf3c 100644
+--- a/gpu/config/gpu_test_expectations_parser.cc
++++ b/gpu/config/gpu_test_expectations_parser.cc
+@@ -30,7 +30,11 @@ enum LineParserStage {
+ 
+ enum Token {
+   // os
+-  kConfigWin10 = 0,
++  kConfigWinXP = 0,
++  kConfigWinVista,
++  kConfigWin7,
++  kConfigWin8,
++  kConfigWin10,
+   kConfigWin,
+   kConfigMacSnowLeopard,
+   kConfigMacLion,
+@@ -91,7 +95,11 @@ struct TokenInfo {
+   int32_t flag;
+ };
+ 
+-const std::array<TokenInfo, 42> kTokenData = {{
++const std::array<TokenInfo, 46> kTokenData = {{
++    {"xp", GPUTestConfig::kOsWinXP},
++    {"vista", GPUTestConfig::kOsWinVista},
++    {"win7", GPUTestConfig::kOsWin7},
++    {"win8", GPUTestConfig::kOsWin8},
+     {"win10", GPUTestConfig::kOsWin10},
+     {"win", GPUTestConfig::kOsWin},
+     {"snowleopard", GPUTestConfig::kOsMacSnowLeopard},
+@@ -260,6 +268,10 @@ bool GPUTestExpectationsParser::ParseConfig(
+   for (size_t i = 0; i < tokens.size(); ++i) {
+     Token token = ParseToken(tokens[i]);
+     switch (token) {
++      case kConfigWinXP:
++      case kConfigWinVista:
++      case kConfigWin7:
++      case kConfigWin8:
+       case kConfigWin10:
+       case kConfigWin:
+       case kConfigMacSnowLeopard:
+@@ -325,6 +337,10 @@ bool GPUTestExpectationsParser::ParseLine(
+       case kTokenComment:
+         comments_encountered = true;
+         break;
++      case kConfigWinXP:
++      case kConfigWinVista:
++      case kConfigWin7:
++      case kConfigWin8:
+       case kConfigWin10:
+       case kConfigWin:
+       case kConfigMacSnowLeopard:
+@@ -453,6 +469,10 @@ bool GPUTestExpectationsParser::UpdateTestConfig(GPUTestConfig* config,
+                                                  size_t line_number) {
+   DCHECK(config);
+   switch (token) {
++    case kConfigWinXP:
++    case kConfigWinVista:
++    case kConfigWin7:
++    case kConfigWin8:
+     case kConfigWin10:
+     case kConfigWin:
+     case kConfigMacSnowLeopard:
