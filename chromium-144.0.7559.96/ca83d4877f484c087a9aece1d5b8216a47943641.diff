@@ -1,0 +1,158 @@
+diff --git a/content/browser/gpu/gpu_data_manager_impl_private.cc b/content/browser/gpu/gpu_data_manager_impl_private.cc
+index 972bb4e8ba2d1..cb2e742d3f7b7 100644
+--- a/content/browser/gpu/gpu_data_manager_impl_private.cc
++++ b/content/browser/gpu/gpu_data_manager_impl_private.cc
+@@ -1338,16 +1338,14 @@ void GpuDataManagerImplPrivate::AppendGpuCommandLine(
+     case gpu::GpuMode::HARDWARE_VULKAN:
+       use_gl = browser_command_line->GetSwitchValueASCII(switches::kUseGL);
+       break;
+-    case gpu::GpuMode::SOFTWARE_GL:
+-      // On Fuchsia, always force software GL
+-#if !BUILDFLAG(IS_FUCHSIA)
+-      if (!gl::HasRequestedSoftwareGLImplementationFromCommandLine(
+-              command_line))
+-#endif  // BUILDFLAG(IS_FUCHSIA)
+-      {
+-        gl::SetSoftwareWebGLCommandLineSwitches(command_line);
+-      }
+-      break;
++    case gpu::GpuMode::SOFTWARE_GL: {
++      bool legacy_software_gl = true;
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
++      // This setting makes WebGL run on SwANGLE instead of SwiftShader GL.
++      legacy_software_gl = false;
++#endif
++      gl::SetSoftwareWebGLCommandLineSwitches(command_line, legacy_software_gl);
++    } break;
+     default:
+       use_gl = gl::kGLImplementationDisabledName;
+   }
+diff --git a/content/web_test/browser/web_test_browser_main_runner.cc b/content/web_test/browser/web_test_browser_main_runner.cc
+index 107cd00ccc344..6079f3e3f6bb2 100644
+--- a/content/web_test/browser/web_test_browser_main_runner.cc
++++ b/content/web_test/browser/web_test_browser_main_runner.cc
+@@ -139,9 +139,9 @@ void WebTestBrowserMainRunner::Initialize() {
+   // only default to a software GL if the flag isn't already specified.
+   if (!command_line.HasSwitch(switches::kUseGpuInTests) &&
+       !command_line.HasSwitch(switches::kUseGL)) {
+-      gl::SetGLImplementationCommandLineSwitches(
+-          gl::GLImplementationParts(gl::ANGLEImplementation::kSwiftShader),
+-          &command_line);
++    // This setting makes web tests run on SwANGLE instead of SwiftShader GL.
++    bool legacy_software_gl = false;
++    gl::SetSoftwareGLCommandLineSwitches(&command_line, legacy_software_gl);
+     }
+   }
+   command_line.AppendSwitchASCII(switches::kTouchEventFeatureDetection,
+diff --git a/gpu/config/gpu_util.cc b/gpu/config/gpu_util.cc
+index 07cdbfde0ff31..3e25172228765 100644
+--- a/gpu/config/gpu_util.cc
++++ b/gpu/config/gpu_util.cc
+@@ -753,7 +753,12 @@ bool EnableSwiftShaderIfNeeded(base::CommandLine* command_line,
+           kGpuFeatureStatusEnabled ||
+       gpu_feature_info.status_values[GPU_FEATURE_TYPE_ACCELERATED_GL] !=
+           kGpuFeatureStatusEnabled) {
+-    gl::SetSoftwareWebGLCommandLineSwitches(command_line);
++    bool legacy_software_gl = true;
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
++    // This setting makes WebGL run on SwANGLE instead of SwiftShader GL.
++    legacy_software_gl = false;
++#endif
++    gl::SetSoftwareWebGLCommandLineSwitches(command_line, legacy_software_gl);
+     return true;
+   }
+   return false;
+diff --git a/ui/gl/gl_implementation.cc b/ui/gl/gl_implementation.cc
+index 3874c49aff5df..41d909fbafd2c 100644
+--- a/ui/gl/gl_implementation.cc
++++ b/ui/gl/gl_implementation.cc
+@@ -297,30 +297,44 @@ bool IsSoftwareGLImplementation(GLImplementationParts implementation) {
+       switches::kUseANGLE, gl::GetGLImplementationANGLEName(implementation));
+ }
+ 
+-void SetSoftwareGLCommandLineSwitches(base::CommandLine* command_line) {
+-  GLImplementationParts implementation = GetSoftwareGLImplementation();
+-  SetGLImplementationCommandLineSwitches(implementation, command_line);
+-}
+-
+-void SetSoftwareWebGLCommandLineSwitches(base::CommandLine* command_line) {
+-  // Avoid duplicating the GL implementation switches. Multiples are not
+-  // handled.
+-  command_line->RemoveSwitch(switches::kUseGL);
+-  command_line->RemoveSwitch(switches::kUseANGLE);
+-
+-#if BUILDFLAG(IS_WIN)
+-  if (base::FeatureList::IsEnabled(features::kAllowD3D11WarpFallback)) {
+-    command_line->AppendSwitchASCII(switches::kUseGL,
+-                                    kGLImplementationANGLEName);
+-    command_line->AppendSwitchASCII(switches::kUseANGLE,
+-                                    kANGLEImplementationD3D11WarpForWebGLName);
+-    return;
+-  }
+-#endif
+-
+-  command_line->AppendSwitchASCII(switches::kUseGL, kGLImplementationANGLEName);
+-  command_line->AppendSwitchASCII(switches::kUseANGLE,
+-                                  kANGLEImplementationSwiftShaderForWebGLName);
++void SetSoftwareGLCommandLineSwitches(base::CommandLine* command_line,
++                                      bool legacy_software_gl) {
++  if (legacy_software_gl) {
++    command_line->AppendSwitchASCII(
++        switches::kUseGL,
++        gl::GetGLImplementationGLName(gl::GetLegacySoftwareGLImplementation()));
++  } else {
++    GLImplementationParts implementation = GetSoftwareGLImplementation();
++    SetGLImplementationCommandLineSwitches(implementation, command_line);
++  }
++}
++
++void SetSoftwareWebGLCommandLineSwitches(base::CommandLine* command_line,
++                                         bool legacy_software_gl) {
++  if (legacy_software_gl) {
++    command_line->AppendSwitchASCII(switches::kUseGL,
++                                    kGLImplementationSwiftShaderForWebGLName);
++  } else {
++    // Avoid duplicating the GL implementation switches. Multiples are not
++    // handled.
++    command_line->RemoveSwitch(switches::kUseGL);
++    command_line->RemoveSwitch(switches::kUseANGLE);
++
++#if BUILDFLAG(IS_WIN)
++  if (base::FeatureList::IsEnabled(features::kAllowD3D11WarpFallback)) {
++    command_line->AppendSwitchASCII(switches::kUseGL,
++                                    kGLImplementationANGLEName);
++    command_line->AppendSwitchASCII(switches::kUseANGLE,
++                                    kANGLEImplementationD3D11WarpForWebGLName);
++    return;
++  }
++#endif
++
++    command_line->AppendSwitchASCII(switches::kUseGL,
++                                    kGLImplementationANGLEName);
++    command_line->AppendSwitchASCII(
++        switches::kUseANGLE, kANGLEImplementationSwiftShaderForWebGLName);
++  }
+ }
+ 
+ GL_EXPORT bool HasRequestedSoftwareGLImplementationFromCommandLine(
+diff --git a/ui/gl/gl_implementation.h b/ui/gl/gl_implementation.h
+index ae5327bce016f..d6558a7e275cc 100644
+--- a/ui/gl/gl_implementation.h
++++ b/ui/gl/gl_implementation.h
+@@ -138,12 +138,13 @@ GL_EXPORT GLImplementationParts GetLegacySoftwareGLImplementation();
+     base::CommandLine* command_line);
+ 
+ // Set the software GL implementation on the provided command line
+-GL_EXPORT void SetSoftwareGLCommandLineSwitches(
+-    base::CommandLine* command_line);
++GL_EXPORT void SetSoftwareGLCommandLineSwitches(base::CommandLine* command_line,
++                                                bool legacy_software_gl);
+ 
+ // Set the software WebGL implementation on the provided command line
+ GL_EXPORT void SetSoftwareWebGLCommandLineSwitches(
+-    base::CommandLine* command_line);
++    base::CommandLine* command_line,
++    bool legacy_software_gl);
+ 
+ // Check if there is a requested software GL implementation in the command line
+ // arguments. Used to avoid requesting multiple times or overriding specific

@@ -1,0 +1,801 @@
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index 5c61307e43d8a..6b8f8778d1700 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -974,11 +974,16 @@ if (is_win) {
+     # Add the SwiftShader .dylibs in the MODULE_DIR of Chromium.app
+     bundle_data("swiftshader_binaries") {
+       sources = [
++        "$root_out_dir/egl_intermediates/libswiftshader_libEGL.dylib",
++        "$root_out_dir/egl_intermediates/libswiftshader_libGLESv2.dylib",
+         "$root_out_dir/vk_intermediates/libvk_swiftshader.dylib",
+         "$root_out_dir/vk_intermediates/vk_swiftshader_icd.json",
+       ]
+       outputs = [ "{{bundle_contents_dir}}/Libraries/{{source_file_part}}" ]
+-      public_deps = [ "//ui/gl:swiftshader_vk_library_copy" ]
++      public_deps = [
++        "//ui/gl:swiftshader_egl_library_copy",
++        "//ui/gl:swiftshader_vk_library_copy",
++      ]
+   }
+ 
+   if (bundle_widevine_cdm) {
+@@ -1264,6 +1269,8 @@ if (is_win) {
+       _chrome_symbols_sources += [
+         "$root_out_dir/libEGL.dylib",
+         "$root_out_dir/libGLESv2.dylib",
++      "$root_out_dir/libswiftshader_libEGL.dylib",
++      "$root_out_dir/libswiftshader_libGLESv2.dylib",
+       ]
+     }
+ 
+@@ -1302,6 +1309,8 @@ if (is_win) {
+         ":chrome_app",
+         ":chrome_framework",
+         "//components/crash/core/app:chrome_crashpad_handler",
++        "//third_party/swiftshader/src/OpenGL/libEGL:swiftshader_libEGL",
++        "//third_party/swiftshader/src/OpenGL/libGLESv2:swiftshader_libGLESv2",
+         "//third_party/swiftshader/src/Vulkan:swiftshader_libvulkan",
+         dump_syms,
+       ]
+@@ -1327,6 +1336,8 @@ if (is_win) {
+         _dsyms += [
+           "$root_out_dir/libEGL.dylib.dSYM",
+           "$root_out_dir/libGLESv2.dylib.dSYM",
++        "$root_out_dir/libswiftshader_libEGL.dylib.dSYM",
++        "$root_out_dir/libswiftshader_libGLESv2.dylib.dSYM",
+         ]
+       }
+ 
+@@ -1339,6 +1350,8 @@ if (is_win) {
+         ":chrome_app",
+         ":chrome_framework",
+         "//components/crash/core/app:chrome_crashpad_handler",
++        "//third_party/swiftshader/src/OpenGL/libEGL:swiftshader_libEGL",
++        "//third_party/swiftshader/src/OpenGL/libGLESv2:swiftshader_libGLESv2",
+         "//third_party/swiftshader/src/Vulkan:swiftshader_libvulkan",
+       ]
+       if (build_with_internal_optimization_guide) {
+@@ -1712,6 +1725,8 @@ if (is_linux || is_chromeos) {
+       deps = [
+         ":chrome_crashpad_symbols",
+         ":chrome_symbols",
++        ":swiftshader_egl_symbols",
++        ":swiftshader_gles_symbols",
+       ]
+       if (is_linux) {
+         deps += [ ":swiftshader_vk_symbols" ]
+@@ -1747,6 +1762,33 @@ if (is_linux || is_chromeos) {
+ 
+       deps = [ "//components/crash/core/app:chrome_crashpad_handler" ]
+     }
++    extract_symbols("swiftshader_egl_symbols") {
++      binary = "$root_out_dir/swiftshader/libEGL.so"
++
++      if (current_cpu == "x86") {
++        # GYP used "ia32" so keep that naming for back-compat.
++        symbol_file = "$root_out_dir/swiftshader_libegl.breakpad.ia32"
++      } else {
++        symbol_file = "$root_out_dir/swiftshader_libegl.breakpad.$current_cpu"
++      }
++
++      deps =
++          [ "//third_party/swiftshader/src/OpenGL/libEGL:swiftshader_libEGL" ]
++    }
++    extract_symbols("swiftshader_gles_symbols") {
++      binary = "$root_out_dir/swiftshader/libGLESv2.so"
++
++      if (current_cpu == "x86") {
++        # GYP used "ia32" so keep that naming for back-compat.
++        symbol_file = "$root_out_dir/swiftshader_libgles.breakpad.ia32"
++      } else {
++        symbol_file = "$root_out_dir/swiftshader_libgles.breakpad.$current_cpu"
++      }
++
++      deps = [
++        "//third_party/swiftshader/src/OpenGL/libGLESv2:swiftshader_libGLESv2",
++      ]
++    }
+     extract_symbols("swiftshader_vk_symbols") {
+       binary = "$root_out_dir/libvk_swiftshader.so"
+ 
+diff --git a/chrome/installer/mac/signing/parts.py b/chrome/installer/mac/signing/parts.py
+index c4037ccb5f82f..d4247ed4fe000 100644
+--- a/chrome/installer/mac/signing/parts.py
++++ b/chrome/installer/mac/signing/parts.py
+@@ -120,6 +120,8 @@ def get_parts(config):
+     dylibs = [
+         'libEGL.dylib',
+         'libGLESv2.dylib',
++        'libswiftshader_libEGL.dylib',
++        'libswiftshader_libGLESv2.dylib',
+         'libvk_swiftshader.dylib',
+     ]
+     if config.is_chrome_branded():
+diff --git a/chrome/installer/mini_installer/chrome.release b/chrome/installer/mini_installer/chrome.release
+index 5cdaad0576705..9c6346bb8c88f 100644
+--- a/chrome/installer/mini_installer/chrome.release
++++ b/chrome/installer/mini_installer/chrome.release
+@@ -54,6 +54,12 @@ locales\*.pak: %(VersionDir)s\Locales
+ Logo.png: %(VersionDir)s\VisualElements\
+ SmallLogo.png: %(VersionDir)s\VisualElements\
+ 
++#
++# SwiftShader sub-dir
++#
++swiftshader\libEGL.dll: %(VersionDir)s\swiftshader\
++swiftshader\libGLESv2.dll: %(VersionDir)s\swiftshader\
++
+ #
+ # Privacy Sandbox Attestation
+ #
+diff --git a/chrome/tools/build/win/FILES.cfg b/chrome/tools/build/win/FILES.cfg
+index b7b4f6aca6725..e9d32574cae18 100644
+--- a/chrome/tools/build/win/FILES.cfg
++++ b/chrome/tools/build/win/FILES.cfg
+@@ -383,6 +383,16 @@ FILES = [
+     'buildtype': ['official'],
+   },
+   # SwiftShader files:
++  {
++    'filename': 'swiftshader/libEGL.dll',
++    'buildtype': ['official'],
++    'filegroup': ['default', 'symsrc'],
++  },
++  {
++    'filename': 'swiftshader/libGLESv2.dll',
++    'buildtype': ['official'],
++    'filegroup': ['default', 'symsrc'],
++  },
+   {
+     'filename': 'vk_swiftshader.dll',
+     'buildtype': ['official'],
+@@ -656,6 +666,16 @@ FILES = [
+      'buildtype': ['official'],
+      'archive': 'chrome-win32-syms.zip',
+   },
++  {
++    'filename': 'swiftshader/libEGL.dll.pdb',
++    'buildtype': ['official'],
++    'archive': 'chrome-win32-syms.zip',
++  },
++  {
++    'filename': 'swiftshader/libGLESv2.dll.pdb',
++    'buildtype': ['official'],
++    'archive': 'chrome-win32-syms.zip',
++  },
+   {
+     'filename': 'vk_swiftshader.dll.pdb',
+     'buildtype': ['official'],
+diff --git a/content/shell/BUILD.gn b/content/shell/BUILD.gn
+index 4ce8514ceefe2..603832550746d 100644
+--- a/content/shell/BUILD.gn
++++ b/content/shell/BUILD.gn
+@@ -824,11 +824,16 @@ if (is_mac) {
+   # Add the SwiftShader .dylibs in the Libraries directory of the Framework.
+   bundle_data("content_shell_swiftshader_binaries") {
+     sources = [
++      "$root_out_dir/egl_intermediates/libswiftshader_libEGL.dylib",
++      "$root_out_dir/egl_intermediates/libswiftshader_libGLESv2.dylib",
+       "$root_out_dir/vk_intermediates/libvk_swiftshader.dylib",
+       "$root_out_dir/vk_intermediates/vk_swiftshader_icd.json",
+     ]
+     outputs = [ "{{bundle_contents_dir}}/Libraries/{{source_file_part}}" ]
+-    public_deps = [ "//ui/gl:swiftshader_vk_library_copy" ]
++    public_deps = [
++      "//ui/gl:swiftshader_egl_library_copy",
++      "//ui/gl:swiftshader_vk_library_copy",
++    ]
+   }
+ }
+ 
+diff --git a/gpu/command_buffer/service/feature_info.cc b/gpu/command_buffer/service/feature_info.cc
+index cc7acaff09ef1..e232df3982218 100644
+--- a/gpu/command_buffer/service/feature_info.cc
++++ b/gpu/command_buffer/service/feature_info.cc
+@@ -222,9 +222,10 @@ void FeatureInfo::InitializeBasicState(const base::CommandLine* command_line) {
+   const auto useANGLE = command_line->GetSwitchValueASCII(switches::kUseANGLE);
+ 
+   feature_flags_.is_software_webgl =
+-      (useGL == gl::kGLImplementationANGLEName) &&
+-      (useANGLE == gl::kANGLEImplementationSwiftShaderForWebGLName ||
+-       useANGLE == gl::kANGLEImplementationD3D11WarpForWebGLName);
++      (useGL == gl::kGLImplementationSwiftShaderForWebGLName) ||
++      ((useGL == gl::kGLImplementationANGLEName) &&
++      (useANGLE == gl::kANGLEImplementationSwiftShaderForWebGLName ||
++       useANGLE == gl::kANGLEImplementationD3D11WarpForWebGLName));
+ 
+   // The shader translator is needed to translate from WebGL-conformant GLES SL
+   // to normal GLES SL, enforce WebGL conformance, translate from GLES SL 1.0 to
+diff --git a/gpu/config/gpu_info_collector.cc b/gpu/config/gpu_info_collector.cc
+index 4d1a80ecf2916..f4a58fd4ad337 100644
+--- a/gpu/config/gpu_info_collector.cc
++++ b/gpu/config/gpu_info_collector.cc
+@@ -299,13 +299,17 @@ bool CollectBasicGraphicsInfo(const base::CommandLine* command_line,
+   std::optional<gl::GLImplementationParts> implementation =
+       gl::GetRequestedGLImplementationFromCommandLine(command_line);
+ 
+-  if (implementation == gl::kGLImplementationDisabled) {
++  if (implementation && *implementation == gl::kGLImplementationDisabled) {
+     // If GL is disabled then we don't need GPUInfo.
+     gpu_info->gl_vendor = "Disabled";
+     gpu_info->gl_renderer = "Disabled";
+     gpu_info->gl_version = "Disabled";
+     return true;
+-  } else if (implementation == gl::GetSoftwareGLImplementation()) {
++  }
++
++  gl::GLImplementationParts legacy_impl =
++      gl::GetLegacySoftwareGLImplementation();
++  if (implementation && *implementation == legacy_impl) {
+     // If using the software GL implementation, use fake vendor and
+     // device ids to make sure it never gets blocklisted. It allows us
+     // to proceed with loading the blocklist which may have non-device
+@@ -315,6 +317,21 @@ bool CollectBasicGraphicsInfo(const base::CommandLine* command_line,
+     gpu_info->gpu.vendor_id = 0xffff;
+     gpu_info->gpu.device_id = 0xffff;
+ 
++    // Also declare the driver_vendor to be <software GL> to be able to
++    // specify exceptions based on driver_vendor==<software GL> for some
++    // blocklist rules.
++    gpu_info->gpu.driver_vendor = gl::GetGLImplementationGLName(legacy_impl);
++
++    return true;
++  }
++
++  if (implementation &&
++      *implementation == gl::ANGLEImplementation::kSwiftShader) {
++    // Similarly to the above, use fake vendor and device ids
++    // to make sure they never gets blocklisted for SwANGLE as well.
++    gpu_info->gpu.vendor_id = 0xffff;
++    gpu_info->gpu.device_id = 0xffff;
++
+     // Also declare the driver_vendor to be <SwANGLE> to be able to
+     // specify exceptions based on driver_vendor==<SwANGLE> for some
+     // blocklist rules.
+diff --git a/gpu/config/gpu_util.cc b/gpu/config/gpu_util.cc
+index 972db1c91dba0..38207177382d7 100644
+--- a/gpu/config/gpu_util.cc
++++ b/gpu/config/gpu_util.cc
+@@ -540,7 +540,8 @@ GpuFeatureInfo ComputeGpuFeatureInfo(const GPUInfo& gpu_info,
+       std::string use_gl = command_line->GetSwitchValueASCII(switches::kUseGL);
+       std::string use_angle =
+           command_line->GetSwitchValueASCII(switches::kUseANGLE);
+-      if (use_angle == gl::kANGLEImplementationSwiftShaderForWebGLName ||
++      if (use_gl == gl::kGLImplementationSwiftShaderForWebGLName ||
++          use_angle == gl::kANGLEImplementationSwiftShaderForWebGLName ||
+           use_angle == gl::kANGLEImplementationD3D11WarpForWebGLName) {
+         return ComputeGpuFeatureInfoForSoftwareGL();
+       }
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index d8e576d6f8b09..bd06bfe180ebe 100644
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -667,9 +667,11 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+     std::string use_gl = command_line->GetSwitchValueASCII(switches::kUseGL);
+     std::string use_angle =
+         command_line->GetSwitchValueASCII(switches::kUseANGLE);
+-    if (use_gl == gl::kGLImplementationANGLEName &&
+-        (use_angle == gl::kANGLEImplementationSwiftShaderName ||
+-         use_angle == gl::kANGLEImplementationSwiftShaderForWebGLName)) {
++    if (use_gl == gl::kGLImplementationSwiftShaderName ||
++        use_gl == gl::kGLImplementationSwiftShaderForWebGLName ||
++        (use_gl == gl::kGLImplementationANGLEName &&
++         (use_angle == gl::kANGLEImplementationSwiftShaderName ||
++          use_angle == gl::kANGLEImplementationSwiftShaderForWebGLName))) {
+       gl_use_swiftshader_ = true;
+       if (watchdog_thread_) {
+         recreate_watchdog = true;
+diff --git a/infra/archive_config/win-archive-rel.json b/infra/archive_config/win-archive-rel.json
+index f73dc8ee093ef..0aa6446c8baaa 100644
+--- a/infra/archive_config/win-archive-rel.json
++++ b/infra/archive_config/win-archive-rel.json
+@@ -23,6 +23,8 @@
+                 "PrivacySandboxAttestationsPreloaded\\manifest.json",
+                 "PrivacySandboxAttestationsPreloaded\\privacy-sandbox-attestations.dat",
+                 "resources.pak",
++                "swiftshader\\libEGL.dll",
++                "swiftshader\\libGLESv2.dll",
+                 "setup.exe",
+                 "v8_context_snapshot.bin",
+                 "vk_swiftshader.dll",
+@@ -64,6 +66,8 @@
+                 "mini_installer.exe.pdb",
+                 "notification_helper.exe.pdb",
+                 "setup.exe.pdb",
++                "swiftshader\\libEGL.dll.pdb",
++                "swiftshader\\libGLESv2.dll.pdb",
+                 "vk_swiftshader.dll.pdb",
+                 "vulkan-1.dll.pdb"
+             ],
+diff --git a/infra/archive_config/win32-archive-rel.json b/infra/archive_config/win32-archive-rel.json
+index 6d284e1977894..378f934191058 100644
+--- a/infra/archive_config/win32-archive-rel.json
++++ b/infra/archive_config/win32-archive-rel.json
+@@ -25,6 +25,8 @@
+                 "PrivacySandboxAttestationsPreloaded\\manifest.json",
+                 "PrivacySandboxAttestationsPreloaded\\privacy-sandbox-attestations.dat",
+                 "resources.pak",
++                "swiftshader\\libEGL.dll",
++                "swiftshader\\libGLESv2.dll",
+                 "setup.exe",
+                 "v8_context_snapshot.bin",
+                 "vk_swiftshader.dll",
+@@ -67,6 +69,8 @@
+                 "mini_installer.exe.pdb",
+                 "notification_helper.exe.pdb",
+                 "setup.exe.pdb",
++                "swiftshader\\libEGL.dll.pdb",
++                "swiftshader\\libGLESv2.dll.pdb",
+                 "vk_swiftshader.dll.pdb",
+                 "vulkan-1.dll.pdb"
+             ],
+diff --git a/infra/scripts/sizes.py b/infra/scripts/sizes.py
+index 1ba07e4bb5119..595f26ca5aa76 100755
+--- a/infra/scripts/sizes.py
++++ b/infra/scripts/sizes.py
+@@ -406,6 +406,8 @@ def main_win(options, args, results_collector):
+     'mini_installer.exe',
+     'resources.pak',
+     'setup.exe',
++    'swiftshader\\libEGL.dll',
++    'swiftshader\\libGLESv2.dll',
+     'WidevineCdm\\_platform_specific\\win_arm64\\widevinecdm.dll',
+     'WidevineCdm\\_platform_specific\\win_x64\\widevinecdm.dll',
+     'WidevineCdm\\_platform_specific\\win_x86\\widevinecdm.dll',
+diff --git a/tools/binary_size/sizes.py b/tools/binary_size/sizes.py
+index a6b2c509d71ff..57815a4cba134 100755
+--- a/tools/binary_size/sizes.py
++++ b/tools/binary_size/sizes.py
+@@ -376,6 +376,8 @@ def main_win(output_directory, results_collector, size_path):
+       'notification_helper.exe',
+       'resources.pak',
+       'setup.exe',
++      'swiftshader\\libEGL.dll',
++      'swiftshader\\libGLESv2.dll',
+       'WidevineCdm\\_platform_specific\\win_arm64\\widevinecdm.dll',
+       'WidevineCdm\\_platform_specific\\win_x64\\widevinecdm.dll',
+       'WidevineCdm\\_platform_specific\\win_x86\\widevinecdm.dll',
+diff --git a/tools/determinism/deterministic_build_ignorelist.pyl b/tools/determinism/deterministic_build_ignorelist.pyl
+index b178f55fe24dc..514c144f3fbfc 100644
+--- a/tools/determinism/deterministic_build_ignorelist.pyl
++++ b/tools/determinism/deterministic_build_ignorelist.pyl
+@@ -194,6 +194,10 @@
+     'mini_installer.exe.pdb',
+     'previous_version_mini_installer.exe',
+ 
++    # https://crbug.com/1163310
++    r'swiftshader\libGLESv2.dll',
++    r'swiftshader\libGLESv2.dll.pdb',
++
+     # These probably have mtimes in the zip headers and the scripts creating
+     # them probably should use zip_helpers.zip_directory() instead.
+     'mini_installer_tests.zip',
+diff --git a/ui/gl/BUILD.gn b/ui/gl/BUILD.gn
+index b4868aecf6a2d..56b0584e5965d 100644
+--- a/ui/gl/BUILD.gn
++++ b/ui/gl/BUILD.gn
+@@ -453,6 +453,17 @@ if (is_mac && use_egl) {
+   }
+ 
+   if (enable_swiftshader) {
++    copy("swiftshader_egl_library_copy") {
++      sources = [
++        "$root_out_dir/libswiftshader_libEGL.dylib",
++        "$root_out_dir/libswiftshader_libGLESv2.dylib",
++      ]
++      outputs = [ "$root_out_dir/egl_intermediates/{{source_file_part}}" ]
++      deps = [
++        "//third_party/swiftshader/src/OpenGL/libEGL:swiftshader_libEGL",
++        "//third_party/swiftshader/src/OpenGL/libGLESv2:swiftshader_libGLESv2",
++      ]
++    }
+     copy("swiftshader_vk_library_copy") {
+       sources = [
+         "$root_out_dir/libvk_swiftshader.dylib",
+diff --git a/ui/gl/gl_context.cc b/ui/gl/gl_context.cc
+index 9362605f03985..12538ee218cbe 100644
+--- a/ui/gl/gl_context.cc
++++ b/ui/gl/gl_context.cc
+@@ -297,6 +297,7 @@ bool GLContext::LosesAllContextsOnContextLost() {
+       return false;
+     case kGLImplementationEGLGLES2:
+     case kGLImplementationEGLANGLE:
++    case kGLImplementationSwiftShaderGL:
+       return true;
+     case kGLImplementationMockGL:
+     case kGLImplementationStubGL:
+diff --git a/ui/gl/gl_implementation.cc b/ui/gl/gl_implementation.cc
+index a3cec15e679a0..52dde28ec4c36 100644
+--- a/ui/gl/gl_implementation.cc
++++ b/ui/gl/gl_implementation.cc
+@@ -68,6 +68,8 @@ std::string GLImplementationParts::ToString() const {
+       return "desktop-gl";
+     case GLImplementation::kGLImplementationDesktopGLCoreProfile:
+       return "desktop-gl-core-profile";
++    case GLImplementation::kGLImplementationSwiftShaderGL:
++      return "swiftshader-gl";
+     case GLImplementation::kGLImplementationEGLGLES2:
+       return "egl-gles2";
+     case GLImplementation::kGLImplementationMockGL:
+@@ -133,6 +136,8 @@ const struct {
+ } kGLImplementationNamePairs[] = {
+     {kGLImplementationDesktopName, kANGLEImplementationNoneName,
+      GLImplementationParts(kGLImplementationDesktopGL)},
++    {kGLImplementationSwiftShaderName, kANGLEImplementationNoneName,
++     GLImplementationParts(kGLImplementationSwiftShaderGL)},
+     {kGLImplementationEGLName, kANGLEImplementationNoneName,
+      GLImplementationParts(kGLImplementationEGLGLES2)},
+     {kGLImplementationANGLEName, kANGLEImplementationNoneName,
+@@ -257,18 +262,32 @@ GLImplementationParts GetNamedGLImplementation(const std::string& gl_name,
+   return GLImplementationParts(kGLImplementationNone);
+ }
+ 
++GLImplementationParts GetLegacySoftwareGLImplementation() {
++  return GLImplementationParts(kGLImplementationSwiftShaderGL);
++}
++
+ GLImplementationParts GetSoftwareGLImplementation() {
+ #if BUILDFLAG(IS_WIN)
+   if (base::FeatureList::IsEnabled(features::kAllowD3D11WarpFallback)) {
+     return GLImplementationParts(ANGLEImplementation::kD3D11Warp);
+   }
+ #endif
+   return GLImplementationParts(ANGLEImplementation::kSwiftShader);
+ }
+ 
++GLImplementationParts GetSoftwareGLImplementationForPlatform() {
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC) || \
++    BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_FUCHSIA)
++  return GetSoftwareGLImplementation();
++#else
++  return GetLegacySoftwareGLImplementation();
++#endif
++}
++
+ bool IsSoftwareGLImplementation(GLImplementationParts implementation) {
+-  return implementation.angle == ANGLEImplementation::kSwiftShader ||
+-         implementation.angle == ANGLEImplementation::kD3D11Warp;
++  return implementation == GetLegacySoftwareGLImplementation() ||
++         implementation.angle == ANGLEImplementation::kSwiftShader ||
++         implementation.angle == ANGLEImplementation::kD3D11Warp;
+ }
+ 
+ GL_EXPORT bool IsSwiftShaderGLImplementation(
+@@ -285,7 +304,7 @@ GetRequestedGLImplementationFromCommandLine(
+   }
+ #endif
+   if (overrideUseSoftwareGL) {
+-    return GetSoftwareGLImplementation();
++    return GetSoftwareGLImplementationForPlatform();
+   }
+ 
+   if (!command_line->HasSwitch(switches::kUseGL) &&
+@@ -308,6 +327,11 @@ GetRequestedGLImplementationFromCommandLine(
+     gl_name = kGLImplementationANGLEName;
+   }
+ 
++  if ((gl_name == kGLImplementationSwiftShaderName) ||
++      (gl_name == kGLImplementationSwiftShaderForWebGLName)) {
++    return GLImplementationParts(kGLImplementationSwiftShaderGL);
++  }
++
+   return GetNamedGLImplementation(gl_name, angle_name);
+ }
+ 
+diff --git a/ui/gl/gl_implementation.h b/ui/gl/gl_implementation.h
+index 497152c13427f..c4e6aae257bc8 100644
+--- a/ui/gl/gl_implementation.h
++++ b/ui/gl/gl_implementation.h
+@@ -34,6 +34,7 @@ enum GLImplementation {
+   // 3 used to be legacy SwiftShader.
+   // 4 used to be Apple's software GL.
+   kGLImplementationEGLGLES2 = 5,  // Native EGL/GLES2
++  kGLImplementationSwiftShaderGL = 3,
+   kGLImplementationMockGL = 6,
+   kGLImplementationStubGL = 7,
+   kGLImplementationDisabled = 8,
+@@ -165,8 +164,13 @@ GL_EXPORT void SetANGLEImplementation(ANGLEImplementation implementation);
+ GL_EXPORT ANGLEImplementation GetANGLEImplementation();
+ 
+ // Get the software GL implementation
++GL_EXPORT GLImplementationParts GetLegacySoftwareGLImplementation();
+ GL_EXPORT GLImplementationParts GetSoftwareGLImplementation();
+ 
++// Returns the software GL implementation used by default on the current
++// platform
++GL_EXPORT GLImplementationParts GetSoftwareGLImplementationForPlatform();
++
+ // Set the command line flags to request the provided GL implementation
+ GL_EXPORT void SetGLImplementationCommandLineSwitches(
+     const GLImplementationParts& implementation,
+diff --git a/ui/gl/init/gl_display_initializer.cc b/ui/gl/init/gl_display_initializer.cc
+index bc2b2e4d9504c..c3d5aa5b036b4 100644
+--- a/ui/gl/init/gl_display_initializer.cc
++++ b/ui/gl/init/gl_display_initializer.cc
+@@ -861,6 +861,19 @@ void GetEGLInitDisplays(bool supports_angle_d3d,
+       base::FeatureList::IsEnabled(features::kDefaultANGLEMetal);
+   bool default_angle_vulkan = features::IsDefaultANGLEVulkan();
+ 
++  bool usingSoftwareGL =
++      command_line->HasSwitch(switches::kOverrideUseSoftwareGLForTests);
++  bool isSwANGLE = GetGLImplementationParts() == GetSoftwareGLImplementation();
++
++  // SwiftShader does not use the platform extensions
++  // Note: Do not use SwiftShader if we've explicitly selected SwANGLE
++  if (command_line->GetSwitchValueASCII(switches::kUseGL) ==
++          kGLImplementationSwiftShaderForWebGLName &&
++      !(usingSoftwareGL && isSwANGLE)) {
++    AddInitDisplay(init_displays, SWIFT_SHADER);
++    return;
++  }
++
+   // If we're already requesting software GL, make sure we don't fallback to the
+   // GPU
+   bool force_software_gl =
+diff --git a/ui/gl/gl_switches.cc b/ui/gl/gl_switches.cc
+index 4a92078cf4593..0912ccb6b53a0 100644
+--- a/ui/gl/gl_switches.cc
++++ b/ui/gl/gl_switches.cc
+@@ -16,6 +16,8 @@ const char kGLImplementationDesktopName[] = "desktop";
+ const char kGLImplementationAppleName[] = "apple";
+ const char kGLImplementationEGLName[] = "egl";
+ const char kGLImplementationANGLEName[] = "angle";
++const char kGLImplementationSwiftShaderName[] = "swiftshader";
++const char kGLImplementationSwiftShaderForWebGLName[] = "swiftshader-webgl";
+ const char kGLImplementationMockName[] = "mock";
+ const char kGLImplementationStubName[] = "stub";
+ const char kGLImplementationDisabledName[] = "disabled";
+diff --git a/ui/gl/gl_switches.h b/ui/gl/gl_switches.h
+index 0e47d04c19ad2..174d12ea38f43 100644
+--- a/ui/gl/gl_switches.h
++++ b/ui/gl/gl_switches.h
+@@ -18,6 +18,8 @@ GL_EXPORT extern const char kGLImplementationDesktopName[];
+ GL_EXPORT extern const char kGLImplementationAppleName[];
+ GL_EXPORT extern const char kGLImplementationEGLName[];
+ GL_EXPORT extern const char kGLImplementationANGLEName[];
++GL_EXPORT extern const char kGLImplementationSwiftShaderName[];
++GL_EXPORT extern const char kGLImplementationSwiftShaderForWebGLName[];
+ GL_EXPORT extern const char kGLImplementationMockName[];
+ GL_EXPORT extern const char kGLImplementationStubName[];
+ GL_EXPORT extern const char kGLImplementationDisabledName[];
+diff --git a/ui/gl/init/gl_factory.cc b/ui/gl/init/gl_factory.cc
+index 01b8dd9ab9195..7ed039ca098cc 100644
+--- a/ui/gl/init/gl_factory.cc
++++ b/ui/gl/init/gl_factory.cc
+@@ -81,11 +81,15 @@ GLImplementationParts GetRequestedGLImplementation(
+   if (UsePassthroughCommandDecoder(cmd)) {
+     std::vector<GLImplementationParts> angle_impls = {};
+     bool software_gl_in_allow_list = false;
++    bool legacy_software_gl_allowed = false;
+     auto iter = allowed_impls.begin();
+     while (iter != allowed_impls.end()) {
+       if ((*iter) == GetSoftwareGLImplementation()) {
+         software_gl_in_allow_list = true;
+         allowed_impls.erase(iter);
++      } else if ((*iter) == GetLegacySoftwareGLImplementation()) {
++        legacy_software_gl_allowed = true;
++        allowed_impls.erase(iter);
+       } else if (iter->gl == kGLImplementationEGLANGLE) {
+         angle_impls.emplace_back(*iter);
+         allowed_impls.erase(iter);
+@@ -100,6 +104,9 @@ GLImplementationParts GetRequestedGLImplementation(
+     if (software_gl_in_allow_list && features::IsSwiftShaderAllowed(cmd)) {
+       allowed_impls.emplace_back(GetSoftwareGLImplementation());
+     }
++    if (legacy_software_gl_allowed) {
++      allowed_impls.emplace_back(GetLegacySoftwareGLImplementation());
++    }
+   }
+ 
+   if (allowed_impls.empty()) {
+@@ -197,6 +204,13 @@ bool InitializeStaticGLBindingsImplementation(GLImplementationParts impl,
+ bool InitializeStaticGLBindingsImplementation(GLImplementationParts impl) {
+   if (!InitializeStaticGLBindings(impl)) {
+     ShutdownGL(nullptr, /*due_to_fallback*/ false);
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++    bool initialized =
++        InitializeStaticGLBindings(GetSoftwareGLImplementationForPlatform());
++   if (initialized)
++     return true;
++    ShutdownGL(nullptr, /*due_to_fallback*/ false);
+     return false;
+   }
+   return true;
+diff --git a/ui/gl/init/gl_factory_win.cc b/ui/gl/init/gl_factory_win.cc
+index a938498faa029..22b59253283f7 100644
+--- a/ui/gl/init/gl_factory_win.cc
++++ b/ui/gl/init/gl_factory_win.cc
+@@ -24,6 +24,7 @@ namespace init {
+ std::vector<GLImplementationParts> GetAllowedGLImplementations() {
+   std::vector<GLImplementationParts> impls;
+   impls.emplace_back(kGLImplementationEGLANGLE);
++  impls.emplace_back(kGLImplementationSwiftShaderGL);
+   return impls;
+ }
+ 
+@@ -42,6 +43,7 @@ scoped_refptr<GLContext> CreateGLContext(GLShareGroup* share_group,
+                                          const GLContextAttribs& attribs) {
+   TRACE_EVENT0("gpu", "gl::init::CreateGLContext");
+   switch (GetGLImplementation()) {
++    case kGLImplementationSwiftShaderGL:
+     case kGLImplementationEGLANGLE:
+       return InitializeGLContext(new GLContextEGL(share_group),
+                                  compatible_surface, attribs);
+@@ -62,6 +64,7 @@ scoped_refptr<GLContext> CreateGLContext(GLShareGroup* share_group,
+                                              gfx::AcceleratedWidget window) {
+   TRACE_EVENT0("gpu", "gl::init::CreateViewGLSurface");
+   switch (GetGLImplementation()) {
++    case kGLImplementationSwiftShaderGL:
+    case kGLImplementationEGLANGLE: {
+      DCHECK_NE(window, gfx::kNullAcceleratedWidget);
+      return InitializeGLSurface(base::MakeRefCounted<NativeViewGLSurfaceEGL>(
+@@ -80,6 +83,7 @@ scoped_refptr<GLSurface> CreateOffscreenGLSurfaceWithFormat(
+                                                   const gfx::Size& size) {
+   TRACE_EVENT0("gpu", "gl::init::CreateOffscreenGLSurface");
+   switch (GetGLImplementation()) {
++    case kGLImplementationSwiftShaderGL:
+     case kGLImplementationEGLANGLE: {
+       GLDisplayEGL* display_egl = display->GetAs<gl::GLDisplayEGL>();
+       if (display_egl->IsEGLSurfacelessContextSupported() &&
+@@ -104,6 +108,7 @@ void SetDisabledExtensionsPlatform(const std::string& disabled_extensions) {
+     case kGLImplementationEGLANGLE:
+       SetDisabledExtensionsEGL(disabled_extensions);
+       break;
++    case kGLImplementationSwiftShaderGL:
+     case kGLImplementationMockGL:
+     case kGLImplementationStubGL:
+       break;
+@@ -118,6 +123,7 @@ bool InitializeExtensionSettingsOneOffPlatform() {
+     case kGLImplementationEGLANGLE:
+       return InitializeExtensionSettingsOneOffEGL(
+           display->GetAs<GLDisplayEGL>());
++    case kGLImplementationSwiftShaderGL:
+     case kGLImplementationMockGL:
+     case kGLImplementationStubGL:
+       return true;
+diff --git a/ui/gl/init/gl_initializer_win.cc b/ui/gl/init/gl_initializer_win.cc
+index 06798da4e5157..05b9e03b2b274 100644
+--- a/ui/gl/init/gl_initializer_win.cc
++++ b/ui/gl/init/gl_initializer_win.cc
+@@ -59,11 +59,20 @@ bool LoadD3DCompiler() {
+ }
+ 
+ #if !BUILDFLAG(USE_STATIC_ANGLE)
+-bool InitializeStaticEGLInternalFromLibrary() {
++bool InitializeStaticEGLInternalFromLibrary(GLImplementationParts implementation) {
+   base::FilePath gles_path;
+   if (!base::PathService::Get(base::DIR_MODULE, &gles_path)) {
+     return false;
+   }
++  if (implementation == kGLImplementationSwiftShaderGL) {
++#if BUILDFLAG(ENABLE_SWIFTSHADER)
++    gles_path = gles_path.Append(L"swiftshader/");
++    // Preload library
++    LoadLibrary(L"ddraw.dll");
++#else
++    return false;
++#endif
++  }
+ 
+   // Load libglesv2.dll before libegl.dll because the latter is dependent on
+   // the former and if there is another version of libglesv2.dll in the dll
+@@ -116,7 +125,7 @@ bool InitializeStaticEGLInternal(GLImplementationParts implementation) {
+   DCHECK(implementation.gl == kGLImplementationEGLANGLE);
+ 
+   if (!LoadD3DCompiler()) {
+-    return false;
++//  return false;
+   }
+ 
+ #if BUILDFLAG(USE_STATIC_ANGLE)
+@@ -124,7 +133,7 @@ bool InitializeStaticEGLInternal(GLImplementationParts implementation) {
+     return false;
+   }
+ #else
+-  if (!InitializeStaticEGLInternalFromLibrary()) {
++  if (!InitializeStaticEGLInternalFromLibrary(implementation)) {
+     return false;
+   }
+ #endif  // !BUILDFLAG(USE_STATIC_ANGLE)
+@@ -126,6 +136,7 @@ bool InitializeGLOneOffPlatform(uint64_t system_device_id) {
+ 
+   GLDisplayEGL* display = GetDisplayEGL(gpu_preference);
+   switch (GetGLImplementation()) {
++    case kGLImplementationSwiftShaderGL:
+     case kGLImplementationEGLANGLE: {
+       if (!InitializeDisplay(display, EGLDisplayPlatform(GetDC(nullptr)))) {
+         LOG(ERROR) << "GLDisplayEGL::Initialize failed.";
+@@ -156,6 +167,7 @@ bool InitializeStaticGLBindings(GLImplementationParts implementation) {
+   base::ScopedAllowBlocking allow_blocking;
+ 
+   switch (implementation.gl) {
++    case kGLImplementationSwiftShaderGL:
+     case kGLImplementationEGLANGLE:
+       return InitializeStaticEGLInternal(implementation);
+     case kGLImplementationMockGL:
+diff --git a/ui/gl/test/egl_initialization_displays_unittest.cc b/ui/gl/test/egl_initialization_displays_unittest.cc
+index b0d34bab6a327..939da7ca639a3 100644
+--- a/ui/gl/test/egl_initialization_displays_unittest.cc
++++ b/ui/gl/test/egl_initialization_displays_unittest.cc
+@@ -39,6 +39,31 @@ TEST(EGLInitializationDisplaysTest, DisableD3D11) {
+   EXPECT_FALSE(base::Contains(displays, gl::ANGLE_D3D11));
+ }
+ 
++TEST(EGLInitializationDisplaysTest, SwiftShader) {
++  std::unique_ptr<base::CommandLine> command_line(
++      new base::CommandLine(base::CommandLine::NO_PROGRAM));
++
++  std::vector<gl::DisplayType> displays;
++
++  // If swiftshader is requested, only SWIFT_SHADER should be returned
++  command_line->AppendSwitchASCII(switches::kUseGL,
++                                  gl::kGLImplementationSwiftShaderForWebGLName);
++  displays.clear();
++  GetEGLInitDisplays(true, true, true, true, true, true, true,
++                     command_line.get(), &displays);
++  EXPECT_TRUE(base::Contains(displays, gl::SWIFT_SHADER));
++  EXPECT_EQ(displays.size(), 1u);
++
++  // Even if there are other flags, swiftshader should take prescedence
++  command_line->AppendSwitchASCII(switches::kUseANGLE,
++                                  gl::kANGLEImplementationD3D11Name);
++  displays.clear();
++  GetEGLInitDisplays(true, true, true, true, true, true, true,
++                     command_line.get(), &displays);
++  EXPECT_TRUE(base::Contains(displays, gl::SWIFT_SHADER));
++  EXPECT_EQ(displays.size(), 1u);
++}
++
+ TEST(EGLInitializationDisplaysTest, DefaultRenderers) {
+   std::unique_ptr<base::CommandLine> command_line(
+       new base::CommandLine(base::CommandLine::NO_PROGRAM));
+diff --git a/ui/gl/test/gl_surface_test_support.cc b/ui/gl/test/gl_surface_test_support.cc
+index 22ee46ef58605..9f63da7a3b9ef 100644
+--- a/ui/gl/test/gl_surface_test_support.cc
++++ b/ui/gl/test/gl_surface_test_support.cc
+@@ -58,7 +58,7 @@ void InitializeOneOffHelper(bool init_extensions) {
+ 
+   GLImplementationParts impl = allowed_impls[0];
+   if (use_software_gl) {
+-    impl = gl::GetSoftwareGLImplementation();
++    impl = gl::GetSoftwareGLImplementationForPlatform();
+   }
+ 
+   DCHECK(!base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kUseGL))
+diff --git a/ui/gl/mojom/gl_implementation.mojom b/ui/gl/mojom/gl_implementation.mojom
+index 52496c6743be4..a61c5f2c5e70f 100644
+--- a/ui/gl/mojom/gl_implementation.mojom
++++ b/ui/gl/mojom/gl_implementation.mojom
+@@ -7,6 +7,7 @@ module gl.mojom;
+   kGLImplementationDesktopGL,
+   kGLImplementationDesktopGLCoreProfile,
+   kGLImplementationEGLGLES2,
++  kGLImplementationSwiftShaderGL,
+   kGLImplementationMockGL,
+   kGLImplementationStubGL,
+   kGLImplementationDisabled,
+diff --git a/ui/gl/mojom/gl_implementation_mojom_traits.cc b/ui/gl/mojom/gl_implementation_mojom_traits.cc
+index fb28d2d52e532..0930cb70f00d2 100644
+--- a/ui/gl/mojom/gl_implementation_mojom_traits.cc
++++ b/ui/gl/mojom/gl_implementation_mojom_traits.cc
+@@ -14,6 +14,8 @@ EnumTraits<gl::mojom::GLImplementation, gl::GLImplementation>::ToMojom(
+       return gl::mojom::GLImplementation::kGLImplementationDesktopGLCoreProfile;
+     case gl::kGLImplementationEGLGLES2:
+       return gl::mojom::GLImplementation::kGLImplementationEGLGLES2;
++    case gl::kGLImplementationSwiftShaderGL:
++      return gl::mojom::GLImplementation::kGLImplementationSwiftShaderGL;
+     case gl::kGLImplementationMockGL:
+       return gl::mojom::GLImplementation::kGLImplementationMockGL;
+     case gl::kGLImplementationStubGL:
+@@ -36,6 +43,9 @@ bool EnumTraits<gl::mojom::GLImplementation, gl::GLImplementation>::FromMojom(
+     case gl::mojom::GLImplementation::kGLImplementationEGLGLES2:
+       *out = gl::kGLImplementationEGLGLES2;
+       return true;
++    case gl::mojom::GLImplementation::kGLImplementationSwiftShaderGL:
++      *out = gl::kGLImplementationSwiftShaderGL;
++      return true;
+     case gl::mojom::GLImplementation::kGLImplementationMockGL:
+       *out = gl::kGLImplementationMockGL;
+       return true;

@@ -1,0 +1,38 @@
+diff --git a/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc b/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
+index 39b09f711f267..6d495358b7eff 100644
+--- a/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
++++ b/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
+@@ -425,6 +425,9 @@ void RecordIsPinnedToTaskbarHistogram() {
+ // here:
+ // https://blogs.blackberry.com/en/2017/10/windows-10-parallel-loading-breakdown.
+ bool IsParallelDllLoadingEnabled() {
++  // Parallel DLL loading is only available on Windows 10 and above.
++  if (base::win::GetVersion() < base::win::Version::WIN10)
++    return false;
+   base::FilePath exe_path;
+   if (!base::PathService::Get(base::FILE_EXE, &exe_path))
+     return false;
+diff --git a/chrome/browser/net/stub_resolver_config_reader.cc b/chrome/browser/net/stub_resolver_config_reader.cc
+index 10878b7f0d23d..1b9329a87204c 100644
+--- a/chrome/browser/net/stub_resolver_config_reader.cc
++++ b/chrome/browser/net/stub_resolver_config_reader.cc
+@@ -82,7 +83,18 @@ enum class SecureDnsModeDetailsForHistogram {
+ 
+ #if BUILDFLAG(IS_WIN)
+ bool ShouldDisableDohForWindowsParentalControls() {
+-  return GetWinParentalControls().web_filter;
++  const WinParentalControls& parental_controls = GetWinParentalControls();
++  if (parental_controls.web_filter)
++    return true;
++
++  // Some versions before Windows 8 may not fully support |web_filter|, so
++  // conservatively disable doh for any recognized parental controls.
++  if (parental_controls.any_restrictions &&
++    base::win::GetVersion() < base::win::Version::WIN8) {
++    return true;
++  }
++
++  return false;
+ }
+ 
+ // Defines the base::Feature for controlling the ZTDNS check.
