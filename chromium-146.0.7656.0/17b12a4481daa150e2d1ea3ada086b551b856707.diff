@@ -1,0 +1,27 @@
+diff --git a/third_party/swiftshader/third_party/marl/src/osfiber_windows.h b/third_party/swiftshader/third_party/marl/src/osfiber_windows.h
+index f4b6aa8..bc71d66 100644
+--- a/third_party/swiftshader/third_party/marl/src/osfiber_windows.h
++++ b/third_party/swiftshader/third_party/marl/src/osfiber_windows.h
+@@ -64,7 +64,21 @@ OSFiber::~OSFiber() {
+ Allocator::unique_ptr<OSFiber> OSFiber::createFiberFromCurrentThread(
+     Allocator* allocator) {
+   auto out = allocator->make_unique<OSFiber>();
+-  out->fiber = ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
++typedef LPVOID (WINAPI *PFN_MS_EX) (LPVOID , DWORD  );
++    PFN_MS_EX pfnex;
++    HMODULE h = GetModuleHandleW (L"kernel32.dll");
++    /*  Use ConvertThreadToFiberEx if available.  */
++    if ((pfnex = (PFN_MS_EX) GetProcAddress (h, "ConvertThreadToFiberEx")))
++  out->fiber = pfnex(nullptr, FIBER_FLAG_FLOAT_SWITCH);
++
++    /*  Fall back to ConvertThreadToFiber which is always available.  */
++    else
++      {
++    out->fiber =
++        ::ConvertThreadToFiber(nullptr);
++        if (out->fiber)
++        *(DWORD*)((char *) out->fiber + sizeof (void *) * 5) |= CONTEXT_FLOATING_POINT;
++      }
+   out->isFiberFromThread = true;
+   MARL_ASSERT(out->fiber != nullptr,
+               "ConvertThreadToFiberEx() failed with error 0x%x",

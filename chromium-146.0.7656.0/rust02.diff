@@ -1,0 +1,594 @@
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs
+index 871fc4a0bee..5d64403bae3 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c.rs
+@@ -19,7 +19,9 @@
+ pub const EXIT_SUCCESS: u32 = 0;
+ pub const EXIT_FAILURE: u32 = 1;
+ 
++#[allow(dead_code)]
+ pub const CONDITION_VARIABLE_INIT: CONDITION_VARIABLE = CONDITION_VARIABLE { Ptr: ptr::null_mut() };
++#[allow(dead_code)]
+ pub const SRWLOCK_INIT: SRWLOCK = SRWLOCK { Ptr: ptr::null_mut() };
+ #[cfg(not(target_thread_local))]
+ pub const INIT_ONCE_STATIC_INIT: INIT_ONCE = INIT_ONCE { Ptr: ptr::null_mut() };
+@@ -112,6 +114,42 @@ pub struct MOUNT_POINT_REPARSE_BUFFER {
+ compat_fn_with_fallback! {
+     pub static KERNEL32: &CStr = c"kernel32";
+ 
++    pub fn SetThreadErrorMode(_dwNewMode: u32,
++                              _lpOldMode: *mut u32) -> c_uint {
++        unsafe { SetLastError(ERROR_CALL_NOT_IMPLEMENTED as u32); 0 }
++    }
++    pub fn SleepConditionVariableSRW(ConditionVariable: *mut CONDITION_VARIABLE,
++                                     SRWLock: *mut SRWLOCK,
++                                     dwMilliseconds: u32,
++                                     Flags: u32) -> BOOL {
++        panic!("condition variables not available")
++    }
++    pub fn WakeConditionVariable(ConditionVariable: *mut CONDITION_VARIABLE)
++                                 -> () {
++        panic!("condition variables not available")
++    }
++    pub fn WakeAllConditionVariable(ConditionVariable: *mut CONDITION_VARIABLE)
++                                    -> () {
++        panic!("condition variables not available")
++    }
++    pub fn AcquireSRWLockExclusive(SRWLock: *mut SRWLOCK) -> () {
++        panic!("rwlocks not available")
++    }
++    pub fn AcquireSRWLockShared(SRWLock: *mut SRWLOCK) -> () {
++        panic!("rwlocks not available")
++    }
++    pub fn ReleaseSRWLockExclusive(SRWLock: *mut SRWLOCK) -> () {
++        panic!("rwlocks not available")
++    }
++    pub fn ReleaseSRWLockShared(SRWLock: *mut SRWLOCK) -> () {
++        panic!("rwlocks not available")
++    }
++    pub fn TryAcquireSRWLockExclusive(SRWLock: *mut SRWLOCK) -> u8 {
++        panic!("rwlocks not available")
++    }
++    pub fn TryAcquireSRWLockShared(SRWLock: *mut SRWLOCK) -> u8 {
++        panic!("rwlocks not available")
++    }
+     // >= Win10 1607
+     // https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreaddescription
+     pub fn SetThreadDescription(hthread: HANDLE, lpthreaddescription: PCWSTR) -> HRESULT {
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c/windows_sys.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c/windows_sys.rs
+index 79513d33a1a..6243ba89ac1 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c/windows_sys.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/c/windows_sys.rs
+@@ -38,6 +38,13 @@
+ windows_targets::link!("kernel32.dll" "system" fn GetCurrentDirectoryW(nbufferlength : u32, lpbuffer : PWSTR) -> u32);
+ windows_targets::link!("kernel32.dll" "system" fn GetCurrentProcess() -> HANDLE);
+ windows_targets::link!("kernel32.dll" "system" fn GetCurrentProcessId() -> u32);
++windows_targets::link!("kernel32.dll" "system" fn InitializeCriticalSection(CriticalSection: *mut CRITICAL_SECTION));
++windows_targets::link!("kernel32.dll" "system" fn EnterCriticalSection(CriticalSection: *mut CRITICAL_SECTION));
++windows_targets::link!("kernel32.dll" "system" fn TryEnterCriticalSection(CriticalSection: *mut CRITICAL_SECTION) -> BOOL);
++windows_targets::link!("kernel32.dll" "system" fn LeaveCriticalSection(CriticalSection: *mut CRITICAL_SECTION));
++windows_targets::link!("kernel32.dll" "system" fn DeleteCriticalSection(CriticalSection: *mut CRITICAL_SECTION));
++windows_targets::link!("kernel32.dll" "system" fn SetEvent(hEvent : HANDLE) -> BOOL);
++windows_targets::link!("kernel32.dll" "system" fn ResetEvent(hEvent : HANDLE) -> BOOL);
+ windows_targets::link!("kernel32.dll" "system" fn GetCurrentThread() -> HANDLE);
+ windows_targets::link!("kernel32.dll" "system" fn GetCurrentThreadId() -> u32);
+ windows_targets::link!("kernel32.dll" "system" fn GetEnvironmentStringsW() -> PWSTR);
+@@ -2960,6 +2967,17 @@ pub struct SOCKADDR_UN {
+         unsafe { core::mem::zeroed() }
+     }
+ }
++#[repr(C)]
++#[derive(Clone, Copy)]
++pub struct CRITICAL_SECTION {
++    CriticalSectionDebug: *mut core::ffi::c_void,
++    LockCount: i32,
++    RecursionCount: i32,
++    OwningThread: HANDLE,
++    LockSemaphore: HANDLE,
++    SpinCount: usize,
++}
++
+ pub const STACK_SIZE_PARAM_IS_A_RESERVATION: THREAD_CREATION_FLAGS = 65536u32;
+ pub const STANDARD_RIGHTS_ALL: FILE_ACCESS_RIGHTS = 2031616u32;
+ pub const STANDARD_RIGHTS_EXECUTE: FILE_ACCESS_RIGHTS = 131072u32;
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs
+index 68817f76015..d123ef76791 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/pal/windows/compat.rs
+@@ -180,6 +180,20 @@ fn load_from_module(module: Option<Module>) -> F {
+                 $fallback_body
+             }
+ 
++            #[allow(dead_code)]
++            pub fn is_available() -> bool {
++                let mut ptr = PTR.load(Ordering::Relaxed);
++                if ptr == load as *mut _ {
++                    ptr = load_from_module(unsafe { Module::new($module) }) as *mut _;
++                }
++
++                if ptr != fallback as *mut _ {
++                    true
++                } else {
++                    false
++                }
++            }
++
+             #[inline(always)]
+             pub unsafe fn call($($argname: $argtype),*) -> $rettype {
+                 unsafe {
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/windows7.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/windows7.rs
+index f03feef2221..4b448a20708 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/windows7.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/condvar/windows7.rs
+@@ -1,49 +1,277 @@
+-use crate::cell::UnsafeCell;
++use core::ptr;
++use crate::cell::{Cell, UnsafeCell};
+ use crate::sys::c;
++use crate::sync::atomic::{AtomicUsize, Ordering};
++use crate::mem::{self, MaybeUninit};
+ use crate::sys::sync::{Mutex, mutex};
+ use crate::time::Duration;
+ 
+ pub struct Condvar {
+-    inner: UnsafeCell<c::CONDITION_VARIABLE>,
++    // This is either directly an CONDITION_VARIABLE (if supported), or a Box<Inner> otherwise.
++    inner: AtomicUsize,
+ }
+ 
+ unsafe impl Send for Condvar {}
+ unsafe impl Sync for Condvar {}
+ 
++const SIGNAL: usize = 0;
++const BROADCAST: usize = 1;
++const MAX_EVENTS: usize = 2;
++
++struct Inner {
++    waiting: Cell<u32> ,
++    lock_waiting: ReentrantMutex ,
++    events: [UnsafeCell<c::HANDLE>; MAX_EVENTS],
++    broadcast_block_event: UnsafeCell<c::HANDLE> ,
++}
++
++#[derive(Clone, Copy)]
++enum Kind {
++    SRWLock,
++    CriticalSection,
++}
++
++#[inline]
++pub unsafe fn raw(m: &Condvar) -> *mut c::CONDITION_VARIABLE {
++    debug_assert!(mem::size_of::<c::CONDITION_VARIABLE>() <= mem::size_of_val(&m.inner));
++    &m.inner as *const _ as *mut _
++}
++
+ impl Condvar {
+     #[inline]
+     pub const fn new() -> Condvar {
+-        Condvar { inner: UnsafeCell::new(c::CONDITION_VARIABLE_INIT) }
++        Condvar {
++            // This works because SRWLOCK_INIT is 0 (wrapped in a struct), so we are also properly
++            // initializing an SRWLOCK here.
++            inner: AtomicUsize::new(0),
++        }
+     }
+ 
+     #[inline]
+     pub unsafe fn wait(&self, mutex: &Mutex) {
+-        let r = c::SleepConditionVariableSRW(self.inner.get(), mutex::raw(mutex), c::INFINITE, 0);
+-        debug_assert!(r != 0);
++        match kind() {
++            Kind::SRWLock => {
++                let r = c::SleepConditionVariableSRW(raw(self), mutex::raw(mutex), c::INFINITE, 0);
++                debug_assert!(r != 0);
++            },
++            Kind::CriticalSection => {
++                let inner = &*self.inner();
++                /* 
++                  Block access if previous broadcast hasn't finished.
++                  This is just for safety and should normally not
++                  affect the total time spent in this function.
++                */
++                c::WaitForSingleObject(*inner.broadcast_block_event.get(), c::INFINITE);
++
++                inner.lock_waiting.lock();
++                inner.waiting.set(inner.waiting.get() + 1);
++                inner.lock_waiting.unlock();
++
++                mutex.unlock();
++                c::WaitForMultipleObjects(2, inner.events.as_ptr() as *const c::HANDLE, c::FALSE, c::INFINITE);
++  
++                inner.lock_waiting.lock();
++                inner.waiting.set(inner.waiting.get() - 1);
++  
++                if inner.waiting.get() == 0
++                {
++                  /*
++                    We're the last waiter to be notified or to stop waiting, so
++                    reset the manual event. 
++                  */
++                  /* Close broadcast gate */
++                  c::ResetEvent(*inner.events.get(BROADCAST).unwrap().get());
++                  /* Open block gate */
++                  c::SetEvent(*inner.broadcast_block_event.get());
++                }
++                inner.lock_waiting.unlock();
++  
++                mutex.lock();
++            }
++        }
+     }
+ 
+     pub unsafe fn wait_timeout(&self, mutex: &Mutex, dur: Duration) -> bool {
+-        let r = c::SleepConditionVariableSRW(
+-            self.inner.get(),
+-            mutex::raw(mutex),
+-            crate::sys::pal::dur2timeout(dur),
+-            0,
+-        );
+-        if r == 0 {
+-            debug_assert_eq!(crate::sys::io::errno() as usize, c::ERROR_TIMEOUT as usize);
+-            false
+-        } else {
+-            true
++        match kind() {
++            Kind::SRWLock => {
++                let r = c::SleepConditionVariableSRW(
++                    raw(self),
++                    mutex::raw(mutex),
++                    crate::sys::pal::dur2timeout(dur),
++                    0,
++                );
++                if r == 0 {
++                    debug_assert_eq!(crate::sys::io::errno() as usize, c::ERROR_TIMEOUT as usize);
++                    false
++                } else {
++                    true
++                }
++            },
++            Kind::CriticalSection => {
++                let inner = &*self.inner();
++                /* 
++                  Block access if previous broadcast hasn't finished.
++                  This is just for safety and should normally not
++                  affect the total time spent in this function.
++                */
++                c::WaitForSingleObject(*inner.broadcast_block_event.get(), c::INFINITE);
++
++                inner.lock_waiting.lock();
++                inner.waiting.set(inner.waiting.get() + 1);
++                inner.lock_waiting.unlock();
++
++                mutex.unlock();
++                let result= c::WaitForMultipleObjects(2, inner.events.as_ptr() as *const c::HANDLE, c::FALSE, crate::sys::pal::dur2timeout(dur));
++  
++                inner.lock_waiting.lock();
++                inner.waiting.set(inner.waiting.get() - 1);
++  
++                if inner.waiting.get() == 0
++                {
++                  /*
++                    We're the last waiter to be notified or to stop waiting, so
++                    reset the manual event. 
++                  */
++                  /* Close broadcast gate */
++                  c::ResetEvent(*inner.events.get(BROADCAST).unwrap().get());
++                  /* Open block gate */
++                  c::SetEvent(*inner.broadcast_block_event.get());
++                }
++                inner.lock_waiting.unlock();
++  
++                mutex.lock();
++
++                if result == c::ERROR_TIMEOUT {
++                    false
++                } else {
++                    true
++                }
++            }
+         }
+     }
+ 
+     #[inline]
+     pub fn notify_one(&self) {
+-        unsafe { c::WakeConditionVariable(self.inner.get()) }
++        match kind() {
++            Kind::SRWLock => unsafe { c::WakeConditionVariable(raw(self)) },
++            Kind::CriticalSection => unsafe {
++                let inner = &*self.inner();
++                inner.lock_waiting.lock();
++  
++                if inner.waiting.get() > 0 {
++                  c::SetEvent(*inner.events.get(SIGNAL).unwrap().get());
++                }
++
++                inner.lock_waiting.unlock();
++            }
++        }
+     }
+ 
+     #[inline]
+     pub fn notify_all(&self) {
+-        unsafe { c::WakeAllConditionVariable(self.inner.get()) }
++        match kind() {
++            Kind::SRWLock => unsafe { c::WakeAllConditionVariable(raw(self)) },
++            Kind::CriticalSection => unsafe {
++                let inner = &*self.inner();
++                inner.lock_waiting.lock();
++                /*
++                   The mutex protect us from broadcasting if
++                   there isn't any thread waiting to open the
++                   block gate after this call has closed it.
++                 */
++                if inner.waiting.get() > 0
++                {
++                  /* Close block gate */
++                  c::ResetEvent(*inner.broadcast_block_event.get()); 
++                  /* Open broadcast gate */
++                  c::SetEvent(*inner.events.get(BROADCAST).unwrap().get());
++                }
++
++                inner.lock_waiting.unlock();
++            }
++        }
++    }
++    unsafe fn inner(&self) -> *const Inner {
++        match self.inner.load(Ordering::SeqCst) {
++            0 => {}
++            n => return core::ptr::with_exposed_provenance(n) as *const _,
++        }
++        let h_event= c::CreateEventW(ptr::null_mut(),  /* no security */
++                                          c::FALSE, /* auto-reset event */
++                                          c::FALSE, /* non-signaled initially */
++                                          ptr::null_mut()); /* unnamed */
++
++        /* Create a manual-reset event. */
++        let h_event2 = c::CreateEventW(ptr::null_mut(),  /* no security */
++                                             c::TRUE,  /* manual-reset */
++                                             c::FALSE, /* non-signaled initially */
++                                             ptr::null_mut()); /* unnamed */
++
++
++        let broadcast_block_event= c::CreateEventW(ptr::null_mut(),  /* no security */
++                                                 c::TRUE,  /* manual-reset */
++                                                 c::TRUE,  /* signaled initially */
++                                                 ptr::null_mut()); /* unnamed */
++  
++        let inner = Box::new(Inner { waiting: Cell::new(0), lock_waiting: ReentrantMutex::uninitialized(), events: [UnsafeCell::new(h_event), UnsafeCell::new(h_event2)], broadcast_block_event: UnsafeCell::new(broadcast_block_event) });
++        inner.lock_waiting.init();
++        let inner = Box::into_raw(inner);
++        match self.inner.compare_exchange(0, inner as usize, Ordering::SeqCst, Ordering::SeqCst) {
++            Ok(_) => inner,
++            Err(n) => {
++                Box::from_raw(inner).lock_waiting.destroy();
++                core::ptr::with_exposed_provenance(n) as *const _
++            }
++        }
++    }
++}
++
++fn kind() -> Kind {
++    if c::TryAcquireSRWLockExclusive::is_available() { Kind::SRWLock } else { Kind::CriticalSection }
++}
++
++impl Drop for Condvar {
++    fn drop(&mut self) {
++        match kind() {
++            Kind::SRWLock => {}
++            Kind::CriticalSection => match self.inner.load(Ordering::SeqCst) {
++                0 => {}
++                n => unsafe {
++                    let inner = Box::from_raw(core::ptr::with_exposed_provenance::<Inner>(n) as *mut Inner);
++                    inner.lock_waiting.destroy();
++                    c::CloseHandle(*inner.events.get(SIGNAL).unwrap().get());
++                    c::CloseHandle(*inner.events.get(BROADCAST).unwrap().get());
++                    c::CloseHandle(*inner.broadcast_block_event.get());
++                },
++            },
++        }
++    }
++}
++pub struct ReentrantMutex {
++    inner: MaybeUninit<UnsafeCell<c::CRITICAL_SECTION>>,
++}
++
++unsafe impl Send for ReentrantMutex {}
++unsafe impl Sync for ReentrantMutex {}
++
++impl ReentrantMutex {
++    pub const fn uninitialized() -> ReentrantMutex {
++        ReentrantMutex { inner: MaybeUninit::uninit() }
++    }
++
++    pub unsafe fn init(&self) {
++        c::InitializeCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
++    }
++
++    pub unsafe fn lock(&self) {
++        c::EnterCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
++    }
++
++    pub unsafe fn unlock(&self) {
++        c::LeaveCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
++    }
++
++    pub unsafe fn destroy(&self) {
++        c::DeleteCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
+     }
+ }
+diff --git a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/windows7.rs b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/windows7.rs
+index 689dba10f01..e1a1ef1a612 100644
+--- a/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/windows7.rs
++++ b/third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/sys/sync/mutex/windows7.rs
+@@ -13,42 +13,159 @@
+ //!
+ //! 3. While CriticalSection is fair and SRWLock is not, the current Rust policy
+ //!    is that there are no guarantees of fairness.
++//!
++//! The downside of this approach, however, is that SRWLock is not available on
++//! Windows XP, so we continue to have a fallback implementation where
++//! CriticalSection is used and we keep track of who's holding the mutex to
++//! detect recursive locks.
+ 
+-use crate::cell::UnsafeCell;
++use crate::cell::{Cell, UnsafeCell};
++use crate::mem::{self, MaybeUninit};
++use crate::sync::atomic::{AtomicUsize, Ordering};
+ use crate::sys::c;
+ 
++
+ pub struct Mutex {
+-    srwlock: UnsafeCell<c::SRWLOCK>,
++    // This is either directly an SRWLOCK (if supported), or a Box<Inner> otherwise.
++    lock: AtomicUsize,
+ }
+ 
+ unsafe impl Send for Mutex {}
+ unsafe impl Sync for Mutex {}
+ 
++struct Inner {
++    remutex: ReentrantMutex,
++    held: Cell<bool>,
++}
++
++#[derive(Clone, Copy)]
++enum Kind {
++    SRWLock,
++    CriticalSection,
++}
++
+ #[inline]
+ pub unsafe fn raw(m: &Mutex) -> *mut c::SRWLOCK {
+-    m.srwlock.get()
++    debug_assert!(mem::size_of::<c::SRWLOCK>() <= mem::size_of_val(&m.lock));
++    &m.lock as *const _ as *mut _
+ }
+ 
+ impl Mutex {
+     #[inline]
+     pub const fn new() -> Mutex {
+-        Mutex { srwlock: UnsafeCell::new(c::SRWLOCK_INIT) }
++        Mutex {
++            // This works because SRWLOCK_INIT is 0 (wrapped in a struct), so we are also properly
++            // initializing an SRWLOCK here.
++            lock: AtomicUsize::new(0),
++        }
+     }
+ 
+-    #[inline]
+-    pub fn lock(&self) {
+-        unsafe {
+-            c::AcquireSRWLockExclusive(raw(self));
++    pub unsafe fn lock(&self) {
++        match kind() {
++            Kind::SRWLock => c::AcquireSRWLockExclusive(raw(self)),
++            Kind::CriticalSection => {
++                let inner = &*self.inner();
++                inner.remutex.lock();
++                if inner.held.replace(true) {
++                    // It was already locked, so we got a recursive lock which we do not want.
++                    inner.remutex.unlock();
++                    panic!("cannot recursively lock a mutex");
++                }
++            }
+         }
+     }
+ 
+-    #[inline]
+-    pub fn try_lock(&self) -> bool {
+-        unsafe { c::TryAcquireSRWLockExclusive(raw(self)) }
++    pub unsafe fn try_lock(&self) -> bool {
++        match kind() {
++            Kind::SRWLock => c::TryAcquireSRWLockExclusive(raw(self)) != 0,
++            Kind::CriticalSection => {
++                let inner = &*self.inner();
++                if !inner.remutex.try_lock() {
++                    false
++                } else if inner.held.replace(true) {
++                    // It was already locked, so we got a recursive lock which we do not want.
++                    inner.remutex.unlock();
++                    false
++                } else {
++                    true
++                }
++            }
++        }
++    }
++
++    pub unsafe fn unlock(&self) {
++        match kind() {
++            Kind::SRWLock => c::ReleaseSRWLockExclusive(raw(self)),
++            Kind::CriticalSection => {
++                let inner = &*(core::ptr::with_exposed_provenance::<Inner>(self.lock.load(Ordering::SeqCst)) as *const Inner);
++                inner.held.set(false);
++                inner.remutex.unlock();
++            }
++        }
++    }
++    unsafe fn inner(&self) -> *const Inner {
++        match self.lock.load(Ordering::SeqCst) {
++            0 => {}
++            n => return core::ptr::with_exposed_provenance(n) as *const _,
++        }
++        let inner = Box::new(Inner { remutex: ReentrantMutex::uninitialized(), held: Cell::new(false) });
++        inner.remutex.init();
++        let inner = Box::into_raw(inner);
++        match self.lock.compare_exchange(0, inner as usize, Ordering::SeqCst, Ordering::SeqCst) {
++            Ok(_) => inner,
++            Err(n) => {
++                Box::from_raw(inner).remutex.destroy();
++                core::ptr::with_exposed_provenance(n) as *const _
++            }
++        }
++    }
++}
++
++fn kind() -> Kind {
++    if c::TryAcquireSRWLockExclusive::is_available() { Kind::SRWLock } else { Kind::CriticalSection }
++}
++
++impl Drop for Mutex {
++    fn drop(&mut self) {
++        match kind() {
++            Kind::SRWLock => {}
++            Kind::CriticalSection => match self.lock.load(Ordering::SeqCst) {
++                0 => {}
++                n => unsafe { Box::from_raw(core::ptr::with_exposed_provenance::<Inner>(n) as *mut Inner).remutex.destroy() },
++            },
++        }
++    }
++}
++pub struct ReentrantMutex {
++    inner: MaybeUninit<UnsafeCell<c::CRITICAL_SECTION>>,
++}
++
++unsafe impl Send for ReentrantMutex {}
++unsafe impl Sync for ReentrantMutex {}
++
++impl ReentrantMutex {
++    pub const fn uninitialized() -> ReentrantMutex {
++        ReentrantMutex { inner: MaybeUninit::uninit() }
++    }
++
++    pub unsafe fn init(&self) {
++        c::InitializeCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
++    }
++
++    pub unsafe fn lock(&self) {
++        c::EnterCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
+     }
+ 
+     #[inline]
++    pub unsafe fn try_lock(&self) -> bool {
++        c::TryEnterCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr())) != 0
++    }
++
+     pub unsafe fn unlock(&self) {
+-        c::ReleaseSRWLockExclusive(raw(self));
++        c::LeaveCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
++    }
++
++    pub unsafe fn destroy(&self) {
++        c::DeleteCriticalSection(UnsafeCell::raw_get(self.inner.as_ptr()));
+     }
+ }

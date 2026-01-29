@@ -1,0 +1,732 @@
+diff --git a/third_party/swiftshader/BUILD.gn b/third_party/swiftshader/BUILD.gn
+index 83affe0c6..3379d5b5a 100644
+--- a/third_party/swiftshader/BUILD.gn
++++ b/third_party/swiftshader/BUILD.gn
+@@ -84,8 +84,8 @@ config("swiftshader_config") {
+ 
+ group("swiftshader") {
+   data_deps = [
+-    "src/Vulkan:icd_file",
+-    "src/Vulkan:swiftshader_libvulkan",
++    "src/OpenGL/libEGL:swiftshader_libEGL",
++    "src/OpenGL/libGLESv2:swiftshader_libGLESv2",
+   ]
+ }
+ 
+@@ -93,7 +93,10 @@ if (build_with_chromium) {
+   group("swiftshader_tests") {
+     testonly = true
+ 
+-    data_deps = [ "tests/SystemUnitTests:swiftshader_system_unittests" ]
++    data_deps = [
++      "tests/GLESUnitTests:swiftshader_unittests",
++      "tests/SystemUnitTests:swiftshader_system_unittests",
++    ]
+ 
+     if (supports_llvm) {
+       data_deps +=
+diff --git a/third_party/swiftshader/src/Main/BUILD.gn b/third_party/swiftshader/src/Main/BUILD.gn
+new file mode 100644
+index 000000000..136de9385
+--- /dev/null
++++ b/third_party/swiftshader/src/Main/BUILD.gn
+@@ -0,0 +1,86 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("//build/config/ui.gni")
++import("../swiftshader.gni")
++
++# Need a separate config to ensure the warnings are added to the end.
++config("swiftshader_main_private_config") {
++  if (is_win) {
++    cflags = [
++      "/wd4201",  # nameless struct/union
++      "/wd5030",  # attribute is not recognized
++    ]
++
++    if (is_clang) {
++      cflags += [
++        "-Wno-string-conversion",
++        "-Wno-sign-compare",
++      ]
++    }
++  }
++}
++
++swiftshader_source_set("swiftshader_main") {
++  deps = [
++    "../Common:swiftshader_common",
++  ]
++
++  sources = [
++    "Config.cpp",
++    "FrameBuffer.cpp",
++    "SwiftConfig.cpp",
++  ]
++
++  defines = []
++
++  if (use_ozone && !is_win) {
++    sources += [
++      "FrameBufferOzone.cpp",
++      "FrameBufferFactoryOzone.cpp",
++    ]
++  } else if (is_mac) {
++    sources += [ "FrameBufferOSX.mm" ]
++  } else if (is_win) {
++    sources += [
++      "FrameBufferDD.cpp",
++      "FrameBufferGDI.cpp",
++      "FrameBufferWin.cpp",
++    ]
++  }
++
++  if (ozone_platform_x11) {
++    sources += [
++      "FrameBufferX11.cpp",
++      "libX11.cpp",
++    ]
++    defines += [ "SWIFTSHADER_USE_X11" ]
++  }
++
++  if (is_win) {
++    libs = [ "dxguid.lib" ]  # For FrameBufferDD
++  }
++
++  configs = [ ":swiftshader_main_private_config" ]
++
++  include_dirs = [ ".." ]
++
++  if (is_mac) {
++    include_dirs += [ "../../include" ]
++    frameworks = [
++      "Quartz.framework",
++      "Cocoa.framework",
++    ]
++  }
++}
+diff --git a/third_party/swiftshader/src/OpenGL/common/BUILD.gn b/third_party/swiftshader/src/OpenGL/common/BUILD.gn
+new file mode 100644
+index 000000000..9cc22bfb5
+--- /dev/null
++++ b/third_party/swiftshader/src/OpenGL/common/BUILD.gn
+@@ -0,0 +1,43 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("../../swiftshader.gni")
++
++# Need a separate config to ensure the warnings are added to the end.
++config("swiftshader_opengl_common_private_config") {
++  if (is_win) {
++    cflags = [
++      "/wd4201",  # nameless struct/union
++      "/wd4324",  # structure was padded due to alignment specifier
++      "/wd5030",  # attribute is not recognized
++    ]
++  }
++}
++
++swiftshader_source_set("swiftshader_opengl_common") {
++  sources = [
++    "Image.cpp",
++    "MatrixStack.cpp",
++    "Object.cpp",
++    "debug.cpp",
++  ]
++
++  configs = [ ":swiftshader_opengl_common_private_config" ]
++
++  include_dirs = [
++    "..",
++    "../..",
++    "../../../include",
++  ]
++}
+diff --git a/third_party/swiftshader/src/OpenGL/compiler/BUILD.gn b/third_party/swiftshader/src/OpenGL/compiler/BUILD.gn
+new file mode 100644
+index 000000000..67b2739e8
+--- /dev/null
++++ b/third_party/swiftshader/src/OpenGL/compiler/BUILD.gn
+@@ -0,0 +1,92 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("../../swiftshader.gni")
++import("//testing/libfuzzer/fuzzer_test.gni")
++
++# Need a separate config to ensure the warnings are added to the end.
++config("swiftshader_opengl_compiler_private_config") {
++  if (is_win) {
++    cflags = [
++      "/wd4005",  # macro redefinition (in autogenerated code)
++      "/wd4201",  # nameless struct/union
++      "/wd4267",  # conversion from size_t to int/unsigned int
++      "/wd4702",  # unreachable code (in autogenerated code)
++      "/wd5030",  # attribute is not recognized
++    ]
++
++    if (!is_debug) {
++      cflags += [ "/wd4189" ]  # local variable is initialized but not referenced (variables only used in ASSERTS)
++    }
++  } else {
++    cflags = [ "-Wno-sign-compare" ]
++
++    if (!is_debug) {
++      cflags += [ "-Wno-unused-variable" ]  # local variable is initialized but not referenced (variables only used in ASSERTS)
++    }
++  }
++}
++
++config("swiftshader_translator_disable_pool_alloc") {
++    defines = [ "SWIFTSHADER_TRANSLATOR_DISABLE_POOL_ALLOC" ]
++}
++
++swiftshader_source_set("swiftshader_opengl_compiler") {
++  deps = [
++    "preprocessor:swiftshader_opengl_preprocessor",
++  ]
++
++  sources = [
++    "AnalyzeCallDepth.cpp",
++    "Compiler.cpp",
++    "Diagnostics.cpp",
++    "DirectiveHandler.cpp",
++    "InfoSink.cpp",
++    "Initialize.cpp",
++    "InitializeParseContext.cpp",
++    "IntermTraverse.cpp",
++    "Intermediate.cpp",
++    "OutputASM.cpp",
++    "ParseHelper.cpp",
++    "PoolAlloc.cpp",
++    "SymbolTable.cpp",
++    "TranslatorASM.cpp",
++    "ValidateLimitations.cpp",
++    "ValidateSwitch.cpp",
++    "debug.cpp",
++    "glslang_lex.cpp",
++    "glslang_tab.cpp",
++    "intermOut.cpp",
++    "parseConst.cpp",
++    "util.cpp",
++  ]
++
++  if (use_fuzzing_engine) {
++    all_dependent_configs = [ ":swiftshader_translator_disable_pool_alloc" ]
++  }
++
++  if (is_linux || is_chromeos || is_mac || is_fuchsia) {
++    sources += [ "ossource_posix.cpp" ]
++  } else if (is_win) {
++    sources += [ "ossource_win.cpp" ]
++  }
++
++  configs = [ ":swiftshader_opengl_compiler_private_config" ]
++
++  include_dirs = [
++    "..",
++    "../..",
++    "../../../include",
++  ]
++}
+diff --git a/third_party/swiftshader/src/OpenGL/libEGL/BUILD.gn b/third_party/swiftshader/src/OpenGL/libEGL/BUILD.gn
+new file mode 100644
+index 000000000..5363c5185
+--- /dev/null
++++ b/third_party/swiftshader/src/OpenGL/libEGL/BUILD.gn
+@@ -0,0 +1,105 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("//build/config/ui.gni")
++import("//build/config/ozone.gni")
++import("../../swiftshader.gni")
++
++# Need a separate config to ensure the warnings are added to the end.
++config("swiftshader_libEGL_private_config") {
++  defines = [ "EGL_EGLEXT_PROTOTYPES" ]
++
++  if (is_win) {
++    cflags = [
++      "/wd4201",  # nameless struct/union
++      "/wd4065",  # switch statement contains 'default' but no 'case' labels
++      "/wd5030",  # attribute is not recognized
++    ]
++
++    defines += [ "EGLAPI=" ]
++  } else {
++    cflags = [
++      "-Wno-sign-compare",
++      "-Wno-unused-function",
++    ]
++
++    if (is_mac) {
++      cflags += [ "-fvisibility=default" ]
++      defines += [ "EGLAPI=__attribute__((no_sanitize(\"function\")))" ]
++    } else if (is_clang) {
++      defines += [ "EGLAPI=__attribute__((visibility(\"protected\"))) __attribute__((no_sanitize(\"function\")))" ]
++    } else {
++      defines += [ "EGLAPI=__attribute__((visibility(\"protected\")))" ]
++    }
++  }
++}
++
++swiftshader_shared_library("swiftshader_libEGL") {
++  if (!is_mac && !is_fuchsia) {
++    output_name = "libEGL"
++    output_dir = "$root_out_dir/swiftshader"
++  }
++
++  sources = [
++    "../../Common/SharedLibrary.cpp",
++    "../common/Object.cpp",
++    "../common/debug.cpp",
++    "Config.cpp",
++    "Display.cpp",
++    "Surface.cpp",
++    "libEGL.cpp",
++    "main.cpp",
++    "resource.h",
++  ]
++
++  if (is_win) {
++    sources += [
++      "libEGL.def",
++      "libEGL.rc",
++    ]
++  }
++
++  defines = []
++
++  if (is_mac) {
++    sources += [ "OSXUtils.mm" ]
++    frameworks = [
++      "Quartz.framework",
++      "Cocoa.framework",
++      "CoreFoundation.framework",
++      "IOSurface.framework",
++    ]
++    ldflags = [
++      "-Wl,-install_name,@rpath/libswiftshader_libEGL.dylib",
++      "-Wl,-exported_symbols_list," +
++          rebase_path("libEGL_deprecated.exports", root_build_dir),
++    ]
++  } else if (is_linux || is_chromeos) {
++    if (ozone_platform_x11) {
++      sources += [ "../../Main/libX11.cpp" ]
++      defines += [ "SWIFTSHADER_USE_X11" ]
++    }
++    inputs = [ "libEGL_deprecated.lds" ]
++    ldflags =
++        [ "-Wl,--version-script=" + rebase_path("libEGL_deprecated.lds", root_build_dir) ]
++  }
++
++  configs = [ ":swiftshader_libEGL_private_config" ]
++
++  include_dirs = [
++    "../../../include",
++    "../..",
++    "..",
++  ]
++}
+diff --git a/third_party/swiftshader/src/OpenGL/libGLESv2/BUILD.gn b/third_party/swiftshader/src/OpenGL/libGLESv2/BUILD.gn
+new file mode 100644
+index 000000000..65668f26b
+--- /dev/null
++++ b/third_party/swiftshader/src/OpenGL/libGLESv2/BUILD.gn
+@@ -0,0 +1,146 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("../../swiftshader.gni")
++
++# Need a separate config to ensure the warnings are added to the end.
++config("swiftshader_libGLESv2_private_config") {
++  defines = [
++    "GL_API=",
++    "GL_GLEXT_PROTOTYPES",
++  ]
++
++  if (is_win) {
++    cflags = [
++      "/wd4201",  # nameless struct/union
++      "/wd4324",  # structure was padded due to alignment specifier
++      "/wd5030",  # attribute is not recognized
++    ]
++
++    defines += [
++      "GL_APICALL=",
++      "GLAPI=",
++    ]
++
++    if (is_clang) {
++      defines += [
++        "__STDC_CONSTANT_MACROS",
++        "__STDC_LIMIT_MACROS",
++      ]
++    }
++  } else {
++    cflags = [ "-Wno-sign-compare" ]
++
++    defines += [
++      "__STDC_CONSTANT_MACROS",
++      "__STDC_LIMIT_MACROS",
++      "GLAPI=GL_APICALL",
++    ]
++
++    if (is_mac) {
++      cflags += [ "-fvisibility=default" ]
++      defines += [ "GL_APICALL=__attribute__((no_sanitize(\"function\")))" ]
++    } else if (is_clang) {
++      defines += [ "GL_APICALL=__attribute__((visibility(\"protected\"))) __attribute__((no_sanitize(\"function\")))" ]
++    } else {
++      defines += [ "GL_APICALL=__attribute__((visibility(\"protected\")))" ]
++    }
++  }
++}
++
++swiftshader_static_library("swiftshader_libGLESv2_static") {
++  deps = [
++    "../../OpenGL/common:swiftshader_opengl_common",
++    "../../OpenGL/compiler:swiftshader_opengl_compiler",
++    "../../Reactor:swiftshader_reactor",
++    "../../Renderer:swiftshader_renderer",
++  ]
++
++  sources = [
++    "../../Common/SharedLibrary.cpp",
++    "Buffer.cpp",
++    "Context.cpp",
++    "Device.cpp",
++    "Fence.cpp",
++    "Framebuffer.cpp",
++    "IndexDataManager.cpp",
++    "Program.cpp",
++    "Query.cpp",
++    "Renderbuffer.cpp",
++    "ResourceManager.cpp",
++    "Shader.cpp",
++    "Texture.cpp",
++    "TransformFeedback.cpp",
++    "VertexArray.cpp",
++    "VertexDataManager.cpp",
++    "libGLESv2.cpp",
++    "libGLESv3.cpp",
++    "main.cpp",
++    "resource.h",
++    "utilities.cpp",
++  ]
++
++  if (is_mac) {
++    frameworks = [
++      "CoreFoundation.framework",
++      "IOSurface.framework",
++    ]
++  }
++
++  configs = [ ":swiftshader_libGLESv2_private_config" ]
++
++  include_dirs = [
++    "../../../include",
++    "../..",
++    "..",
++  ]
++}
++
++swiftshader_shared_library("swiftshader_libGLESv2") {
++  if (!is_mac && !is_fuchsia) {
++    output_name = "libGLESv2"
++    output_dir = "$root_out_dir/swiftshader"
++  }
++
++  deps = [ ":swiftshader_libGLESv2_static" ]
++
++  sources = [ "entry_points.cpp" ]
++
++  if (is_win) {
++    sources += [
++      "libGLESv2.def",
++      "libGLESv2.rc",
++    ]
++  }
++
++  if (is_mac) {
++    ldflags = [
++      "-Wl,-install_name,@rpath/libswiftshader_libGLESv2.dylib",
++      "-Wl,-exported_symbols_list," +
++          rebase_path("libGLESv2_deprecated.exports", root_build_dir),
++    ]
++  } else if (is_linux || is_chromeos) {
++    inputs = [ "libGLESv2_deprecated.lds" ]
++    ldflags = [ "-Wl,--version-script=" +
++                rebase_path("libGLESv2_deprecated.lds", root_build_dir) ]
++  }
++
++  configs = [ ":swiftshader_libGLESv2_private_config" ]
++
++  include_dirs = [
++    "../../../include",
++    "../..",
++    "..",
++  ]
++}
+diff --git a/third_party/swiftshader/src/Renderer/BUILD.gn b/third_party/swiftshader/src/Renderer/BUILD.gn
+new file mode 100644
+index 000000000..deda918e1
+--- /dev/null
++++ b/third_party/swiftshader/src/Renderer/BUILD.gn
+@@ -0,0 +1,61 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("../swiftshader.gni")
++
++# Need a separate config to ensure the warnings are added to the end.
++config("swiftshader_renderer_private_config") {
++  if (is_win) {
++    cflags = [
++      "/wd4201",  # nameless struct/union
++      "/wd4324",  # structure was padded due to alignment specifier
++      "/wd5030",  # attribute is not recognized
++    ]
++  } else if (current_cpu == "x86" || current_cpu == "x64") {
++    cflags = [ "-Wno-sign-compare" ]
++  }
++}
++
++swiftshader_source_set("swiftshader_renderer") {
++  deps = [
++    "../Shader:swiftshader_shader",
++  ]
++
++  sources = [
++    "Blitter.cpp",
++    "Clipper.cpp",
++    "Color.cpp",
++    "Context.cpp",
++    "ETC_Decoder.cpp",
++    "Matrix.cpp",
++    "PixelProcessor.cpp",
++    "Plane.cpp",
++    "Point.cpp",
++    "QuadRasterizer.cpp",
++    "Renderer.cpp",
++    "Sampler.cpp",
++    "SetupProcessor.cpp",
++    "Surface.cpp",
++    "TextureStage.cpp",
++    "Vector.cpp",
++    "VertexProcessor.cpp",
++  ]
++
++  configs = [ ":swiftshader_renderer_private_config" ]
++
++  include_dirs = [
++    ".",
++    "..",
++  ]
++}
+diff --git a/third_party/swiftshader/src/Shader/BUILD.gn b/third_party/swiftshader/src/Shader/BUILD.gn
+new file mode 100644
+index 000000000..baf12338b
+--- /dev/null
++++ b/third_party/swiftshader/src/Shader/BUILD.gn
+@@ -0,0 +1,59 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("../swiftshader.gni")
++
++# Need a separate config to ensure the warnings are added to the end.
++config("swiftshader_shader_private_config") {
++  if (is_win) {
++    cflags = [
++      "/wd4201",  # nameless struct/union
++      "/wd4324",  # structure was padded due to alignment specifier
++      "/wd5030",  # attribute is not recognized
++    ]
++
++    if (is_clang) {
++      cflags += [ "-Wno-sign-compare" ]
++    }
++  }
++}
++
++swiftshader_source_set("swiftshader_shader") {
++  deps = [
++    "../Main:swiftshader_main",
++  ]
++
++  sources = [
++    "Constants.cpp",
++    "PixelPipeline.cpp",
++    "PixelProgram.cpp",
++    "PixelRoutine.cpp",
++    "PixelShader.cpp",
++    "SamplerCore.cpp",
++    "SetupRoutine.cpp",
++    "Shader.cpp",
++    "ShaderCore.cpp",
++    "VertexPipeline.cpp",
++    "VertexProgram.cpp",
++    "VertexRoutine.cpp",
++    "VertexShader.cpp",
++  ]
++
++  configs = [ ":swiftshader_shader_private_config" ]
++
++  include_dirs = [
++    ".",
++    "..",
++  ]
++}
+diff --git a/third_party/swiftshader/tests/GLESUnitTests/BUILD.gn b/third_party/swiftshader/tests/GLESUnitTests/BUILD.gn
+new file mode 100644
+index 000000000..b6c9d5c22
+--- /dev/null
++++ b/third_party/swiftshader/tests/GLESUnitTests/BUILD.gn
+@@ -0,0 +1,65 @@
++# Copyright 2016 The SwiftShader Authors. All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import("//testing/test.gni")
++import("../../src/swiftshader.gni")
++
++if (build_with_chromium) {
++  test("swiftshader_unittests") {
++    deps = [
++      "//base",
++      "//base/test:test_support",
++      "//testing/gmock",
++      "//testing/gtest",
++      "//third_party/googletest:gmock",
++      "//third_party/googletest:gtest",
++      "//third_party/swiftshader/src/OpenGL/libEGL:swiftshader_libEGL",
++      "//third_party/swiftshader/src/OpenGL/libGLESv2:swiftshader_libGLESv2",
++    ]
++
++    sources = [
++      "//gpu/swiftshader_tests_main.cc",
++      "unittests.cpp",
++    ]
++
++    include_dirs = [ "../../include" ]  # Khronos headers
++
++    defines = [
++      "GL_GLEXT_PROTOTYPES",
++      "GL_APICALL=",
++      "GLAPI=",
++    ]
++
++    # Make sure we're loading SwiftShader's libraries, not ANGLE's or the system
++    # provided ones. On Windows an explicit LoadLibrary("swiftshader\lib*.dll")
++    # is required before making the first EGL or OpenGL ES call.
++    if (is_win) {
++      ldflags = [
++        "/DELAYLOAD:libEGL.dll",
++        "/DELAYLOAD:libGLESv2.dll",
++      ]
++    } else if (is_mac) {
++      ldflags = [
++        "-rpath",
++        "@executable_path/",
++      ]
++      frameworks = [
++        "CoreFoundation.framework",
++        "IOSurface.framework",
++      ]
++    } else {
++      ldflags = [ "-Wl,-rpath=\$ORIGIN/swiftshader" ]
++    }
++  }
++}
