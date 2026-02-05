@@ -1,0 +1,1 @@
+win7dep: Call GetPointerType directly    2023/2/14 9:39:51    42a6c50d306791be116d3b9ceaa6e9259baa5b64

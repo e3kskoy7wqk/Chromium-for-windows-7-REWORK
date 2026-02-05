@@ -1,0 +1,22 @@
+diff --git a/ui/gl/gl_features.cc b/ui/gl/gl_features.cc
+index 9bbba2d69cc2c..63b5e9435d9f2 100644
+--- a/ui/gl/gl_features.cc
++++ b/ui/gl/gl_features.cc
+@@ -235,7 +235,7 @@ void GetANGLEFeaturesFromCommandLineAndFinch(
+ 
+ // Allow fallback to SwfitShader without command line flags during the
+ // deprecation period.
+-BASE_FEATURE(kAllowSwiftShaderFallback, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kAllowSwiftShaderFallback, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ bool IsSwiftShaderAllowedByFeature() {
+   return base::FeatureList::IsEnabled(kAllowSwiftShaderFallback);
+@@ -283,7 +276,7 @@ bool IsSwiftShaderAllowed(const base::CommandLine* command_line) {
+ }
+ 
+ BASE_FEATURE(kAllowSoftwareGLFallbackDueToCrashes,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ bool IsSoftwareGLFallbackDueToCrashesAllowed(
+     const base::CommandLine* command_line) {

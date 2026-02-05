@@ -1,0 +1,50 @@
+diff --git a/components/gwp_asan/client/thread_local_state.h b/components/gwp_asan/client/thread_local_state.h
+index 59b9ba8d27aad..839cadb54f49d 100644
+--- a/components/gwp_asan/client/thread_local_state.h
++++ b/components/gwp_asan/client/thread_local_state.h
+@@ -5,6 +5,7 @@
+ #ifndef COMPONENTS_GWP_ASAN_CLIENT_THREAD_LOCAL_STATE_H_
+ #define COMPONENTS_GWP_ASAN_CLIENT_THREAD_LOCAL_STATE_H_
+
++#include <windows.h>
+ #include "base/check.h"
+ #include "base/compiler_specific.h"
+ #include "build/build_config.h"
+@@ -30,15 +30,24 @@ class ThreadLocalState {
+       partition_alloc::internal::PartitionTlsCreate(&tls_key_, nullptr);
+     }
+ #endif
++    if (!tls_key_) {
++      tls_key_ = ::TlsAlloc();
++    }
+   }
+ 
+ #if !defined(THREAD_LOCAL_STATE_USES_PARTITION_ALLOC_TLS)
+-  ALWAYS_INLINE static uintptr_t GetState() { return state_; }
+-  ALWAYS_INLINE static void SetState(uintptr_t value) { state_ = value; }
++  ALWAYS_INLINE static uintptr_t GetState() {
++    DCHECK(tls_key_);
++    return reinterpret_cast<uintptr_t>(::TlsGetValue(tls_key_));
++  }
++
++  ALWAYS_INLINE static void SetState(uintptr_t value) {
++    DCHECK(tls_key_);
++    ::TlsSetValue(tls_key_, reinterpret_cast<LPVOID>(value));
++  }
+ 
+  private:
+-  static thread_local uintptr_t state_
+-      __attribute__((tls_model("initial-exec")));
++  static DWORD tls_key_;
+ #else
+   ALWAYS_INLINE static uintptr_t GetState() {
+     DCHECK(tls_key_);
+@@ -56,7 +66,7 @@ class ThreadLocalState {
+ 
+ #if !defined(THREAD_LOCAL_STATE_USES_PARTITION_ALLOC_TLS)
+ template <typename T>
+-thread_local uintptr_t ThreadLocalState<T>::state_ = 0;
++DWORD ThreadLocalState<T>::tls_key_ = 0;
+ #else
+ template <typename T>
+ partition_alloc::internal::PartitionTlsKey ThreadLocalState<T>::tls_key_ = 0;

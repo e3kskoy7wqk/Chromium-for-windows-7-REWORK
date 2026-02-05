@@ -1,0 +1,144 @@
+diff --git a/net/BUILD.gn b/net/BUILD.gn
+index 21c3812f49a99..d19a464b1ff93 100644
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -341,7 +341,6 @@ component("net") {
+       "crypt32.lib",
+       "dhcpcsvc.lib",
+       "iphlpapi.lib",
+-      "ncrypt.lib",
+       "rpcrt4.lib",
+       "secur32.lib",
+       "urlmon.lib",
+diff --git a/net/ssl/ssl_platform_key_win.cc b/net/ssl/ssl_platform_key_win.cc
+index 0a3f89a968c11..11c9d111a3d0d 100644
+--- a/net/ssl/ssl_platform_key_win.cc
++++ b/net/ssl/ssl_platform_key_win.cc
+@@ -17,6 +17,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/lazy_instance.h"
+ #include "base/logging.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "crypto/openssl_util.h"
+@@ -34,6 +35,55 @@ namespace net {
+ 
+ namespace {
+ 
++using NCryptFreeObjectFunc = SECURITY_STATUS(WINAPI*)(NCRYPT_HANDLE);
++using NCryptSignHashFunc = SECURITY_STATUS(WINAPI*)(NCRYPT_KEY_HANDLE,  // hKey
++                                                    VOID*,   // pPaddingInfo
++                                                    BYTE*,   // pbHashValue
++                                                    DWORD,   // cbHashValue
++                                                    BYTE*,   // pbSignature
++                                                    DWORD,   // cbSignature
++                                                    DWORD*,  // pcbResult
++                                                    DWORD);  // dwFlags
++using NCryptGetPropertyFunc = SECURITY_STATUS(WINAPI*)(NCRYPT_HANDLE,  // hObject
++                                                       LPCWSTR,   // pszProperty
++                                                       PBYTE,     // pbOutput
++                                                       DWORD,     // cbOutput
++                                                       DWORD*,    // pcbResult
++                                                       DWORD);    // dwFlags
++
++class CNGFunctions {
++ public:
++  CNGFunctions() : ncrypt_free_object_(nullptr), ncrypt_sign_hash_(nullptr) {
++    HMODULE ncrypt = GetModuleHandle(L"ncrypt.dll");
++    if (ncrypt != nullptr) {
++      ncrypt_free_object_ = reinterpret_cast<NCryptFreeObjectFunc>(
++          GetProcAddress(ncrypt, "NCryptFreeObject"));
++      ncrypt_sign_hash_ = reinterpret_cast<NCryptSignHashFunc>(
++          GetProcAddress(ncrypt, "NCryptSignHash"));
++      ncrypt_get_property_ = reinterpret_cast<NCryptGetPropertyFunc>(
++          GetProcAddress(ncrypt, "NCryptGetProperty"));
++    }
++  }
++
++  NCryptFreeObjectFunc ncrypt_free_object() const {
++    return ncrypt_free_object_;
++  }
++
++  NCryptSignHashFunc ncrypt_sign_hash() const { return ncrypt_sign_hash_; }
++
++  NCryptGetPropertyFunc ncrypt_get_property() const {
++    return ncrypt_get_property_;
++  }
++
++ private:
++  NCryptFreeObjectFunc ncrypt_free_object_;
++  NCryptSignHashFunc ncrypt_sign_hash_;
++  NCryptGetPropertyFunc ncrypt_get_property_;
++};
++
++base::LazyInstance<CNGFunctions>::Leaky g_cng_functions =
++    LAZY_INSTANCE_INITIALIZER;
++
+ bool ProbeSHA256(ThreadedSSLPrivateKey::Delegate* delegate) {
+   // This input is chosen to avoid colliding with other signing inputs used in
+   // TLS 1.2 or TLS 1.3. We use the construct in RFC 8446, section 4.4.3, but
+@@ -208,7 +221,7 @@ class ScopedNCRYPT_PROV_HANDLE {
+ std::wstring GetCNGProviderName(NCRYPT_KEY_HANDLE key) {
+   crypto::ScopedNCryptProvider prov;
+   DWORD prov_len = 0;
+-  SECURITY_STATUS status = NCryptGetProperty(
++  SECURITY_STATUS status = g_cng_functions.Get().ncrypt_get_property()(
+       key, NCRYPT_PROVIDER_HANDLE_PROPERTY,
+       reinterpret_cast<BYTE*>(
+           crypto::ScopedNCryptProvider::Receiver(prov).get()),
+@@ -221,13 +234,13 @@ std::string GetCNGProviderName(NCRYPT_KEY_HANDLE key) {
+   // array of wchar_t, however NCryptGetProperty works in bytes, so lengths must
+   // be converted.
+   DWORD name_len = 0;
+-  status = NCryptGetProperty(prov.get(), NCRYPT_NAME_PROPERTY, nullptr, 0,
++  status = g_cng_functions.Get().ncrypt_get_property()(prov.get(), NCRYPT_NAME_PROPERTY, nullptr, 0,
+                              &name_len, NCRYPT_SILENT_FLAG);
+   if (FAILED(status) || name_len % sizeof(wchar_t) != 0) {
+     return L"(error getting provider name)";
+   }
+   std::wstring name(name_len / sizeof(wchar_t), 0);
+-  status = NCryptGetProperty(
++  status = g_cng_functions.Get().ncrypt_get_property()(
+       prov.get(), NCRYPT_NAME_PROPERTY, reinterpret_cast<BYTE*>(name.data()),
+       name.size() * sizeof(wchar_t), &name_len, NCRYPT_SILENT_FLAG);
+   if (FAILED(status)) {
+@@ -191,7 +230,7 @@ class SSLPlatformKeyCNG : public ThreadedSSLPrivateKey::Delegate {
+ 
+     DWORD signature_len;
+     SECURITY_STATUS status =
+-        NCryptSignHash(key_.get(), padding_info, const_cast<BYTE*>(digest),
++        g_cng_functions.Get().ncrypt_sign_hash()(key_.get(), padding_info, const_cast<BYTE*>(digest),
+                        digest_len, nullptr, 0, &signature_len, flags);
+     if (FAILED(status)) {
+       LOG(ERROR) << "NCryptSignHash failed: " << status;
+@@ -200,7 +239,7 @@ class SSLPlatformKeyCNG : public ThreadedSSLPrivateKey::Delegate {
+       return ERR_SSL_CLIENT_AUTH_SIGNATURE_FAILED;
+     }
+     signature->resize(signature_len);
+-    status = NCryptSignHash(key_.get(), padding_info, const_cast<BYTE*>(digest),
++    status = g_cng_functions.Get().ncrypt_sign_hash()(key_.get(), padding_info, const_cast<BYTE*>(digest),
+                             digest_len, signature->data(), signature_len,
+                             &signature_len, flags);
+     if (FAILED(status)) {
+diff --git a/crypto/scoped_cng_types.h b/crypto/scoped_cng_types.h
+index 9c8e3a078e65a..bb7db5902c184 100644
+--- a/crypto/scoped_cng_types.h
++++ b/crypto/scoped_cng_types.h
+@@ -15,7 +15,15 @@ namespace crypto {
+ template <typename T>
+ struct NCryptObjectTraits {
+   static T InvalidValue() { return 0; }
+-  static void Free(T handle) { NCryptFreeObject(handle); }
++  static void Free(T handle) {
++    typedef SECURITY_STATUS(WINAPI* NCryptFreeObjectFunc)(NCRYPT_HANDLE);
++    HMODULE ncrypt = GetModuleHandle(L"ncrypt.dll");
++    if (ncrypt != nullptr) {
++      NCryptFreeObjectFunc ncrypt_free_object_ = reinterpret_cast<NCryptFreeObjectFunc>(
++          GetProcAddress(ncrypt, "NCryptFreeObject"));
++      ncrypt_free_object_(handle);
++    }
++  }
+ };
+ 
+ using ScopedNCryptProvider =

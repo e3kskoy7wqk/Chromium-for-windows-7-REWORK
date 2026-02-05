@@ -1,0 +1,185 @@
+diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
+index 453ac71435e0d..63dd84b48d1dc 100644
+--- a/third_party/blink/common/BUILD.gn
++++ b/third_party/blink/common/BUILD.gn
+@@ -332,6 +332,7 @@ source_set("common") {
+   }
+ 
+   if (is_win) {
++    sources += [ "dwrite_rasterizer_support/dwrite_rasterizer_support.cc" ]
+     deps += [ "//ui/gfx/" ]
+   }
+ 
+diff --git a/third_party/blink/common/dwrite_rasterizer_support/dwrite_rasterizer_support.cc b/third_party/blink/common/dwrite_rasterizer_support/dwrite_rasterizer_support.cc
+new file mode 100644
+index 0000000000000..236d8fccb7620
+--- /dev/null
++++ b/third_party/blink/common/dwrite_rasterizer_support/dwrite_rasterizer_support.cc
+@@ -0,0 +1,30 @@
++// Copyright 2018 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/public/common/dwrite_rasterizer_support/dwrite_rasterizer_support.h"
++#include "base/check_op.h"
++#include "base/win/windows_version.h"
++#include "ui/gfx/win/direct_write.h"
++
++#include <dwrite.h>
++#include <dwrite_2.h>
++#include <wrl.h>
++
++namespace blink {
++
++bool DWriteRasterizerSupport::IsDWriteFactory2Available() {
++  Microsoft::WRL::ComPtr<IDWriteFactory> factory;
++  gfx::win::CreateDWriteFactory(&factory);
++  Microsoft::WRL::ComPtr<IDWriteFactory2> factory2;
++  factory.As<IDWriteFactory2>(&factory2);
++  if (!factory2.Get()) {
++    // If we were unable to get a IDWriteFactory2, check that we are actually on
++    // a Windows version where we allow it. Windows 8.1 and up should have the
++    // IDWritefactory2 available.
++    CHECK_LT(base::win::GetVersion(), base::win::Version::WIN8_1);
++  }
++  return factory2.Get();
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/public/common/BUILD.gn b/third_party/blink/public/common/BUILD.gn
+index 086625e5ecf52..29b6aec5cecc1 100644
+--- a/third_party/blink/public/common/BUILD.gn
++++ b/third_party/blink/public/common/BUILD.gn
+@@ -370,6 +370,10 @@ source_set("headers") {
+   if (is_mac) {
+     sources += [ "sandbox_support/sandbox_support_mac.h" ]
+   }
++
++  if (is_win) {
++    sources += [ "dwrite_rasterizer_support/dwrite_rasterizer_support.h" ]
++  }
+ 
+   # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+   # enable the diagnostic by removing this line.
+diff --git a/third_party/blink/public/common/dwrite_rasterizer_support/dwrite_rasterizer_support.h b/third_party/blink/public/common/dwrite_rasterizer_support/dwrite_rasterizer_support.h
+new file mode 100644
+index 0000000000000..1a8b4b87ba987
+--- /dev/null
++++ b/third_party/blink/public/common/dwrite_rasterizer_support/dwrite_rasterizer_support.h
+@@ -0,0 +1,19 @@
++// Copyright 2018 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_PUBLIC_COMMON_DWRITE_RASTERIZER_SUPPORT_DWRITE_RASTERIZER_SUPPORT_H_
++#define THIRD_PARTY_BLINK_PUBLIC_COMMON_DWRITE_RASTERIZER_SUPPORT_DWRITE_RASTERIZER_SUPPORT_H_
++
++#include "third_party/blink/public/common/common_export.h"
++
++namespace blink {
++
++class BLINK_COMMON_EXPORT DWriteRasterizerSupport {
++ public:
++  static bool IsDWriteFactory2Available();
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_PUBLIC_COMMON_DWRITE_RASTERIZER_SUPPORT_DWRITE_RASTERIZER_SUPPORT_H_
+diff --git a/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom b/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom
+index a809c19539aaf..d96fce95490ad 100644
+--- a/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom
++++ b/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom
+@@ -35,6 +35,11 @@ struct MapCharactersResult {
+   DWriteFontStyle font_style;
+ };
+ 
++enum UniqueFontLookupMode {
++    kRetrieveTable,
++    kSingleLookups
++};
++
+ interface DWriteFontProxy {
+   // Locates the index of the specified font family within the system
+   // collection.
+diff --git a/third_party/blink/renderer/modules/font_access/font_metadata.cc b/third_party/blink/renderer/modules/font_access/font_metadata.cc
+index a7a5b4f6468a3..595a696690482 100644
+--- a/third_party/blink/renderer/modules/font_access/font_metadata.cc
++++ b/third_party/blink/renderer/modules/font_access/font_metadata.cc
+@@ -34,7 +31,9 @@ void SetUpFontUniqueLookupIfNecessary() {
+   if (!unique_name_lookup)
+     return;
+   // Contrary to what the method name might imply, this is not an idempotent
+-  // method. It also initializes state in the FontUniqueNameLookup object.
++  // method. It also initializes the state in the FontUniqueNameLookup object
++  // to either retrieve from tables on Windows 7, or direct lookups on
++  // Windows 10.
+   unique_name_lookup->IsFontUniqueNameLookupReadyForSyncLookup();
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/fonts/web_font_typeface_factory.cc b/third_party/blink/renderer/platform/fonts/web_font_typeface_factory.cc
+index 7f19714480223..b078bf747075f 100644
+--- a/third_party/blink/renderer/platform/fonts/web_font_typeface_factory.cc
++++ b/third_party/blink/renderer/platform/fonts/web_font_typeface_factory.cc
+@@ -13,6 +13,7 @@
+ #include "third_party/skia/include/ports/SkTypeface_fontations.h"
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "third_party/blink/public/common/dwrite_rasterizer_support/dwrite_rasterizer_support.h"
+ #include "third_party/blink/renderer/platform/fonts/win/dwrite_font_format_support.h"
+ #endif
+ 
+@@ -156,6 +157,11 @@ sk_sp<SkFontMgr> WebFontTypefaceFactory::FreeTypeFontManager() {
+     // backend handles COLRv0.
+     return instantiator.make_system(data);
+   }
++#if BUILDFLAG(IS_WIN)
++  if (!blink::DWriteRasterizerSupport::IsDWriteFactory2Available())
++    return instantiator.make_fallback(data);
++#endif
++
+   return instantiator.make_fontations(data);
+ }
+ 
+@@ -165,7 +171,8 @@ sk_sp<SkFontMgr> WebFontTypefaceFactory::FontManagerForColrCpal() {
+     sk_sp<SkData> data,
+     const WebFontTypefaceFactory::FontInstantiator& instantiator) {
+ #if BUILDFLAG(IS_WIN)
+-  if (DWriteVersionSupportsVariations()) {
++  if (DWriteVersionSupportsVariations() &&
++      blink::DWriteRasterizerSupport::IsDWriteFactory2Available()) {
+     return instantiator.make_system(data);
+   } else {
+     return instantiator.make_fallback(data);
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
+index 3b1c3db022fd0..b9fda0765b63a 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
++++ b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
+@@ -60,10 +60,12 @@ sk_sp<SkTypeface> FontUniqueNameLookupWin::InstantiateFromFileAndTtcIndex(
+ }
+ 
+ bool FontUniqueNameLookupWin::IsFontUniqueNameLookupReadyForSyncLookup() {
+-  if (RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled()) {
+-    EnsureServiceConnected();
++  if (!RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled()) {
++    return true;
+   }
+ 
++  EnsureServiceConnected();
++
+   return true;
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h
+index 7b31b5af1cabc..38c69e71c1cbe 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h
++++ b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h
+@@ -37,6 +37,8 @@ class FontUniqueNameLookupWin : public FontUniqueNameLookup {
+                                                    uint32_t ttc_index);
+ 
+   mojo::Remote<mojom::blink::DWriteFontProxy> service_;
++  blink::Deque<NotifyFontUniqueNameLookupReady> pending_callbacks_;
++  std::optional<bool> sync_available_;
+ };
+ 
+ }  // namespace blink

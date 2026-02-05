@@ -1,0 +1,184 @@
+diff --git a/ui/base/win/shell.cc b/ui/base/win/shell.cc
+index ff1087881d787..36741dc9546de 100644
+--- a/ui/base/win/shell.cc
++++ b/ui/base/win/shell.cc
+@@ -21,9 +21,11 @@
+ #include "base/threading/scoped_thread_priority.h"
+ #include "base/win/atl.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ #include "ui/base/ui_base_switches.h"
+ 
+-namespace ui::win {
++namespace ui {
++namespace win {
+ 
+ namespace {
+ 
+@@ -178,14 +180,27 @@ void ClearWindowPropertyStore(HWND hwnd) {
+ }
+ 
+ bool IsAeroGlassEnabled() {
+-  // For testing in Win8+ (where it is not possible to disable composition) the
++  // For testing in Win8 (where it is not possible to disable composition) the
+   // user can specify this command line switch to mimic the behavior.  In this
+   // mode, cross-HWND transparency is not supported and various types of
+   // widgets fallback to more simplified rendering behavior.
+-  // TODO(https://crbug.com/1385856): See if this switch and the code to support
+-  // it can be removed.
+-  return !base::CommandLine::ForCurrentProcess()->HasSwitch(
+-      switches::kDisableDwmComposition);
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kDisableDwmComposition))
++    return false;
++
++  // If composition is not enabled, we behave like on XP.
++  return IsDwmCompositionEnabled();
++}
++
++bool IsDwmCompositionEnabled() {
++  // As of Windows 8, DWM composition is always enabled.
++  // In Windows 7 this can change at runtime.
++  if (base::win::GetVersion() >= base::win::Version::WIN8) {
++    return true;
++  }
++  BOOL is_enabled;
++  return SUCCEEDED(DwmIsCompositionEnabled(&is_enabled)) && is_enabled;
+ }
+ 
+-}  // namespace ui::win
++}  // namespace win
++}  // namespace ui
+diff --git a/ui/base/win/shell.h b/ui/base/win/shell.h
+index d7e5e7bbb252e..3a48c8870b7c9 100644
+--- a/ui/base/win/shell.h
++++ b/ui/base/win/shell.h
+@@ -15,7 +15,8 @@ namespace base {
+ class FilePath;
+ }
+ 
+-namespace ui::win {
++namespace ui {
++namespace win {
+ 
+ // Open the folder at |full_path| via the Windows shell. It is an error if
+ // |full_path| does not refer to a folder.
+@@ -80,6 +81,11 @@ COMPONENT_EXPORT(UI_BASE) void ClearWindowPropertyStore(HWND hwnd);
+ // This method supports a command-line override for testing.
+ COMPONENT_EXPORT(UI_BASE) bool IsAeroGlassEnabled();
+ 
+-}  // namespace ui::win
++// Returns true if dwm composition is available and turned on on the current
++// platform.
++COMPONENT_EXPORT(UI_BASE) bool IsDwmCompositionEnabled();
++
++}  // namespace win
++}  // namespace ui
+ 
+ #endif  // UI_BASE_WIN_SHELL_H_
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 2fda18fa44a8b..6ba506fc896bc 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -232,6 +232,13 @@ void EnableMenuItemByCommand(HMENU menu, UINT command, bool enabled) {
+   EnableMenuItem(menu, command, flags);
+ }
+ 
++// Callback used to notify child windows that the top level window received a
++// DWMCompositionChanged message.
++BOOL CALLBACK SendDwmCompositionChanged(HWND window, LPARAM param) {
++  SendMessage(window, WM_DWMCOMPOSITIONCHANGED, 0, 0);
++  return TRUE;
++}
++
+ // The thickness of an auto-hide taskbar in pixels.
+ constexpr int kAutoHideTaskbarThicknessPx = 2;
+ 
+@@ -424,6 +431,7 @@ HWNDMessageHandler::HWNDMessageHandler(HWNDMessageHandlerDelegate* delegate,
+       touch_down_contexts_(0),
+       last_mouse_hwheel_time_(0),
+       dwm_transition_desired_(false),
++      dwm_composition_enabled_(ui::win::IsDwmCompositionEnabled()),
+       sent_window_size_changing_(false),
+       left_button_down_on_caption_(false),
+       background_fullscreen_hack_(false) {}
+@@ -1797,6 +1805,29 @@ void HWNDMessageHandler::OnDisplayChange(UINT bits_per_pixel,
+   SendFrameChanged();
+ }
+ 
++LRESULT HWNDMessageHandler::OnDwmCompositionChanged(UINT msg,
++                                                    WPARAM /* w_param */,
++                                                    LPARAM /* l_param */) {
++  TRACE_EVENT0("ui", "HWNDMessageHandler::OnDwmCompositionChanged");
++
++  if (!delegate_->HasNonClientView()) {
++    SetMsgHandled(FALSE);
++    return 0;
++  }
++
++  bool dwm_composition_enabled = ui::win::IsDwmCompositionEnabled();
++  if (dwm_composition_enabled_ != dwm_composition_enabled) {
++    // Do not cause the Window to be hidden and shown unless there was
++    // an actual change in the theme. This filter is necessary because
++    // Windows sends redundant WM_DWMCOMPOSITIONCHANGED messages when
++    // a laptop is reopened, and our theme change code causes wonky
++    // focus issues. See http://crbug.com/895855 for more information.
++    dwm_composition_enabled_ = dwm_composition_enabled;
++    FrameTypeChanged();
++  }
++  return 0;
++}
++
+ LRESULT HWNDMessageHandler::OnDpiChanged(UINT msg,
+                                          WPARAM w_param,
+                                          LPARAM l_param) {
+@@ -3481,11 +3512,14 @@ void HWNDMessageHandler::PerformDwmTransition() {
+ }
+ 
+ void HWNDMessageHandler::PerformDwmTransition() {
+-  CHECK(IsFrameSystemDrawn());
+ 
+   dwm_transition_desired_ = false;
+   delegate_->HandleFrameChanged();
+   SendFrameChanged();
++  // WM_DWMCOMPOSITIONCHANGED is only sent to top level windows, however we want
++  // to notify our children too, since we can have MDI child windows who need to
++  // update their appearance.
++  EnumChildWindows(hwnd(), &SendDwmCompositionChanged, NULL);
+ }
+ 
+ void HWNDMessageHandler::UpdateDwmFrame() {
+diff --git a/ui/views/win/hwnd_message_handler.h b/ui/views/win/hwnd_message_handler.h
+index 7d2cf25ace022..ef3ea5cb0c4ed 100644
+--- a/ui/views/win/hwnd_message_handler.h
++++ b/ui/views/win/hwnd_message_handler.h
+@@ -368,6 +368,9 @@ class VIEWS_EXPORT HWNDMessageHandler : public gfx::WindowImpl,
+     CR_MESSAGE_HANDLER_EX(WM_NCUAHDRAWCAPTION, OnNCUAHDrawCaption)
+     CR_MESSAGE_HANDLER_EX(WM_NCUAHDRAWFRAME, OnNCUAHDrawFrame)
+ 
++    // Vista and newer
++    CR_MESSAGE_HANDLER_EX(WM_DWMCOMPOSITIONCHANGED, OnDwmCompositionChanged)
++
+     // Win 8.1 and newer
+     CR_MESSAGE_HANDLER_EX(WM_DPICHANGED, OnDpiChanged)
+ 
+@@ -477,6 +480,7 @@ class VIEWS_EXPORT HWNDMessageHandler : public gfx::WindowImpl,
+   void OnDestroy();
+   void OnDisplayChange(UINT bits_per_pixel, const gfx::Size& screen_size);
+   LRESULT OnDpiChanged(UINT msg, WPARAM w_param, LPARAM l_param);
++  LRESULT OnDwmCompositionChanged(UINT msg, WPARAM w_param, LPARAM l_param);
+   void OnEnterMenuLoop(BOOL from_track_popup_menu);
+   void OnEnterSizeMove();
+   LRESULT OnEraseBkgnd(HDC dc);
+@@ -739,6 +743,11 @@ class VIEWS_EXPORT HWNDMessageHandler : public gfx::WindowImpl,
+   // glass. Defaults to false.
+   bool dwm_transition_desired_;
+ 
++  // Is DWM composition currently enabled?
++  // Note: According to MSDN docs for DwmIsCompositionEnabled(), this is always
++  // true starting in Windows 8.
++  bool dwm_composition_enabled_;
++
+   // True if HandleWindowSizeChanging has been called in the delegate, but not
+   // HandleClientSizeChanged.
+   bool sent_window_size_changing_;
