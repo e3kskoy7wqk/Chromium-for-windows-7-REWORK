@@ -1,0 +1,522 @@
+diff --git a/content/browser/gpu/gpu_data_manager_impl_private_unittest.cc b/content/browser/gpu/gpu_data_manager_impl_private_unittest.cc
+index 865e7308da338..9868b69f6be90 100644
+--- a/content/browser/gpu/gpu_data_manager_impl_private_unittest.cc
++++ b/content/browser/gpu/gpu_data_manager_impl_private_unittest.cc
+@@ -9,7 +9,6 @@
+ 
+ #include "base/command_line.h"
+ #include "base/run_loop.h"
+-#include "base/test/scoped_command_line.h"
+ #include "base/test/scoped_feature_list.h"
+ #include "base/test/task_environment.h"
+ #include "base/time/time.h"
+@@ -497,14 +496,8 @@ TEST_F(GpuDataManagerImplPrivateTest, FallbackFromGraphite) {
+ #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_IOS)
+ #if !BUILDFLAG(IS_FUCHSIA)
+ TEST_F(GpuDataManagerImplPrivateTest, NoDefaultFallbackToSwiftShaderForGanesh) {
+-  base::test::ScopedCommandLine command_line;
+-  command_line.GetProcessCommandLine()->AppendSwitch(
++  base::CommandLine::ForCurrentProcess()->AppendSwitch(
+       switches::kDisableSkiaGraphite);
+-  // Ensure --enable-unsafe-swiftshader is not in the command line. It is used
+-  // by some other tests in this suite.
+-  command_line.GetProcessCommandLine()->RemoveSwitch(
+-      switches::kEnableUnsafeSwiftShader);
+-
+   base::test::ScopedFeatureList feature_list;
+   feature_list.InitWithFeatures({}, {
+                                         features::kAllowSwiftShaderFallback,
+@@ -664,7 +657,7 @@ TEST_F(GpuDataManagerImplPrivateTest,
+ }
+ #endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ 
+-#if !defined(CAST_AUDIO_ONLY) && !BUILDFLAG(IS_FUCHSIA)
++#if !defined(CAST_AUDIO_ONLY)
+ TEST_F(GpuDataManagerImplPrivateTest, GpuStartsWithGpuDisabled) {
+   base::test::ScopedFeatureList feature_list;
+   feature_list.InitWithFeatures({}, {
+@@ -674,17 +667,11 @@ TEST_F(GpuDataManagerImplPrivateTest, GpuStartsWithGpuDisabled) {
+ #endif  // BUILDFLAG(IS_WIN)
+                                     });
+ 
+-  // Ensure --enable-unsafe-swiftshader is not in the command line. It is used
+-  // by some other tests in this suite.
+-  base::test::ScopedCommandLine command_line;
+-  command_line.GetProcessCommandLine()->AppendSwitch(switches::kDisableGpu);
+-  command_line.GetProcessCommandLine()->RemoveSwitch(
+-      switches::kEnableUnsafeSwiftShader);
+-
++  base::CommandLine::ForCurrentProcess()->AppendSwitch(switches::kDisableGpu);
+   ScopedGpuDataManagerImplPrivate manager;
+   EXPECT_EQ(gpu::GpuMode::DISPLAY_COMPOSITOR, manager->GetGpuMode());
+ }
+-#endif  // !defined(CAST_AUDIO_ONLY) && !BUILDFLAG(IS_FUCHSIA)
++#endif  // !defined(CAST_AUDIO_ONLY)
+ #endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS) &&
+         // !BUILDFLAG(IS_IOS)
+ 
+@@ -719,12 +706,6 @@ TEST_F(GpuDataManagerImplPrivateTest, FallbackFromVulkanToGL) {
+ }
+ 
+ TEST_F(GpuDataManagerImplPrivateTest, VulkanInitializationFails) {
+-  // Ensure --enable-unsafe-swiftshader is not in the command line. It is used
+-  // by some other tests in this suite.
+-  base::test::ScopedCommandLine command_line;
+-  command_line.GetProcessCommandLine()->RemoveSwitch(
+-      switches::kEnableUnsafeSwiftShader);
+-
+   base::test::ScopedFeatureList feature_list;
+   feature_list.InitWithFeatures({features::kVulkan},
+                                 {
+@@ -758,12 +739,6 @@ TEST_F(GpuDataManagerImplPrivateTest, VulkanInitializationFails) {
+ 
+ #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_IOS)
+ TEST_F(GpuDataManagerImplPrivateTest, FallbackFromVulkanWithGLDisabled) {
+-  // Ensure --enable-unsafe-swiftshader is not in the command line. It is used
+-  // by some other tests in this suite.
+-  base::test::ScopedCommandLine command_line;
+-  command_line.GetProcessCommandLine()->RemoveSwitch(
+-      switches::kEnableUnsafeSwiftShader);
+-
+   base::test::ScopedFeatureList feature_list;
+   feature_list.InitWithFeatures({features::kVulkan},
+                                 {
+diff --git a/content/public/browser/gpu_utils.cc b/content/public/browser/gpu_utils.cc
+index c20eea8013fcb..65dea86a65129 100644
+--- a/content/public/browser/gpu_utils.cc
++++ b/content/public/browser/gpu_utils.cc
+@@ -69,7 +69,7 @@ const gpu::GpuPreferences GetGpuPreferencesFromCommandLine() {
+   gpu_preferences.disable_software_rasterizer =
+       command_line->HasSwitch(switches::kDisableSoftwareRasterizer) ||
+       (!features::IsSwiftShaderAllowed(command_line) &&
+-       !features::IsWARPAllowed(command_line));
++       !features::IsWARPAllowedByFeature());
+   gpu_preferences.log_gpu_control_list_decisions =
+       command_line->HasSwitch(switches::kLogGpuControlListDecisions);
+   gpu_preferences.gpu_startup_dialog =
+diff --git a/content/public/test/browser_test_base.cc b/content/public/test/browser_test_base.cc
+index 300fd66a4cdab..ea5838722293b 100644
+--- a/content/public/test/browser_test_base.cc
++++ b/content/public/test/browser_test_base.cc
+@@ -375,9 +375,6 @@ void BrowserTestBase::SetUp() {
+     command_line->RemoveSwitch(switches::kDisableSoftwareCompositingFallback);
+   }
+ 
+-  // Disable D3D11 WARP for consistent cross-platform software rendering.
+-  command_line->AppendSwitch(switches::kDisableD3D11Warp);
+-
+   // The layout of windows on screen is unpredictable during tests, so disable
+   // occlusion when running browser tests.
+   command_line->AppendSwitch(
+diff --git a/content/test/gpu/gpu_tests/context_lost_integration_test.py b/content/test/gpu/gpu_tests/context_lost_integration_test.py
+index 06c67ee578fc9..b1c266b8d32e6 100644
+--- a/content/test/gpu/gpu_tests/context_lost_integration_test.py
++++ b/content/test/gpu/gpu_tests/context_lost_integration_test.py
+@@ -676,8 +676,7 @@ class ContextLostIntegrationTest(gpu_integration_test.GpuIntegrationTest):
+     # after gpu process crashes three times and falls back to SwiftShader.
+     self.RestartBrowserIfNecessaryWithArgs([
+         cba.DISABLE_DOMAIN_BLOCKING_FOR_3D_APIS,
+-        '--enable-features=AllowSoftwareGLFallbackDueToCrashes,'
+-        'AllowSwiftShaderFallback'
++        '--enable-features=AllowSoftwareGLFallbackDueToCrashes'
+     ])
+     self._NavigateAndWaitForLoad(test_path)
+     # Check WebGL status at browser startup.
+diff --git a/content/test/gpu/gpu_tests/gpu_process_integration_test.py b/content/test/gpu/gpu_tests/gpu_process_integration_test.py
+index 9482853a4b15c..292e8b99d403a 100644
+--- a/content/test/gpu/gpu_tests/gpu_process_integration_test.py
++++ b/content/test/gpu/gpu_tests/gpu_process_integration_test.py
+@@ -331,12 +331,6 @@ class GpuProcessIntegrationTest(gpu_integration_test.GpuIntegrationTest):
+     if host_information.IsLinux():
+       return
+ 
+-    # On Mac, featureStatusForHardwareGpu is not populated when running on
+-    # SwiftShader. The previous checks are enough to confirm that WebGL is
+-    # blocklisted.
+-    if host_information.IsMac():
+-      return
+-
+     feature_status_for_hardware_gpu_list = _GetBrowserBridgeProperty(
+         self.tab, 'gpuInfo.featureStatusForHardwareGpu.featureStatus')
+     for name, status in feature_status_for_hardware_gpu_list.items():
+diff --git a/gpu/config/gpu_info_collector.cc b/gpu/config/gpu_info_collector.cc
+index c7584383c0ce5..0ce524a01d1f8 100644
+--- a/gpu/config/gpu_info_collector.cc
++++ b/gpu/config/gpu_info_collector.cc
+@@ -555,7 +555,7 @@ bool CollectBasicGraphicsInfo(const base::CommandLine* command_line,
+     gpu_info->gl_renderer = "Disabled";
+     gpu_info->gl_version = "Disabled";
+     return true;
+-  } else if (implementation == gl::GetSoftwareGLImplementation(command_line)) {
++  } else if (implementation == gl::GetSoftwareGLImplementation()) {
+     // If using the software GL implementation, use fake vendor and
+     // device ids to make sure it never gets blocklisted. It allows us
+     // to proceed with loading the blocklist which may have non-device
+diff --git a/headless/test/headless_browser_browsertest.cc b/headless/test/headless_browser_browsertest.cc
+index 08d2670b4d1b1..2c8fbdf4afacf 100644
+--- a/headless/test/headless_browser_browsertest.cc
++++ b/headless/test/headless_browser_browsertest.cc
+@@ -66,7 +66,6 @@
+ #include "ui/base/clipboard/scoped_clipboard_writer.h"
+ #include "ui/base/resource/resource_bundle.h"
+ #include "ui/gfx/geometry/size.h"
+-#include "ui/gl/gl_switches.h"
+ #include "ui/shell_dialogs/select_file_dialog.h"
+ 
+ #if !BUILDFLAG(IS_FUCHSIA)
+@@ -279,28 +278,28 @@ IN_PROC_BROWSER_TEST_F(HeadlessBrowserTestWithProxy, MAYBE_SetProxyConfig) {
+   EXPECT_TRUE(browser_context->GetAllWebContents().empty());
+ }
+ 
+-// WebGL is not guaranteed to be supported everywhere except when using
+-// --enable-unsafe-swiftshader.
+-class HeadlessWebGLAvailabilityTest : public HeadlessBrowserTest {
+- public:
+-  void SetUpCommandLine(base::CommandLine* command_line) override {
+-    command_line->AppendSwitch(::switches::kEnableUnsafeSwiftShader);
+-    HeadlessBrowserTest::SetUpCommandLine(command_line);
+-  }
+-};
+-
+-IN_PROC_BROWSER_TEST_F(HeadlessWebGLAvailabilityTest, WebGLSupported) {
++IN_PROC_BROWSER_TEST_F(HeadlessBrowserTest, WebGLSupported) {
+   HeadlessBrowserContext* browser_context =
+       browser()->CreateBrowserContextBuilder().Build();
+ 
+   HeadlessWebContents* web_contents =
+       browser_context->CreateWebContentsBuilder().Build();
+ 
++  bool expected_support = true;
++#if BUILDFLAG(IS_APPLE)
++  LOG(INFO) << "CPU type: " << static_cast<int>(base::mac::GetCPUType());
++  if (base::mac::GetCPUType() == base::mac::CPUType::kArm) {
++    expected_support = false;
++  }
++#elif BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
++  expected_support = false;
++#endif  // BUILDFLAG(IS_APPLE)
++
+   EXPECT_THAT(
+       EvaluateScript(web_contents,
+                      "(document.createElement('canvas').getContext('webgl')"
+                      "    instanceof WebGLRenderingContext)"),
+-      DictHasValue("result.result.value", true));
++      DictHasValue("result.result.value", expected_support));
+ }
+ 
+ IN_PROC_BROWSER_TEST_F(HeadlessBrowserTest, ClipboardCopyPasteText) {
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index f3fbd4a37f6b0..216320ddc36bb 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -25041,13 +25041,19 @@
+     "SwiftShaderDeprecation": [
+         {
+             "platforms": [
++                "android",
++                "chromeos",
++                "ios",
++                "linux",
++                "mac",
+                 "windows"
+             ],
+             "experiments": [
+                 {
+-                    "name": "WarpDisabledForWindowsTests",
++                    "name": "SwiftShaderDisabled",
+                     "disable_features": [
+-                        "AllowD3D11WarpFallback"
++                        "AllowSoftwareGLFallbackDueToCrashes",
++                        "AllowSwiftShaderFallback"
+                     ]
+                 }
+             ]
+diff --git a/ui/gl/gl_features.cc b/ui/gl/gl_features.cc
+index 9bbba2d69cc2c..63b5e9435d9f2 100644
+--- a/ui/gl/gl_features.cc
++++ b/ui/gl/gl_features.cc
+@@ -235,12 +235,6 @@ void GetANGLEFeaturesFromCommandLineAndFinch(
+ }
+ 
+ #if BUILDFLAG(ENABLE_SWIFTSHADER)
+-#if BUILDFLAG(IS_FUCHSIA)
+-// SwiftShader is always used on Fuchsia, sometimes at the system level.
+-bool IsSwiftShaderAllowedByCommandLine(const base::CommandLine* command_line) {
+-  return true;
+-}
+-#else
+ bool IsSwiftShaderAllowedByCommandLine(const base::CommandLine* command_line) {
+   // If the switch to opt-into unsafe SwiftShader is present, always allow
+   // SwiftShader.
+@@ -258,11 +252,10 @@ bool IsSwiftShaderAllowedByCommandLine(const base::CommandLine* command_line) {
+ 
+   return false;
+ }
+-#endif
+ 
+ // Allow fallback to SwfitShader without command line flags during the
+ // deprecation period.
+-BASE_FEATURE(kAllowSwiftShaderFallback, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kAllowSwiftShaderFallback, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ bool IsSwiftShaderAllowedByFeature() {
+   return base::FeatureList::IsEnabled(kAllowSwiftShaderFallback);
+@@ -283,26 +276,29 @@ bool IsSwiftShaderAllowed(const base::CommandLine* command_line) {
+ }
+ 
+ #if BUILDFLAG(IS_WIN)
+-BASE_FEATURE(kAllowD3D11WarpFallback, base::FEATURE_ENABLED_BY_DEFAULT);
++BASE_FEATURE(kAllowD3D11WarpFallback, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+-bool IsWARPAllowed(const base::CommandLine* command_line) {
+-  if (command_line->HasSwitch(switches::kDisableD3D11Warp)) {
+-    return false;
+-  }
++bool IsWARPAllowedByFeature() {
+   return base::FeatureList::IsEnabled(kAllowD3D11WarpFallback);
+ }
+ #else
+-bool IsWARPAllowed(const base::CommandLine*) {
++bool IsWARPAllowedByFeature() {
+   return false;
+ }
+ #endif
+ 
+ bool IsAnySoftwareGLAllowed(const base::CommandLine* command_line) {
+-  return IsWARPAllowed(command_line) || IsSwiftShaderAllowed(command_line);
++#if BUILDFLAG(IS_WIN)
++  if (base::FeatureList::IsEnabled(kAllowD3D11WarpFallback)) {
++    return true;
++  }
++#endif
++
++  return IsSwiftShaderAllowed(command_line);
+ }
+ 
+ BASE_FEATURE(kAllowSoftwareGLFallbackDueToCrashes,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ bool IsSoftwareGLFallbackDueToCrashesAllowed(
+     const base::CommandLine* command_line) {
+diff --git a/ui/gl/gl_features.h b/ui/gl/gl_features.h
+index 7ca9e7171a6dd..1656ad5c1a862 100644
+--- a/ui/gl/gl_features.h
++++ b/ui/gl/gl_features.h
+@@ -65,7 +65,7 @@ GL_EXPORT bool IsSwiftShaderAllowed(const base::CommandLine* command_line);
+ GL_EXPORT BASE_DECLARE_FEATURE(kAllowD3D11WarpFallback);
+ #endif
+ 
+-GL_EXPORT bool IsWARPAllowed(const base::CommandLine* command_line);
++GL_EXPORT bool IsWARPAllowedByFeature();
+ 
+ // Check if any form of software WebGL fallback is available
+ GL_EXPORT bool IsAnySoftwareGLAllowed(const base::CommandLine* command_line);
+diff --git a/ui/gl/gl_implementation.cc b/ui/gl/gl_implementation.cc
+index 7d68f4e2a6417..5d6b0f7c46e4f 100644
+--- a/ui/gl/gl_implementation.cc
++++ b/ui/gl/gl_implementation.cc
+@@ -233,11 +233,12 @@ GLImplementationParts GetNamedGLImplementation(const std::string& gl_name,
+   return GLImplementationParts(kGLImplementationNone);
+ }
+ 
+-GLImplementationParts GetSoftwareGLImplementation(
+-    const base::CommandLine* command_line) {
+-  if (features::IsWARPAllowed(command_line)) {
++GLImplementationParts GetSoftwareGLImplementation() {
++#if BUILDFLAG(IS_WIN)
++  if (base::FeatureList::IsEnabled(features::kAllowD3D11WarpFallback)) {
+     return GLImplementationParts(ANGLEImplementation::kD3D11Warp);
+   }
++#endif
+   return GLImplementationParts(ANGLEImplementation::kSwiftShader);
+ }
+ 
+@@ -250,9 +251,6 @@ GL_EXPORT bool IsSwiftShaderGLImplementation(
+     GLImplementationParts implementation) {
+   return implementation.angle == ANGLEImplementation::kSwiftShader;
+ }
+-GL_EXPORT bool IsWARPGLImplementation(GLImplementationParts implementation) {
+-  return implementation.angle == ANGLEImplementation::kD3D11Warp;
+-}
+ 
+ void SetGLImplementationCommandLineSwitches(
+     const GLImplementationParts& implementation,
+@@ -268,8 +266,7 @@ void SetGLImplementationCommandLineSwitches(
+ }
+ 
+ void SetSoftwareGLCommandLineSwitches(base::CommandLine* command_line) {
+-  GLImplementationParts implementation =
+-      GetSoftwareGLImplementation(command_line);
++  GLImplementationParts implementation = GetSoftwareGLImplementation();
+   SetGLImplementationCommandLineSwitches(implementation, command_line);
+ }
+ 
+@@ -279,13 +276,15 @@ void SetSoftwareWebGLCommandLineSwitches(base::CommandLine* command_line) {
+   command_line->RemoveSwitch(switches::kUseGL);
+   command_line->RemoveSwitch(switches::kUseANGLE);
+ 
+-  if (features::IsWARPAllowed(command_line)) {
++#if BUILDFLAG(IS_WIN)
++  if (base::FeatureList::IsEnabled(features::kAllowD3D11WarpFallback)) {
+     command_line->AppendSwitchASCII(switches::kUseGL,
+                                     kGLImplementationANGLEName);
+     command_line->AppendSwitchASCII(switches::kUseANGLE,
+                                     kANGLEImplementationD3D11WarpForWebGLName);
+     return;
+   }
++#endif
+ 
+   command_line->AppendSwitchASCII(switches::kUseGL, kGLImplementationANGLEName);
+   command_line->AppendSwitchASCII(switches::kUseANGLE,
+@@ -316,7 +315,7 @@ GetRequestedGLImplementationFromCommandLine(
+   }
+ #endif
+   if (overrideUseSoftwareGL) {
+-    return GetSoftwareGLImplementation(command_line);
++    return GetSoftwareGLImplementation();
+   }
+ 
+   if (!command_line->HasSwitch(switches::kUseGL) &&
+diff --git a/ui/gl/gl_implementation.h b/ui/gl/gl_implementation.h
+index 4f33de6a28c16..5095bfb966f45 100644
+--- a/ui/gl/gl_implementation.h
++++ b/ui/gl/gl_implementation.h
+@@ -155,8 +155,7 @@ GL_EXPORT void SetANGLEImplementation(ANGLEImplementation implementation);
+ GL_EXPORT ANGLEImplementation GetANGLEImplementation();
+ 
+ // Get the software GL implementation
+-GL_EXPORT GLImplementationParts
+-GetSoftwareGLImplementation(const base::CommandLine* command_line);
++GL_EXPORT GLImplementationParts GetSoftwareGLImplementation();
+ 
+ // Set the command line flags to request the provided GL implementation
+ GL_EXPORT void SetGLImplementationCommandLineSwitches(
+@@ -188,7 +187,6 @@ GL_EXPORT bool IsSoftwareGLImplementation(GLImplementationParts implementation);
+ 
+ GL_EXPORT bool IsSwiftShaderGLImplementation(
+     GLImplementationParts implementation);
+-GL_EXPORT bool IsWARPGLImplementation(GLImplementationParts implementation);
+ 
+ // Get the GL implementation with a given name.
+ GL_EXPORT GLImplementationParts
+diff --git a/ui/gl/gl_switches.cc b/ui/gl/gl_switches.cc
+index d3e0942eeb080..8f16c1535aae5 100644
+--- a/ui/gl/gl_switches.cc
++++ b/ui/gl/gl_switches.cc
+@@ -156,10 +156,6 @@ const char kUseAdapterLuid[] = "use-adapter-luid";
+ // Allow usage of SwiftShader for WebGL
+ const char kEnableUnsafeSwiftShader[] = "enable-unsafe-swiftshader";
+ 
+-// Explicitly disable D3D11 WARP fallback. Some test suites prefer falling back
+-// to swiftshader.
+-const char kDisableD3D11Warp[] = "disable-d3d11-warp";
+-
+ // Used for overriding the swap chain format for direct composition SDR video
+ // overlays.
+ const char kDirectCompositionVideoSwapChainFormat[] =
+@@ -195,7 +191,6 @@ const auto kGLSwitchesCopiedFromGpuProcessHostArray = std::to_array({
+     kDirectCompositionVideoSwapChainFormat,
+     kTintDcLayer,
+     kEnableUnsafeSwiftShader,
+-    kDisableD3D11Warp,
+ });
+ // An external span to the array above, so that it can be exposed from the
+ // header file without specifying the size of the array manually.
+diff --git a/ui/gl/gl_switches.h b/ui/gl/gl_switches.h
+index 65924a5bb3066..6c6210ca48904 100644
+--- a/ui/gl/gl_switches.h
++++ b/ui/gl/gl_switches.h
+@@ -78,7 +78,6 @@ GL_EXPORT extern const char kDisableDirectComposition[];
+ GL_EXPORT extern const char kEnableDirectCompositionVideoOverlays[];
+ GL_EXPORT extern const char kUseAdapterLuid[];
+ GL_EXPORT extern const char kEnableUnsafeSwiftShader[];
+-GL_EXPORT extern const char kDisableD3D11Warp[];
+ 
+ GL_EXPORT extern const char kDirectCompositionVideoSwapChainFormat[];
+ GL_EXPORT extern const char kTintDcLayer[];
+diff --git a/ui/gl/init/gl_factory.cc b/ui/gl/init/gl_factory.cc
+index 57e1093a3a980..ab18aa57821b1 100644
+--- a/ui/gl/init/gl_factory.cc
++++ b/ui/gl/init/gl_factory.cc
+@@ -52,26 +52,15 @@ GLImplementationParts GetRequestedGLImplementation() {
+   // If the passthrough command decoder is enabled, put ANGLE first if allowed
+   if (UsePassthroughCommandDecoder(cmd)) {
+     std::vector<GLImplementationParts> angle_impls = {};
+-    std::vector<GLImplementationParts> software_impls = {};
++    bool software_gl_in_allow_list = false;
+     auto iter = allowed_impls.begin();
+     while (iter != allowed_impls.end()) {
+-      // Filter out disabled software implementations
+-      if (IsSwiftShaderGLImplementation(*iter) &&
+-          !features::IsSwiftShaderAllowed(cmd)) {
+-        iter++;
+-        continue;
+-      }
+-      if (IsWARPGLImplementation(*iter) && !features::IsWARPAllowed(cmd)) {
+-        iter++;
+-        continue;
+-      }
+-
+-      if (IsSoftwareGLImplementation(*iter)) {
+-        software_impls.emplace_back(*iter);
+-        iter = allowed_impls.erase(iter);
++      if ((*iter) == GetSoftwareGLImplementation()) {
++        software_gl_in_allow_list = true;
++        allowed_impls.erase(iter);
+       } else if (iter->gl == kGLImplementationEGLANGLE) {
+         angle_impls.emplace_back(*iter);
+-        iter = allowed_impls.erase(iter);
++        allowed_impls.erase(iter);
+       } else {
+         iter++;
+       }
+@@ -79,9 +68,11 @@ GLImplementationParts GetRequestedGLImplementation() {
+     allowed_impls.insert(allowed_impls.begin(), angle_impls.begin(),
+                          angle_impls.end());
+     // Insert software implementations at the end, after all other hardware
+-    // implementations.
+-    allowed_impls.insert(allowed_impls.begin(), software_impls.begin(),
+-                         software_impls.end());
++    // implementations. If SwiftShader is not allowed as a fallback, don't
++    // re-insert it.
++    if (software_gl_in_allow_list && features::IsSwiftShaderAllowed(cmd)) {
++      allowed_impls.emplace_back(GetSoftwareGLImplementation());
++    }
+   }
+ 
+   if (allowed_impls.empty()) {
+diff --git a/ui/gl/test/gl_surface_test_support.cc b/ui/gl/test/gl_surface_test_support.cc
+index 0d83ef328be4e..010b3ac9ae968 100644
+--- a/ui/gl/test/gl_surface_test_support.cc
++++ b/ui/gl/test/gl_surface_test_support.cc
+@@ -41,11 +41,11 @@ GLDisplay* InitializeOneOffHelper(bool init_extensions) {
+ #endif
+ 
+   bool use_software_gl = true;
+-  base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+ 
+   // We usually use software GL as this works on all bots. The
+   // command line can override this behaviour to use hardware GL.
+-  if (cmd->HasSwitch(switches::kUseGpuInTests)) {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kUseGpuInTests)) {
+     use_software_gl = false;
+   }
+ 
+@@ -60,12 +60,11 @@ GLDisplay* InitializeOneOffHelper(bool init_extensions) {
+ 
+   GLImplementationParts impl = allowed_impls[0];
+   if (use_software_gl) {
+-    // Disable D3D11 WARP for consistent cross-platform software rendering.
+-    cmd->AppendSwitch(::switches::kDisableD3D11Warp);
+-    impl = gl::GetSoftwareGLImplementation(cmd);
++    impl = gl::GetSoftwareGLImplementation();
+   }
+ 
+-  DCHECK(!cmd->HasSwitch(switches::kUseGL)) << "kUseGL has not effect in tests";
++  DCHECK(!base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kUseGL))
++      << "kUseGL has not effect in tests";
+ 
+   bool disable_gl_drawing = true;
+ 

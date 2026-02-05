@@ -1,0 +1,39 @@
+diff --git a/content/browser/service_host/utility_sandbox_delegate_win.cc b/content/browser/service_host/utility_sandbox_delegate_win.cc
+index a17f803d6c627..8401b7c4665fd 100644
+--- a/content/browser/service_host/utility_sandbox_delegate_win.cc
++++ b/content/browser/service_host/utility_sandbox_delegate_win.cc
+@@ -7,6 +7,7 @@
+ #include "base/synchronization/waitable_event.h"
+ #include "base/win/scoped_handle.h"
+ #include "base/win/windows_handle_util.h"
++#include "base/win/windows_version.h"
+ #include "content/public/browser/content_browser_client.h"
+ #include "content/public/common/content_client.h"
+ #include "content/public/common/content_switches.h"
+@@ -50,15 +52,16 @@ bool AudioPreSpawnTarget(sandbox::TargetConfig* config) {
+   // AppLocker and similar application whitelisting solutions are in place.
+   DCHECK(!config->IsConfigured());
+ 
++  if (base::win::GetVersion() >= base::win::Version::VISTA) {
+   // Custom default policy allowing audio drivers to read device properties
+   // (https://crbug.com/883326).
+   auto result = config->SetIntegrityLevel(sandbox::INTEGRITY_LEVEL_LOW);
+   if (result != sandbox::SBOX_ALL_OK) {
+     return false;
+   }
+   config->SetLockdownDefaultDacl();
+   config->SetDelayedIntegrityLevel(sandbox::INTEGRITY_LEVEL_LOW);
+-  result = config->SetTokenLevel(sandbox::USER_RESTRICTED_SAME_ACCESS,
++  } auto result = config->SetTokenLevel(sandbox::USER_RESTRICTED_SAME_ACCESS,
+                                  sandbox::USER_RESTRICTED_NON_ADMIN);
+   if (result != sandbox::SBOX_ALL_OK) {
+     return false;
+@@ -218,7 +222,7 @@ bool UtilitySandboxedProcessLauncherDelegate::DisableDefaultPolicy() {
+     case sandbox::mojom::Sandbox::kAudio:
+       // Default policy is disabled for audio process to allow audio drivers
+       // to read device properties (https://crbug.com/883326).
+-      return true;
++      return base::win::GetVersion() >= base::win::Version::VISTA;
+     default:
+       return false;
+   }

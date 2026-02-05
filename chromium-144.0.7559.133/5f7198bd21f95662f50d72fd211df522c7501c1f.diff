@@ -1,0 +1,760 @@
+diff --git a/ui/views/BUILD.gn b/ui/views/BUILD.gn
+index 75070cd98a76b..e683ccc1d34ac 100644
+--- a/ui/views/BUILD.gn
++++ b/ui/views/BUILD.gn
+@@ -716,6 +716,8 @@ component("views") {
+       "corewm/tooltip_controller.h",
+       "corewm/tooltip_state_manager.h",
+       "corewm/tooltip_view_aura.h",
++      "corewm/cursor_height_provider_win.h",
++      "corewm/tooltip_win.h",
+       "event_monitor_aura.h",
+       "touchui/touch_selection_controller_impl.h",
+       "view_constants_aura.h",
+@@ -763,6 +765,12 @@ component("views") {
+       "widget/window_reorderer.cc",
+       "windows_stationarity_monitor_aura.cc",
+     ]
++    if (is_win) {
++      sources += [
++        "corewm/cursor_height_provider_win.cc",
++        "corewm/tooltip_win.cc",
++      ]
++    }
+     deps += [
+       "//components/crash/core/common:crash_key",
+       "//ui/aura",
+diff --git a/ui/views/corewm/cursor_height_provider_win.cc b/ui/views/corewm/cursor_height_provider_win.cc
+new file mode 100644
+index 0000000000000..aed9fdce181db
+--- /dev/null
++++ b/ui/views/corewm/cursor_height_provider_win.cc
+@@ -0,0 +1,178 @@
++// Copyright 2014 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/views/corewm/cursor_height_provider_win.h"
++
++#include <stddef.h>
++#include <stdint.h>
++#include <windows.h>
++
++#include <algorithm>
++#include <map>
++#include <memory>
++
++#include "base/numerics/safe_conversions.h"
++#include "base/win/scoped_hdc.h"
++
++namespace {
++using PixelData = std::unique_ptr<uint32_t[]>;
++using HeightStorage = std::map<HCURSOR, int>;
++
++const uint32_t kBitsPeruint32 = sizeof(uint32_t) * 8;
++// All bits are 1 for transparent portion of monochromatic mask.
++constexpr uint32_t kTransparentMask = 0xffffffff;
++// This is height of default pointer arrow in Windows 7.
++constexpr int kDefaultHeight = 20;
++// Masks are monochromatic.
++constexpr size_t kNumberOfColors = 2;
++const size_t kHeaderAndPalette =
++    sizeof(BITMAPINFOHEADER) + kNumberOfColors * sizeof(RGBQUAD);
++
++HeightStorage* cached_heights = nullptr;
++
++// Extracts the pixel data of provided bitmap
++PixelData GetBitmapData(HBITMAP handle, const BITMAPINFO& info, HDC hdc) {
++  PixelData data;
++  // Masks are monochromatic.
++  DCHECK_EQ(info.bmiHeader.biBitCount, 1);
++  if (info.bmiHeader.biBitCount != 1)
++    return data;
++
++  // When getting pixel data palette is appended to memory pointed by
++  // BITMAPINFO passed so allocate additional memory to store additional data.
++  auto header = std::make_unique<char[]>(kHeaderAndPalette);
++  memcpy(header.get(), &(info.bmiHeader), sizeof(info.bmiHeader));
++
++  data = std::make_unique<uint32_t[]>(info.bmiHeader.biSizeImage /
++                                      sizeof(uint32_t));
++
++  int result = GetDIBits(
++      hdc, handle, 0, static_cast<UINT>(info.bmiHeader.biHeight), data.get(),
++      reinterpret_cast<BITMAPINFO*>(header.get()), DIB_RGB_COLORS);
++
++  if (result == 0)
++    data.reset();
++
++  return data;
++}
++
++// Checks if the specifed row is transparent in provided bitmap.
++bool IsRowTransparent(const PixelData& data,
++                      const uint32_t row_size,
++                      const uint32_t last_byte_mask,
++                      const uint32_t y) {
++  // Set the padding bits to 1 to make mask matching easier.
++  *(data.get() + (y + 1) * row_size - 1) |= last_byte_mask;
++  for (uint32_t i = y * row_size; i < (y + 1) * row_size; ++i) {
++    if (*(data.get() + i) != kTransparentMask)
++      return false;
++  }
++  return true;
++}
++
++// Gets the vertical offset between specified cursor's hotpoint and its bottom.
++//
++// Gets the cursor image data and extract cursor's visible height.
++// Based on that gets what should be the vertical offset between cursor's
++// hot point and the tooltip.
++int CalculateCursorHeight(HCURSOR cursor_handle) {
++  base::win::ScopedGetDC hdc(nullptr);
++
++  ICONINFO icon = {0};
++  GetIconInfo(cursor_handle, &icon);
++
++  BITMAPINFO bitmap_info = {};
++  bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
++  if (GetDIBits(hdc, icon.hbmMask, 0, 0, nullptr, &bitmap_info,
++                DIB_RGB_COLORS) == 0)
++    return kDefaultHeight;
++
++  // Rows are padded to full DWORDs. OR with this mask will set them to 1
++  // to simplify matching with |transparent_mask|.
++  uint32_t last_byte_mask = 0xFFFFFFFF;
++  const auto width = static_cast<uint32_t>(bitmap_info.bmiHeader.biWidth);
++  const unsigned char bits_to_shift =
++      sizeof(last_byte_mask) * 8 - (width % kBitsPeruint32);
++  if (bits_to_shift != kBitsPeruint32)
++    last_byte_mask = (last_byte_mask << bits_to_shift);
++  else
++    last_byte_mask = 0;
++
++  const uint32_t row_size = (width + kBitsPeruint32 - 1) / kBitsPeruint32;
++  PixelData data(GetBitmapData(icon.hbmMask, bitmap_info, hdc));
++  if (data == nullptr)
++    return kDefaultHeight;
++
++  // There are 2 types of cursors: Ones that cover the area underneath
++  // completely (i.e. hand cursor) and ones that partially cover
++  // and partially blend with background (i. e. I-beam cursor).
++  // These will have either 1 square mask or 2 masks stacked on top
++  // of each other (xor mask and and mask).
++  const bool has_xor_mask =
++      bitmap_info.bmiHeader.biHeight == 2 * bitmap_info.bmiHeader.biWidth;
++  const auto height = static_cast<uint32_t>(bitmap_info.bmiHeader.biHeight);
++  const uint32_t cursor_height = has_xor_mask ? height / 2 : height;
++  uint32_t xor_offset;
++  if (has_xor_mask) {
++    for (xor_offset = 0; xor_offset < cursor_height; ++xor_offset) {
++      const uint32_t row_start = row_size * xor_offset;
++      const uint32_t row_boundary = row_start + row_size;
++      for (uint32_t i = row_start; i < row_boundary; ++i)
++        data.get()[i] = ~(data.get()[i]);
++      if (!IsRowTransparent(data, row_size, last_byte_mask, xor_offset)) {
++        break;
++      }
++    }
++  } else {
++    xor_offset = cursor_height;
++  }
++
++  uint32_t and_offset;
++
++  for (and_offset = has_xor_mask ? cursor_height : 0; and_offset < height;
++       ++and_offset) {
++    if (!IsRowTransparent(data, row_size, last_byte_mask, and_offset)) {
++      break;
++    }
++  }
++  if (has_xor_mask) {
++    and_offset -= cursor_height;
++  }
++  const uint32_t offset = std::min(xor_offset, and_offset);
++
++  DeleteObject(icon.hbmColor);
++  DeleteObject(icon.hbmMask);
++
++  // Apparently it's possible for the calculation here to underflow, and thus
++  // result in a negative value, maybe if the hotspot is below any visible
++  // portion of the cursor.  Not sure if this case should return 0 instead.
++  return static_cast<int>(cursor_height - offset - icon.yHotspot + 1);
++}
++
++}  // namespace
++
++namespace views {
++namespace corewm {
++
++int GetCurrentCursorVisibleHeight() {
++  CURSORINFO cursor = {0};
++  cursor.cbSize = sizeof(cursor);
++  GetCursorInfo(&cursor);
++
++  if (cached_heights == nullptr)
++    cached_heights = new HeightStorage;
++
++  HeightStorage::const_iterator cached_height =
++      cached_heights->find(cursor.hCursor);
++  if (cached_height != cached_heights->end())
++    return cached_height->second;
++
++  const int height = CalculateCursorHeight(cursor.hCursor);
++  (*cached_heights)[cursor.hCursor] = height;
++
++  return height;
++}
++
++}  // namespace corewm
++}  // namespace views
+diff --git a/ui/views/corewm/cursor_height_provider_win.h b/ui/views/corewm/cursor_height_provider_win.h
+new file mode 100644
+index 0000000000000..ce0bf65a96948
+--- /dev/null
++++ b/ui/views/corewm/cursor_height_provider_win.h
+@@ -0,0 +1,21 @@
++// Copyright 2014 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_VIEWS_COREWM_CURSOR_HEIGHT_PROVIDER_WIN_H_
++#define UI_VIEWS_COREWM_CURSOR_HEIGHT_PROVIDER_WIN_H_
++
++namespace views {
++namespace corewm {
++
++// Gets the visible height of current cursor.
++//
++// The height is offset between cursor's hot point and it's
++// bottom edge, derived from first non-transparent row of cursor's mask.
++
++int GetCurrentCursorVisibleHeight();
++
++}  // namespace corewm
++}  // namespace views
++
++#endif  // UI_VIEWS_COREWM_CURSOR_HEIGHT_PROVIDER_WIN_H_
+diff --git a/ui/views/corewm/tooltip_win.cc b/ui/views/corewm/tooltip_win.cc
+new file mode 100644
+index 0000000000000..fa6e9c769e407
+--- /dev/null
++++ b/ui/views/corewm/tooltip_win.cc
+@@ -0,0 +1,266 @@
++// Copyright 2013 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/views/corewm/tooltip_win.h"
++
++#include "base/i18n/rtl.h"
++#include "base/logging.h"
++#include "base/strings/string_util_win.h"
++#include "base/win/windowsx_shim.h"
++#include "ui/aura/window.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "ui/base/l10n/l10n_util_win.h"
++#include "ui/display/display.h"
++#include "ui/display/screen.h"
++#include "ui/display/win/screen_win.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/system_fonts_win.h"
++#include "ui/views/corewm/cursor_height_provider_win.h"
++#include "ui/strings/grit/app_locale_settings.h"
++
++namespace views::corewm {
++
++TooltipWin::TooltipWin(HWND parent)
++    : parent_hwnd_(parent), tooltip_hwnd_(nullptr), showing_(false) {
++  memset(&toolinfo_, 0, sizeof(toolinfo_));
++  toolinfo_.cbSize = sizeof(toolinfo_);
++  toolinfo_.uFlags = TTF_IDISHWND | TTF_TRACK | TTF_ABSOLUTE;
++  toolinfo_.uId = reinterpret_cast<UINT_PTR>(parent_hwnd_);
++  toolinfo_.hwnd = parent_hwnd_;
++  toolinfo_.lpszText = nullptr;
++  toolinfo_.lpReserved = nullptr;
++  SetRectEmpty(&toolinfo_.rect);
++}
++
++TooltipWin::~TooltipWin() {
++  if (tooltip_hwnd_)
++    DestroyWindow(tooltip_hwnd_);
++}
++
++bool TooltipWin::HandleNotify(int w_param, NMHDR* l_param, LRESULT* l_result) {
++  if (tooltip_hwnd_ == nullptr)
++    return false;
++
++  switch (l_param->code) {
++    case TTN_POP:
++      showing_ = false;
++      return true;
++    case TTN_SHOW:
++      *l_result = TRUE;
++      PositionTooltip();
++      showing_ = true;
++      return true;
++    default:
++      break;
++  }
++  return false;
++}
++
++bool TooltipWin::EnsureTooltipWindow() {
++  if (tooltip_hwnd_)
++    return true;
++
++  tooltip_hwnd_ =
++      CreateWindowEx(WS_EX_TRANSPARENT | (base::i18n::IsRTL() ? WS_EX_LAYOUTRTL : 0),
++                     TOOLTIPS_CLASS, nullptr, TTS_NOPREFIX | WS_POPUP, 0, 0, 0,
++                     0, parent_hwnd_, nullptr, nullptr, nullptr);
++  if (!tooltip_hwnd_) {
++    PLOG(WARNING) << "tooltip creation failed, disabling tooltips";
++    return false;
++  }
++
++  MaybeOverrideFont();
++
++  SendMessage(tooltip_hwnd_, TTM_ADDTOOL, 0,
++              reinterpret_cast<LPARAM>(&toolinfo_));
++  return true;
++}
++
++void TooltipWin::PositionTooltip() {
++  gfx::Point screen_point =
++      display::win::GetScreenWin()->DIPToScreenPoint(anchor_point_);
++  const int cursoroffset = GetCurrentCursorVisibleHeight();
++  screen_point.Offset(0, cursoroffset);
++
++  LRESULT tooltip_size = SendMessage(tooltip_hwnd_, TTM_GETBUBBLESIZE, 0,
++                                     reinterpret_cast<LPARAM>(&toolinfo_));
++  const gfx::Size size(LOWORD(tooltip_size), HIWORD(tooltip_size));
++
++  const display::Display display(
++      display::Screen::Get()->GetDisplayNearestPoint(anchor_point_));
++
++  gfx::Rect tooltip_bounds(screen_point, size);
++  // Align the center of the tooltip with the position when the tooltip is not
++  // following the cursor.
++  if (trigger_ == TooltipTrigger::kKeyboard)
++    tooltip_bounds.Offset(-size.width() / 2, 0);
++  else if (base::i18n::IsRTL())
++    tooltip_bounds.Offset(-size.width(), 0);
++  tooltip_bounds.AdjustToFit(display::win::GetScreenWin()->DIPToScreenRect(
++      parent_hwnd_, display.work_area()));
++  SetWindowPos(tooltip_hwnd_, nullptr, tooltip_bounds.x(), tooltip_bounds.y(),
++               0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
++
++  MaybeOverrideFont();
++}
++
++  static int AdjustFontSize(int lf_height, int size_delta) {
++    // Extract out the sign of |lf_height| - we'll add it back later.
++    const int lf_sign = lf_height < 0 ? -1 : 1;
++    lf_height = std::abs(lf_height);
++
++    // Apply the size adjustment.
++    lf_height += size_delta;
++
++    // Make sure |lf_height| is not smaller than allowed min allowed font size.
++    int min_font_size = 0;
++    lf_height = std::max(min_font_size, lf_height);
++
++    // Add back the sign.
++    return lf_sign * lf_height;
++  }
++
++  static void AdjustLOGFONT(const gfx::win::FontAdjustment& font_adjustment,
++                            LOGFONT* logfont) {
++    DCHECK_GT(font_adjustment.font_scale, 0.0);
++    LONG new_height =
++        base::ClampRound<LONG>(logfont->lfHeight * font_adjustment.font_scale);
++    if (logfont->lfHeight && !new_height)
++      new_height = logfont->lfHeight > 0 ? 1 : -1;
++    logfont->lfHeight = new_height;
++    if (!font_adjustment.font_family_override.empty()) {
++      auto result = wcscpy_s(logfont->lfFaceName,
++                             font_adjustment.font_family_override.c_str());
++      DCHECK_EQ(0, result) << "Font name "
++                           << font_adjustment.font_family_override
++                           << " cannot be copied into LOGFONT structure.";
++    }
++  }
++
++HFONT AdjustExistingSystemFont(HFONT existing_font,
++                                    const gfx::win::FontAdjustment& font_adjustment) {
++  LOGFONT logfont;
++  auto result = GetObject(existing_font, sizeof(logfont), &logfont);
++  DCHECK(result);
++
++  // Make the necessary adjustments.
++  AdjustLOGFONT(font_adjustment, &logfont);
++
++  // Cap at minimum font size.
++  logfont.lfHeight = AdjustFontSize(logfont.lfHeight, 0);
++
++  // Create the Font object.
++  return ::CreateFontIndirect(&logfont);
++}
++
++bool NeedOverrideDefaultUIFont(std::wstring* override_font_family,
++                               double* font_size_scaler) {
++  // This is rather simple-minded to deal with the UI font size
++  // issue for some Indian locales (ml, bn, hi) for which
++  // the default Windows fonts are too small to be legible.  For those
++  // locales, IDS_UI_FONT_FAMILY is set to an actual font family to
++  // use while for other locales, it's set to 'default'.
++  std::wstring ui_font_family = l10n_util::GetWideString(IDS_UI_FONT_FAMILY);
++  int scaler100;
++  if (!base::StringToInt(l10n_util::GetStringUTF16(IDS_UI_FONT_SIZE_SCALER),
++                         &scaler100))
++    return false;
++
++  // We use the OS default in two cases:
++  // 1) The resource bundle has 'default' and '100' for font family and
++  //    font scaler.
++  // 2) The resource bundle is not available for some reason and
++  //    ui_font_family is empty.
++  if ((ui_font_family == L"default" && scaler100 == 100) ||
++      ui_font_family.empty())
++    return false;
++
++  if (override_font_family && ui_font_family != L"default")
++    override_font_family->swap(ui_font_family);
++  if (font_size_scaler)
++    *font_size_scaler = scaler100 / 100.0;
++  return true;
++}
++
++void TooltipWin::MaybeOverrideFont() {
++  gfx::win::FontAdjustment font_adjustment;
++  const HFONT old_font = GetWindowFont(tooltip_hwnd_);
++
++  // Determine if we need to override the font.
++  if ((!override_font_.get() || override_font_.get() != old_font) &&
++      NeedOverrideDefaultUIFont(
++          &font_adjustment.font_family_override, &font_adjustment.font_scale)) {
++    // Determine if we need to regenerate the font.
++    // There are a number of situations under which Windows can replace the
++    // font in a tooltip, but we don't actually need to regenerate our override
++    // font unless the underlying text/DPI scale of the window has changed.
++    const float current_scale =
++        display::win::GetScreenWin()->GetScaleFactorForHWND(tooltip_hwnd_);
++    if (!override_font_.get() || current_scale != override_scale_) {
++      override_font_.reset(
++          AdjustExistingSystemFont(old_font, font_adjustment));
++      override_scale_ = current_scale;
++    }
++
++    // Override the font in the tooltip.
++    SetWindowFont(tooltip_hwnd_, override_font_.get(), FALSE);
++  }
++}
++
++int TooltipWin::GetMaxWidth(const gfx::Point& location) const {
++  const gfx::Point screen_point =
++      display::win::GetScreenWin()->DIPToScreenPoint(location);
++  display::Display display(
++      display::Screen::Get()->GetDisplayNearestPoint(screen_point));
++  const gfx::Rect monitor_bounds = display.bounds();
++  return (monitor_bounds.width() + 1) / 2;
++}
++
++void TooltipWin::Update(aura::Window* window,
++                        const std::u16string& tooltip_text,
++                        const gfx::Point& position,
++                        const TooltipTrigger trigger) {
++  if (!EnsureTooltipWindow())
++    return;
++
++  // See comment in header for details on why `anchor_point_` and `trigger_` are
++  // needed here.
++  anchor_point_ = position + window->GetBoundsInScreen().OffsetFromOrigin();
++  trigger_ = trigger;
++
++  std::u16string adjusted_text(tooltip_text);
++  base::i18n::AdjustStringForLocaleDirection(&adjusted_text);
++  toolinfo_.lpszText = base::as_writable_wcstr(adjusted_text);
++  SendMessage(tooltip_hwnd_, TTM_SETTOOLINFO, 0,
++              reinterpret_cast<LPARAM>(&toolinfo_));
++
++  int max_width = GetMaxWidth(anchor_point_);
++  SendMessage(tooltip_hwnd_, TTM_SETMAXTIPWIDTH, 0, max_width);
++}
++
++void TooltipWin::Show() {
++  if (!EnsureTooltipWindow())
++    return;
++
++  SendMessage(tooltip_hwnd_, TTM_TRACKACTIVATE, TRUE,
++              reinterpret_cast<LPARAM>(&toolinfo_));
++
++  // Bring the window to the front.
++  SetWindowPos(tooltip_hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
++               SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOOWNERZORDER | SWP_NOSIZE);
++}
++
++void TooltipWin::Hide() {
++  if (!tooltip_hwnd_)
++    return;
++
++  SendMessage(tooltip_hwnd_, TTM_TRACKACTIVATE, FALSE,
++              reinterpret_cast<LPARAM>(&toolinfo_));
++}
++
++bool TooltipWin::IsVisible() {
++  return showing_;
++}
++
++}  // namespace views::corewm
+diff --git a/ui/views/corewm/tooltip_win.h b/ui/views/corewm/tooltip_win.h
+new file mode 100644
+index 0000000000000..8f131b8d1bf86
+--- /dev/null
++++ b/ui/views/corewm/tooltip_win.h
+@@ -0,0 +1,92 @@
++// Copyright 2013 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_VIEWS_COREWM_TOOLTIP_WIN_H_
++#define UI_VIEWS_COREWM_TOOLTIP_WIN_H_
++
++#include <windows.h>  // Must come before other Windows system headers.
++
++#include <commctrl.h>
++
++#include <string>
++
++#include "base/win/scoped_gdi_object.h"
++#include "ui/gfx/geometry/point.h"
++#include "ui/views/corewm/tooltip.h"
++
++namespace wm {
++class TooltipObserver;
++}
++
++namespace views::corewm {
++
++// Implementation of Tooltip that uses the native win32 control for showing the
++// tooltip.
++class VIEWS_EXPORT TooltipWin : public Tooltip {
++ public:
++  explicit TooltipWin(HWND parent);
++
++  TooltipWin(const TooltipWin&) = delete;
++  TooltipWin& operator=(const TooltipWin&) = delete;
++
++  ~TooltipWin() override;
++
++  void AddObserver(wm::TooltipObserver* observer) override {}
++  void RemoveObserver(wm::TooltipObserver* observer) override {}
++
++  // HandleNotify() is forwarded from DesktopWindowTreeHostWin to keep the
++  // native tooltip in sync.
++  bool HandleNotify(int w_param, NMHDR* l_param, LRESULT* l_result);
++
++ private:
++  // Ensures |tooltip_hwnd_| is valid. Returns true if valid, false if there
++  // a problem creating |tooltip_hwnd_|.
++  bool EnsureTooltipWindow();
++
++  // Sets the position of the tooltip.
++  void PositionTooltip();
++
++  // Might override the font size for localization (e.g. Hindi).
++  void MaybeOverrideFont();
++
++  // Tooltip:
++  int GetMaxWidth(const gfx::Point& location) const override;
++  void Update(aura::Window* window,
++              const std::u16string& tooltip_text,
++              const gfx::Point& position,
++              const TooltipTrigger trigger) override;
++  void Show() override;
++  void Hide() override;
++  bool IsVisible() override;
++
++  // Font we're currently overriding our UI font with.
++  // Should outlast |tooltip_hwnd_|.
++  base::win::ScopedGDIObject<HFONT> override_font_;
++
++  // The window |tooltip_hwnd_| is parented to.
++  HWND parent_hwnd_;
++
++  // Shows the tooltip.
++  HWND tooltip_hwnd_;
++
++  // Used to modify the tooltip.
++  TOOLINFO toolinfo_;
++
++  // Is the tooltip showing?
++  bool showing_;
++
++  // In order to position the tooltip we need to know the size. The size is only
++  // available from TTN_SHOW, so we have to cache `anchor_point_` and `trigger_`
++  // which are required to calculate its position.
++  gfx::Point anchor_point_;
++  TooltipTrigger trigger_ = TooltipTrigger::kCursor;
++
++  // What the scale was the last time we overrode the font, to see if we can
++  // re-use our previous override.
++  float override_scale_ = 0.0f;
++};
++
++}  // namespace views::corewm
++
++#endif  // UI_VIEWS_COREWM_TOOLTIP_WIN_H_
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index aed571451f1c2..ceee9102cf021 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -44,6 +45,7 @@
+ #include "ui/gfx/native_ui_types.h"
+ #include "ui/gfx/path_win.h"
+ #include "ui/views/corewm/tooltip_aura.h"
++#include "ui/views/corewm/tooltip_win.h"
+ #include "ui/views/views_features.h"
+ #include "ui/views/views_switches.h"
+ #include "ui/views/widget/desktop_aura/desktop_drag_drop_client_win.h"
+@@ -133,7 +135,8 @@ DesktopWindowTreeHostWin::DesktopWindowTreeHostWin(
+       drag_drop_client_(nullptr),
+       should_animate_window_close_(false),
+       pending_close_(false),
+-      has_non_client_view_(false) {}
++      has_non_client_view_(false),
++      tooltip_(nullptr) {}
+ 
+ DesktopWindowTreeHostWin::~DesktopWindowTreeHostWin() {
+   ClearBackgroundPaintBrush();
+@@ -225,7 +228,14 @@ void DesktopWindowTreeHostWin::OnActiveWindowChanged(bool active) {}
+ }
+ 
+ std::unique_ptr<corewm::Tooltip> DesktopWindowTreeHostWin::CreateTooltip() {
+-  return std::make_unique<corewm::TooltipAura>();
++  bool force_legacy_tooltips =
++      (base::win::GetVersion() < base::win::Version::WIN8);
++  if (!force_legacy_tooltips)
++    return std::make_unique<corewm::TooltipAura>();
++
++  DCHECK(!tooltip_);
++  tooltip_ = new corewm::TooltipWin(GetAcceleratedWidget());
++  return base::WrapUnique(tooltip_.get());
+ }
+ 
+ std::unique_ptr<aura::client::DragDropClient>
+@@ -1146,6 +1156,12 @@ void DesktopWindowTreeHostWin::HandlePaintAccelerated(
+   }
+ }
+ 
++bool DesktopWindowTreeHostWin::HandleTooltipNotify(int w_param,
++                                                   NMHDR* l_param,
++                                                   LRESULT* l_result) {
++  return tooltip_ && tooltip_->HandleNotify(w_param, l_param, l_result);
++}
++
+ void DesktopWindowTreeHostWin::HandleMenuLoop(bool in_menu_loop) {
+   if (in_menu_loop) {
+     tooltip_disabler_ = std::make_unique<wm::ScopedTooltipDisabler>(window());
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.h b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.h
+index b23ba1bf3a49f..58c13ba424645 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.h
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.h
+@@ -38,6 +38,10 @@ class DesktopDragDropClientWin;
+ class HWNDMessageHandler;
+ class FrameView;
+ 
++namespace corewm {
++class TooltipWin;
++}
++
+ namespace test {
+ class DesktopWindowTreeHostWinTestApi;
+ }
+@@ -247,6 +251,9 @@ class VIEWS_EXPORT DesktopWindowTreeHostWin
+   void HandleInputLanguageChange(DWORD character_set,
+                                  HKL input_language_id) override;
+   void HandlePaintAccelerated(const gfx::Rect& invalid_rect) override;
++  bool HandleTooltipNotify(int w_param,
++                           NMHDR* l_param,
++                           LRESULT* l_result) override;
+   void HandleMenuLoop(bool in_menu_loop) override;
+   bool PreHandleMSG(UINT message,
+                     WPARAM w_param,
+@@ -319,6 +326,10 @@ class VIEWS_EXPORT DesktopWindowTreeHostWin
+   // True if the window is allow to take screenshots, by default is true.
+   bool allow_screenshots_ = true;
+ 
++  // Owned by TooltipController, but we need to forward events to it so we keep
++  // a reference.
++  raw_ptr<corewm::TooltipWin> tooltip_;
++
+   // Visibility of the cursor. On Windows we can have multiple root windows and
+   // the implementation of ::ShowCursor() is based on a counter, so making this
+   // member static ensures that ::ShowCursor() is always called exactly once
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 6ba506fc896bc..f8a5b92ae541a 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -2126,6 +2127,12 @@ LRESULT HWNDMessageHandler::OnPointerActivate(UINT message,
+ LRESULT HWNDMessageHandler::OnPointerEvent(UINT message,
+                                            WPARAM w_param,
+                                            LPARAM l_param) {
++  // WM_POINTER is not supported on Windows 7.
++  if (base::win::GetVersion() == base::win::Version::WIN7) {
++    SetMsgHandled(FALSE);
++    return -1;
++  }
++
+   UINT32 pointer_id = GET_POINTERID_WPARAM(w_param);
+   using GetPointerTypeFn = BOOL(WINAPI*)(UINT32, POINTER_INPUT_TYPE*);
+   POINTER_INPUT_TYPE pointer_type;
+@@ -2522,6 +2529,12 @@ LRESULT HWNDMessageHandler::OnNCUAHDrawFrame(UINT message,
+   return 0;
+ }
+ 
++LRESULT HWNDMessageHandler::OnNotify(int w_param, NMHDR* l_param) {
++  LRESULT l_result = 0;
++  SetMsgHandled(delegate_->HandleTooltipNotify(w_param, l_param, &l_result));
++  return l_result;
++}
++
+ void HWNDMessageHandler::OnPaint(HDC dc) {
+   // Call BeginPaint()/EndPaint() around the paint handling, as that seems
+   // to do more to actually validate the window's drawing region. This only
+diff --git a/ui/views/win/hwnd_message_handler.h b/ui/views/win/hwnd_message_handler.h
+index ef3ea5cb0c4ed..5972a9f7ac03a 100644
+--- a/ui/views/win/hwnd_message_handler.h
++++ b/ui/views/win/hwnd_message_handler.h
+@@ -450,6 +450,7 @@ class VIEWS_EXPORT HWNDMessageHandler : public gfx::WindowImpl,
+     CR_MSG_WM_NCCREATE(OnNCCreate)
+     CR_MSG_WM_NCHITTEST(OnNCHitTest)
+     CR_MSG_WM_NCPAINT(OnNCPaint)
++    CR_MSG_WM_NOTIFY(OnNotify)
+     CR_MSG_WM_PAINT(OnPaint)
+     CR_MSG_WM_SETFOCUS(OnSetFocus)
+     CR_MSG_WM_SETICON(OnSetIcon)
+@@ -507,6 +508,7 @@ class VIEWS_EXPORT HWNDMessageHandler : public gfx::WindowImpl,
+   void OnNCPaint(HRGN rgn);
+   LRESULT OnNCUAHDrawCaption(UINT message, WPARAM w_param, LPARAM l_param);
+   LRESULT OnNCUAHDrawFrame(UINT message, WPARAM w_param, LPARAM l_param);
++  LRESULT OnNotify(int w_param, NMHDR* l_param);
+   void OnPaint(HDC dc);
+   LRESULT OnReflectedMessage(UINT message, WPARAM w_param, LPARAM l_param);
+   LRESULT OnScrollMessage(UINT message, WPARAM w_param, LPARAM l_param);
+diff --git a/ui/views/win/hwnd_message_handler_delegate.h b/ui/views/win/hwnd_message_handler_delegate.h
+index da6afe2ae8940..08e46c7b92f6c 100644
+--- a/ui/views/win/hwnd_message_handler_delegate.h
++++ b/ui/views/win/hwnd_message_handler_delegate.h
+@@ -215,6 +215,11 @@ class VIEWS_EXPORT HWNDMessageHandlerDelegate {
+   // Called to compel the delegate to paint |invalid_rect| accelerated.
+   virtual void HandlePaintAccelerated(const gfx::Rect& invalid_rect) = 0;
+ 
++  // Called to forward a WM_NOTIFY message to the tooltip manager.
++  virtual bool HandleTooltipNotify(int w_param,
++                                   NMHDR* l_param,
++                                   LRESULT* l_result) = 0;
++
+   // Invoked on entering/exiting a menu loop.
+   virtual void HandleMenuLoop(bool in_menu_loop) = 0;
+ 

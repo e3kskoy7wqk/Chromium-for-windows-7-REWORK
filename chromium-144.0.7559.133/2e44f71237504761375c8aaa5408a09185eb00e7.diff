@@ -1,0 +1,107 @@
+diff --git a/gpu/command_buffer/service/context_group.cc b/gpu/command_buffer/service/context_group.cc
+index 07729377c6b5a..ead6594e6de55 100644
+--- a/gpu/command_buffer/service/context_group.cc
++++ b/gpu/command_buffer/service/context_group.cc
+@@ -69,6 +69,7 @@ DisallowedFeatures AdjustDisallowedFeatures(
+ 
+ ContextGroup::ContextGroup(
+     const GpuPreferences& gpu_preferences,
++    bool supports_passthrough_command_decoders,
+     scoped_refptr<MemoryTracker> memory_tracker,
+     ShaderTranslatorCache* shader_translator_cache,
+     FramebufferCompletenessCache* framebuffer_completeness_cache,
+@@ -127,7 +128,8 @@ ContextGroup::ContextGroup(
+       shared_image_manager_(shared_image_manager) {
+   DCHECK(feature_info_);
+ 
+-  use_passthrough_cmd_decoder_ = gpu_preferences_.use_passthrough_cmd_decoder;
++  use_passthrough_cmd_decoder_ = supports_passthrough_command_decoders &&
++                                 gpu_preferences_.use_passthrough_cmd_decoder;
+ }
+ 
+ gpu::ContextResult ContextGroup::Initialize(DecoderContext* decoder,
+diff --git a/gpu/command_buffer/service/context_group.h b/gpu/command_buffer/service/context_group.h
+index b0d8cf04d6412..07a7f0f53b76c 100644
+--- a/gpu/command_buffer/service/context_group.h
++++ b/gpu/command_buffer/service/context_group.h
+@@ -59,6 +59,7 @@ DisallowedFeatures AdjustDisallowedFeatures(
+ class GPU_GLES2_EXPORT ContextGroup : public base::RefCounted<ContextGroup> {
+  public:
+   ContextGroup(const GpuPreferences& gpu_preferences,
++               bool supports_passthrough_command_decoders,
+                scoped_refptr<MemoryTracker> memory_tracker,
+                ShaderTranslatorCache* shader_translator_cache,
+                FramebufferCompletenessCache* framebuffer_completeness_cache,
+diff --git a/gpu/command_buffer/tests/fuzzer_main.cc b/gpu/command_buffer/tests/fuzzer_main.cc
+index 280adeba0cfde..4011b21997ec0 100644
+--- a/gpu/command_buffer/tests/fuzzer_main.cc
++++ b/gpu/command_buffer/tests/fuzzer_main.cc
+@@ -445,8 +445,8 @@ class CommandBufferSetup {
+     context_state_->MakeCurrent(nullptr);
+     decoder_ = raster::RasterDecoder::Create(
+         command_buffer_.get(), command_buffer_->service(), &outputter_,
+-        gpu_feature_info, gpu_preferences_, /*memory_tracker=*/nullptr,
+-        shared_image_manager_.get(), context_state_, /*is_privileged=*/true);
++        gpu_feature_info, gpu_preferences_, nullptr /* memory_tracker */,
++        shared_image_manager_.get(), context_state_, true /* is_privileged */);
+     decoder_->GetLogger()->set_log_synthesized_gl_errors(false);
+ 
+     auto result =
+@@ -454,9 +454,9 @@ class CommandBufferSetup {
+         config_.workarounds, gpu_feature_info);
+     scoped_refptr<gles2::ContextGroup> context_group =
+         MakeRefCounted<gles2::ContextGroup>(
+-        gpu_preferences_, /*memory_tracker=*/nullptr, &translator_cache_,
+-        &completeness_cache_, decoder_feature_info,
+-        /*progress_reporter=*/nullptr, gpu_feature_info,
++        gpu_preferences_, true, nullptr /* memory_tracker */,
++        &translator_cache_, &completeness_cache_, decoder_feature_info,
++        nullptr /* progress_reporter */, gpu_feature_info,
+             shared_image_manager_.get());
+     auto* context = context_.get();
+     decoder_ = gles2::GLES2Decoder::Create(command_buffer_.get(),
+diff --git a/gpu/command_buffer/tests/gl_manager.cc b/gpu/command_buffer/tests/gl_manager.cc
+index b72bf92c3b56e..37d3f06377516 100644
+--- a/gpu/command_buffer/tests/gl_manager.cc
++++ b/gpu/command_buffer/tests/gl_manager.cc
+@@ -307,10 +307,10 @@ void GLManager::InitializeWithWorkaroundsImpl(
+     // Always mark the passthrough command decoder as supported so that tests do
+     // not unexpectedly use the wrong command decoder
+     context_group = new gles2::ContextGroup(
+-        gpu_preferences_, /*memory_tracker=*/nullptr, translator_cache_.get(),
+-        &completeness_cache_, feature_info,
+-        /*progress_reporter=*/nullptr, gpu_feature_info,
+-        &shared_image_manager_);
++        gpu_preferences_, true, nullptr /* memory_tracker */,
++        translator_cache_.get(), &completeness_cache_, feature_info,
++        nullptr /* progress_reporter */,
++        gpu_feature_info, &shared_image_manager_);
+   }
+ 
+   command_buffer_.reset(
+diff --git a/gpu/ipc/in_process_command_buffer.cc b/gpu/ipc/in_process_command_buffer.cc
+index 5c23c02186ae7..ede43e8fda304 100644
+--- a/gpu/ipc/in_process_command_buffer.cc
++++ b/gpu/ipc/in_process_command_buffer.cc
+@@ -249,7 +249,7 @@ gpu::ContextResult InProcessCommandBuffer::InitializeOnGpuThread(
+   auto feature_info = base::MakeRefCounted<gles2::FeatureInfo>(
+       workarounds, task_executor_->gpu_feature_info());
+   context_group_ = base::MakeRefCounted<gles2::ContextGroup>(
+-      task_executor_->gpu_preferences(), std::move(memory_tracker),
++      task_executor_->gpu_preferences(), true, std::move(memory_tracker),
+       task_executor_->shader_translator_cache(),
+       task_executor_->framebuffer_completeness_cache(), feature_info,
+       /*progress_reporter=*/nullptr, task_executor_->gpu_feature_info(),
+diff --git a/gpu/ipc/service/gles2_command_buffer_stub.cc b/gpu/ipc/service/gles2_command_buffer_stub.cc
+index 88aae9a2a0028..230ac10bf313b 100644
+--- a/gpu/ipc/service/gles2_command_buffer_stub.cc
++++ b/gpu/ipc/service/gles2_command_buffer_stub.cc
+@@ -103,7 +103,7 @@ gpu::ContextResult GLES2CommandBufferStub::Initialize(
+   auto feature_info = base::MakeRefCounted<gles2::FeatureInfo>(
+       manager->gpu_driver_bug_workarounds(), manager->gpu_feature_info());
+   context_group_ = base::MakeRefCounted<gles2::ContextGroup>(
+-        manager->gpu_preferences(), CreateMemoryTracker(),
++        manager->gpu_preferences(), true, CreateMemoryTracker(),
+       manager->shader_translator_cache(),
+       manager->framebuffer_completeness_cache(), feature_info,
+       manager->watchdog() /* progress_reporter */, manager->gpu_feature_info(),

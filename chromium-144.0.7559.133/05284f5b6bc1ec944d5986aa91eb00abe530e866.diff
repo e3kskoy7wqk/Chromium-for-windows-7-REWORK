@@ -1,0 +1,32 @@
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index 6df00fdeccb78..c6edb11c24037 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -23720,27 +23720,6 @@
+             ]
+         }
+     ],
+-    "SwiftShaderDeprecation": [
+-        {
+-            "platforms": [
+-                "android",
+-                "chromeos",
+-                "ios",
+-                "linux",
+-                "mac",
+-                "windows"
+-            ],
+-            "experiments": [
+-                {
+-                    "name": "SwiftShaderDisabled",
+-                    "disable_features": [
+-                        "AllowSoftwareGLFallbackDueToCrashes",
+-                        "AllowSwiftShaderFallback"
+-                    ]
+-                }
+-            ]
+-        }
+-    ],
+     "SyncBookmarksLimit": [
+         {
+             "platforms": [
