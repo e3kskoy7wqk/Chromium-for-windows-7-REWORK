@@ -15,4 +15,4 @@ might also work on Windows XP SP3 and Windows Vista.
 
 ## Building
 
-Coming soon.
+see https://github.com/e3kskoy7wqk/Chromium-for-windows-7-REWORK/issues/37.
