@@ -1,0 +1,1 @@
+Fail fast the return value of IDXGIDevice::GetAdapter    2026/1/31 2:16:35    aa3cdd75f43e6cec2c729021bf3c9e2edb9bc56d

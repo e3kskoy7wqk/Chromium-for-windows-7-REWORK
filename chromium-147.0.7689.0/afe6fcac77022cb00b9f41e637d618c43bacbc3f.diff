@@ -1,0 +1,36 @@
+diff --git a/content/browser/gpu/gpu_data_manager_impl_private.cc b/content/browser/gpu/gpu_data_manager_impl_private.cc
+index b0095b920f1aa..420dbbdfab57b 100644
+--- a/content/browser/gpu/gpu_data_manager_impl_private.cc
++++ b/content/browser/gpu/gpu_data_manager_impl_private.cc
+@@ -1187,11 +1187,9 @@ void GpuDataManagerImplPrivate::AppendGpuCommandLine(
+       use_gl = browser_command_line->GetSwitchValueASCII(switches::kUseGL);
+       break;
+     case gpu::GpuMode::SOFTWARE_GL: {
++      // This setting makes WebGL run on legacy SwiftShader GL when true and
++      // SwANGLE when false.
+       bool legacy_software_gl = true;
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+-      // This setting makes WebGL run on SwANGLE instead of SwiftShader GL.
+-      legacy_software_gl = false;
+-#endif
+       gl::SetSoftwareWebGLCommandLineSwitches(command_line, legacy_software_gl);
+     } break;
+     default:
+diff --git a/gpu/config/gpu_util.cc b/gpu/config/gpu_util.cc
+index dceeb4b26a1ed..0f56d6a1708bb 100644
+--- a/gpu/config/gpu_util.cc
++++ b/gpu/config/gpu_util.cc
+@@ -739,11 +739,9 @@ bool EnableSwiftShaderIfNeeded(base::CommandLine* command_line,
+           kGpuFeatureStatusEnabled ||
+       gpu_feature_info.status_values[GPU_FEATURE_TYPE_ACCELERATED_GL] !=
+           kGpuFeatureStatusEnabled) {
++    // This setting makes WebGL run on legacy SwiftShader GL when true and
++    // SwANGLE when false.
+     bool legacy_software_gl = true;
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+-    // This setting makes WebGL run on SwANGLE instead of SwiftShader GL.
+-    legacy_software_gl = false;
+-#endif
+     gl::SetSoftwareWebGLCommandLineSwitches(command_line, legacy_software_gl);
+     return true;
+   }

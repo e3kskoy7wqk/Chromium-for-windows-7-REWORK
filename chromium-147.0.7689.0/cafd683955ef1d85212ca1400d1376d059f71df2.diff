@@ -1,0 +1,135 @@
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 687698d6ff258..0e0b0d7ea55dd 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3443,6 +3443,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+     switches::kRendererWaitForJavaDebugger,
+ #endif
+ #if BUILDFLAG(IS_WIN)
++    sandbox::policy::switches::kDisableWin32kLockDown,
+     switches::kDisableHighResTimer,
+     switches::kEnableWin7WebRtcHWH264Decoding,
+     switches::kTextContrast,
+diff --git a/content/browser/service_host/utility_sandbox_delegate_win.cc b/content/browser/service_host/utility_sandbox_delegate_win.cc
+index 9679599074584..544d920bd5241 100644
+--- a/content/browser/service_host/utility_sandbox_delegate_win.cc
++++ b/content/browser/service_host/utility_sandbox_delegate_win.cc
+@@ -8,6 +8,7 @@ class UtilitySandboxedProcessLauncherDelegate
+ #include "content/public/common/content_client.h"
+ #include "content/public/common/content_switches.h"
+ #include "content/utility/sandbox_delegate_data.mojom.h"
++#include "sandbox/policy/switches.h"
+ #include "sandbox/policy/features.h"
+ #include "sandbox/policy/mojom/sandbox.mojom.h"
+ #include "sandbox/policy/win/sandbox_win.h"
+@@ -205,10 +205,12 @@ class UtilitySandboxedProcessLauncherDelegate
+ 
+   if (sandbox_type_ == sandbox::mojom::Sandbox::kService ||
+       sandbox_type_ == sandbox::mojom::Sandbox::kServiceWithJit) {
++    if (sandbox::policy::IsWin32kLockdownEnabled()) {
+     auto result = sandbox::policy::SandboxWin::AddWin32kLockdownPolicy(config);
+     if (result != sandbox::SBOX_ALL_OK) {
+       return false;
+     }
++    }
+ 
+     config->SetFilterEnvironment(true);
+   }
+diff --git a/sandbox/policy/switches.cc b/sandbox/policy/switches.cc
+index b585cdfff3672..b7ce99202a894 100644
+--- a/sandbox/policy/switches.cc
++++ b/sandbox/policy/switches.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "build/build_config.h"
+ #include "base/win/windows_version.h"
++#include "base/command_line.h"
+ 
+ namespace sandbox::policy::switches {
+ 
+@@ -70,6 +70,9 @@ const char kDisableSeccompFilterSandbox[] = "disable-seccomp-filter-sandbox";
+ // Disable the setuid sandbox (Linux only).
+ const char kDisableSetuidSandbox[] = "disable-setuid-sandbox";
+ 
++// Disables the Win32K process mitigation policy for child processes.
++const char kDisableWin32kLockDown[] = "disable-win32k-lockdown";
++
+ // Allows shmat() system call in the GPU sandbox.
+ const char kGpuSandboxAllowSysVShm[] = "gpu-sandbox-allow-sysv-shm";
+ 
+@@ -123,3 +126,18 @@ const char kCloudPrintServiceProcess[] = "service";
+ const char kAppShimProcessType[] = "app-shim";
+ 
+ }  // namespace sandbox::policy::switches
++
++#if BUILDFLAG(IS_WIN)
++
++namespace sandbox {
++namespace policy {
++bool IsWin32kLockdownEnabled() {
++  return base::win::GetVersion() >= base::win::Version::WIN8 &&
++         !base::CommandLine::ForCurrentProcess()->HasSwitch(
++             switches::kDisableWin32kLockDown);
++}
++}  // namespace policy
++}  // namespace sandbox
++
++#endif
++
+diff --git a/sandbox/policy/switches.h b/sandbox/policy/switches.h
+index 1c6df38f5063c..ae0d64bf1d23e 100644
+--- a/sandbox/policy/switches.h
++++ b/sandbox/policy/switches.h
+@@ -50,6 +50,7 @@ SANDBOX_POLICY_EXPORT extern const char kDisableGpuSandbox[];
+ SANDBOX_POLICY_EXPORT extern const char kDisableNamespaceSandbox[];
+ SANDBOX_POLICY_EXPORT extern const char kDisableSeccompFilterSandbox[];
+ SANDBOX_POLICY_EXPORT extern const char kDisableSetuidSandbox[];
++SANDBOX_POLICY_EXPORT extern const char kDisableWin32kLockDown[];
+ SANDBOX_POLICY_EXPORT extern const char kGpuSandboxAllowSysVShm[];
+ SANDBOX_POLICY_EXPORT extern const char kGpuSandboxFailuresFatal[];
+ SANDBOX_POLICY_EXPORT extern const char kNoSandbox[];
+@@ -79,5 +80,16 @@ SANDBOX_POLICY_EXPORT extern const char kCloudPrintServiceProcess[];
+ SANDBOX_POLICY_EXPORT extern const char kAppShimProcessType[];
+ 
+ }  // namespace sandbox::policy::switches
++
++namespace sandbox {
++namespace policy {
++#if BUILDFLAG(IS_WIN)
++// Returns whether Win32k lockdown is enabled for child processes or not.
++// Not really a switch, but uses one under the covers.
++SANDBOX_POLICY_EXPORT bool IsWin32kLockdownEnabled();
++#endif
++}  // namespace policy
++}  // namespace sandbox
++
+ 
+ #endif  // SANDBOX_POLICY_SWITCHES_H_
+diff --git a/sandbox/policy/win/sandbox_win.cc b/sandbox/policy/win/sandbox_win.cc
+index 9b613183da9f8..2d40cdb1c1253 100644
+--- a/sandbox/policy/win/sandbox_win.cc
++++ b/sandbox/policy/win/sandbox_win.cc
+@@ -748,8 +748,7 @@ ResultCode SandboxWin::AddAppContainerPolicy(TargetPolicy* policy,
+ // static
+ ResultCode SandboxWin::AddWin32kLockdownPolicy(TargetConfig* config) {
+   DCHECK(!config->IsConfigured());
+-  // Win32k Lockdown is supported on Windows 8+.
+-  if (base::win::GetVersion() < base::win::Version::WIN8)
++  if (!IsWin32kLockdownEnabled())
+     return SBOX_ALL_OK;
+ 
+   MitigationFlags flags = config->GetProcessMitigations();
+@@ -933,10 +932,13 @@ ResultCode SandboxWin::StartSandboxedProcess(
+     // TODO(crbug.com/40088338) Remove if we can reliably not load
+     // cryptbase.dll.
+     config->AddKernelObjectToClose(HandleToClose::kKsecDD);
++#if !defined(NACL_WIN64)
++  if (IsWin32kLockdownEnabled())
+     if (const auto result = SandboxWin::AddWin32kLockdownPolicy(config);
+         result != SBOX_ALL_OK) {
+       return result;
+     }
++#endif
+   }
+ 
+   if (!delegate->DisableDefaultPolicy()) {
