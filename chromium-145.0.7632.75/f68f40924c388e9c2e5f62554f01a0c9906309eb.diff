@@ -1,0 +1,43 @@
+diff --git a/ui/gfx/canvas.cc b/ui/gfx/canvas.cc
+index 03748f3a90c72..43939ac0b8aab 100644
+--- a/ui/gfx/canvas.cc
++++ b/ui/gfx/canvas.cc
+@@ -104,38 +85,8 @@ void Canvas::SizeStringInt(std::u16string_view text,
+ // static
+ float Canvas::GetStringWidthF(std::u16string_view text,
+                               const FontList& font_list) {
+-  if (text.empty()) {
+-    return 0;
+-  }
+-
+-  scoped_refptr<const gfx::PlatformFont> platform_font_ref(
+-      font_list.GetPrimaryFont().platform_font());
+-
+-  // Cache only if there is one single Font, and that Font is already
+-  // initialized (has a not-null PlatformFont). Otherwise SizeStringFloat()
+-  // might return a different value on subsequent calls.
+-  const bool use_cache =
+-      base::FeatureList::IsEnabled(features::kStringWidthCache) &&
+-      text.length() <= kMaxStringWidthCacheStringLength &&
+-      font_list.GetFonts().size() == 1 && platform_font_ref;
+-
+-  if (use_cache) {
+-    const StringWidthCacheKey key(std::u16string(text), platform_font_ref);
+-    StringWidthCache& cache = GetStringWidthCache();
+-
+-    auto it = cache.Get(key);
+-    if (it != cache.end()) {
+-      return it->second;
+-    }
+-  }
+-
+   float width = 0, height = 0;
+   SizeStringFloat(text, font_list, &width, &height, 0, NO_ELLIPSIS);
+-
+-  if (use_cache) {
+-    const StringWidthCacheKey key(std::u16string(text), platform_font_ref);
+-    GetStringWidthCache().Put(key, width);
+-  }
+   return width;
+ }
+ 

@@ -1,0 +1,246 @@
+diff --git a/gpu/command_buffer/service/feature_info.cc b/gpu/command_buffer/service/feature_info.cc
+index 80d0500037643..92c8a09443e45 100644
+--- a/gpu/command_buffer/service/feature_info.cc
++++ b/gpu/command_buffer/service/feature_info.cc
+@@ -793,7 +793,8 @@ void FeatureInfo::InitializeFeatures() {
+   }
+ 
+   if (gl_version_info_->is_es3 ||
+-      gfx::HasExtension(extensions, "GL_OES_element_index_uint")) {
++      gfx::HasExtension(extensions, "GL_OES_element_index_uint") ||
++      gl::HasDesktopGLFeatures()) {
+     AddExtensionString("GL_OES_element_index_uint");
+     validators_.index_type.AddValue(GL_UNSIGNED_INT);
+   }
+@@ -1049,7 +1050,8 @@ void FeatureInfo::InitializeFeatures() {
+     AddExtensionString("GL_EXT_disjoint_timer_query");
+   }
+ 
+-  if (gfx::HasExtension(extensions, "GL_OES_rgb8_rgba8")) {
++  if (gfx::HasExtension(extensions, "GL_OES_rgb8_rgba8") ||
++      gl::HasDesktopGLFeatures()) {
+     AddExtensionString("GL_OES_rgb8_rgba8");
+     validators_.render_buffer_format.AddValue(GL_RGB8_OES);
+     validators_.render_buffer_format.AddValue(GL_RGBA8_OES);
+@@ -1112,14 +1114,15 @@ void FeatureInfo::InitializeFeatures() {
+   }
+ 
+   if (gfx::HasExtension(extensions, "GL_OES_depth24") ||
+-      gl_version_info_->is_es3) {
++      gl::HasDesktopGLFeatures() || gl_version_info_->is_es3) {
+     AddExtensionString("GL_OES_depth24");
+     feature_flags_.oes_depth24 = true;
+     validators_.render_buffer_format.AddValue(GL_DEPTH_COMPONENT24);
+   }
+ 
+   if (gl_version_info_->is_es3 ||
+-      gfx::HasExtension(extensions, "GL_OES_standard_derivatives")) {
++      gfx::HasExtension(extensions, "GL_OES_standard_derivatives") ||
++      gl::HasDesktopGLFeatures()) {
+     AddExtensionString("GL_OES_standard_derivatives");
+     feature_flags_.oes_standard_derivatives = true;
+     validators_.hint_target.AddValue(GL_FRAGMENT_SHADER_DERIVATIVE_HINT_OES);
+@@ -1379,7 +1382,8 @@ void FeatureInfo::InitializeFeatures() {
+   }
+ 
+   if (gl_version_info_->is_es3 ||
+-      gfx::HasExtension(extensions, "GL_EXT_blend_minmax")) {
++      gfx::HasExtension(extensions, "GL_EXT_blend_minmax") ||
++      gl::HasDesktopGLFeatures()) {
+     AddExtensionString("GL_EXT_blend_minmax");
+     validators_.equation.AddValue(GL_MIN_EXT);
+     validators_.equation.AddValue(GL_MAX_EXT);
+@@ -1388,12 +1392,14 @@ void FeatureInfo::InitializeFeatures() {
+   }
+ 
+   // TODO(dshwang): GLES3 supports gl_FragDepth, not gl_FragDepthEXT.
+-  if (gfx::HasExtension(extensions, "GL_EXT_frag_depth")) {
++  if (gfx::HasExtension(extensions, "GL_EXT_frag_depth") ||
++      gl::HasDesktopGLFeatures()) {
+     AddExtensionString("GL_EXT_frag_depth");
+     feature_flags_.ext_frag_depth = true;
+   }
+ 
+-  if (gfx::HasExtension(extensions, "GL_EXT_shader_texture_lod")) {
++  if (gfx::HasExtension(extensions, "GL_EXT_shader_texture_lod") ||
++      gl::HasDesktopGLFeatures()) {
+     AddExtensionString("GL_EXT_shader_texture_lod");
+     feature_flags_.ext_shader_texture_lod = true;
+   }
+diff --git a/ui/gl/gl_context.cc b/ui/gl/gl_context.cc
+index 6804c3a802e43..4a2f654d39f4a 100644
+--- a/ui/gl/gl_context.cc
++++ b/ui/gl/gl_context.cc
+@@ -325,6 +325,8 @@ GLShareGroup* GLContext::share_group() {
+ 
+ bool GLContext::LosesAllContextsOnContextLost() {
+   switch (GetGLImplementation()) {
++    case kGLImplementationDesktopGL:
++      return false;
+     case kGLImplementationEGLGLES2:
+     case kGLImplementationEGLANGLE:
+       return true;
+diff --git a/ui/gl/gl_implementation.cc b/ui/gl/gl_implementation.cc
+index 5e490622cfe19..7364e80c31af6 100644
+--- a/ui/gl/gl_implementation.cc
++++ b/ui/gl/gl_implementation.cc
+@@ -75,6 +75,10 @@ std::string GLImplementationParts::GLString() const {
+   switch (gl) {
+     case GLImplementation::kGLImplementationNone:
+       return "none";
++    case GLImplementation::kGLImplementationDesktopGL:
++      return "desktop-gl";
++    case GLImplementation::kGLImplementationDesktopGLCoreProfile:
++      return "desktop-gl-core-profile";
+     case GLImplementation::kGLImplementationEGLGLES2:
+       return "egl-gles2";
+     case GLImplementation::kGLImplementationMockGL:
+@@ -122,6 +126,8 @@ const struct {
+   const char* angle_name;
+   GLImplementationParts implementation;
+ } kGLImplementationNamePairs[] = {
++    {kGLImplementationDesktopName, kANGLEImplementationNoneName,
++     GLImplementationParts(kGLImplementationDesktopGL)},
+     {kGLImplementationEGLName, kANGLEImplementationNoneName,
+      GLImplementationParts(kGLImplementationEGLGLES2)},
+     {kGLImplementationANGLEName, kANGLEImplementationNoneName,
+@@ -370,6 +376,11 @@ ANGLEImplementation GetANGLEImplementation() {
+   return g_gl_implementation.angle;
+ }
+ 
++bool HasDesktopGLFeatures() {
++  return kGLImplementationDesktopGL == g_gl_implementation.gl ||
++         kGLImplementationDesktopGLCoreProfile == g_gl_implementation.gl;
++}
++
+ void AddGLNativeLibrary(base::NativeLibrary library) {
+   DCHECK(library);
+ 
+diff --git a/ui/gl/gl_implementation.h b/ui/gl/gl_implementation.h
+index 45bb03e34d06e..03c721899ce7d 100644
+--- a/ui/gl/gl_implementation.h
++++ b/ui/gl/gl_implementation.h
+@@ -32,9 +32,9 @@ class GLApi;
+ // in /tool/metrics/histograms/enums.xml
+ enum GLImplementation {
+   kGLImplementationNone = 0,
+-  // Note: 1, 2, 3, 4 are skipped and should not be reused.
+-  // 1 used to be desktop GL.
+-  // 2 used to be desktop GL core profile.
++  kGLImplementationDesktopGL = 1,
++  kGLImplementationDesktopGLCoreProfile = 2,
++  // Note: 3 and 4 are skipped and should not be reused.
+   // 3 used to be legacy SwiftShader.
+   // 4 used to be Apple's software GL.
+   kGLImplementationEGLGLES2 = 5,  // Native EGL/GLES2
+@@ -187,6 +187,10 @@ GetRequestedGLImplementationFromCommandLine(
+     GLImplementationParts implementation);
+ GL_EXPORT bool IsWARPGLImplementation(GLImplementationParts implementation);
+ 
++// Does the underlying GL support all features from Desktop GL 2.0 that were
++// removed from the ES 2.0 spec without requiring specific extension strings.
++GL_EXPORT bool HasDesktopGLFeatures();
++
+ // Get the GL implementation with a given name.
+ GL_EXPORT GLImplementationParts
+ GetNamedGLImplementation(const std::string& gl_name,
+diff --git a/ui/gl/init/gl_factory.cc b/ui/gl/init/gl_factory.cc
+index 12e100f6f917d..3bd0dfee11903 100644
+--- a/ui/gl/init/gl_factory.cc
++++ b/ui/gl/init/gl_factory.cc
+@@ -65,6 +65,14 @@ GLImplementationParts GetRequestedGLImplementation(
+   std::vector<GLImplementationParts> allowed_impls =
+       GetAllowedGLImplementations();
+ 
++  if (0) {
++    auto iter = std::ranges::find(
++        allowed_impls,
++        GLImplementationParts(kGLImplementationDesktopGLCoreProfile));
++    if (iter != allowed_impls.end())
++      allowed_impls.erase(iter);
++  }
++
+   // If the passthrough command decoder is enabled, put ANGLE first if allowed
+   if (UsePassthroughCommandDecoder(cmd)) {
+     std::vector<GLImplementationParts> angle_impls = {};
+diff --git a/ui/gl/mojom/gl_implementation.mojom b/ui/gl/mojom/gl_implementation.mojom
+index 52496c6743be4..ac8d96ced8b7a 100644
+--- a/ui/gl/mojom/gl_implementation.mojom
++++ b/ui/gl/mojom/gl_implementation.mojom
+@@ -7,6 +7,8 @@ module gl.mojom;
+ // Maps to its namesake in ui/gl/gl_implementation.h.
+ enum GLImplementation {
+   kGLImplementationNone,
++  kGLImplementationDesktopGL,
++  kGLImplementationDesktopGLCoreProfile,
+   kGLImplementationEGLGLES2,
+   kGLImplementationMockGL,
+   kGLImplementationStubGL,
+diff --git a/ui/gl/mojom/gl_implementation_mojom_traits.cc b/ui/gl/mojom/gl_implementation_mojom_traits.cc
+index fb28d2d52e532..15d9d7b3597e1 100644
+--- a/ui/gl/mojom/gl_implementation_mojom_traits.cc
++++ b/ui/gl/mojom/gl_implementation_mojom_traits.cc
+@@ -14,6 +14,10 @@ EnumTraits<gl::mojom::GLImplementation, gl::GLImplementation>::ToMojom(
+   switch (impl) {
+     case gl::kGLImplementationNone:
+       return gl::mojom::GLImplementation::kGLImplementationNone;
++    case gl::kGLImplementationDesktopGL:
++      return gl::mojom::GLImplementation::kGLImplementationDesktopGL;
++    case gl::kGLImplementationDesktopGLCoreProfile:
++      return gl::mojom::GLImplementation::kGLImplementationDesktopGLCoreProfile;
+     case gl::kGLImplementationEGLGLES2:
+       return gl::mojom::GLImplementation::kGLImplementationEGLGLES2;
+     case gl::kGLImplementationMockGL:
+@@ -25,7 +29,8 @@ EnumTraits<gl::mojom::GLImplementation, gl::GLImplementation>::ToMojom(
+     case gl::kGLImplementationEGLANGLE:
+       return gl::mojom::GLImplementation::kGLImplementationEGLANGLE;
+   }
+-  NOTREACHED();
++  NOTREACHED();
++  return gl::mojom::GLImplementation::kGLImplementationNone;
+ }
+ 
+ // static
+@@ -36,6 +41,12 @@ bool EnumTraits<gl::mojom::GLImplementation, gl::GLImplementation>::FromMojom(
+     case gl::mojom::GLImplementation::kGLImplementationNone:
+       *out = gl::kGLImplementationNone;
+       return true;
++    case gl::mojom::GLImplementation::kGLImplementationDesktopGL:
++      *out = gl::kGLImplementationDesktopGL;
++      return true;
++    case gl::mojom::GLImplementation::kGLImplementationDesktopGLCoreProfile:
++      *out = gl::kGLImplementationDesktopGLCoreProfile;
++      return true;
+     case gl::mojom::GLImplementation::kGLImplementationEGLGLES2:
+       *out = gl::kGLImplementationEGLGLES2;
+       return true;
+@@ -52,7 +63,8 @@ bool EnumTraits<gl::mojom::GLImplementation, gl::GLImplementation>::FromMojom(
+       *out = gl::kGLImplementationEGLANGLE;
+       return true;
+   }
+-  NOTREACHED();
++  NOTREACHED();
++  return false;
+ }
+ 
+ // static
+@@ -81,7 +93,8 @@ EnumTraits<gl::mojom::ANGLEImplementation, gl::ANGLEImplementation>::ToMojom(
+     case gl::ANGLEImplementation::kDefault:
+       return gl::mojom::ANGLEImplementation::kDefault;
+   }
+-  NOTREACHED();
++  NOTREACHED();
++  return gl::mojom::ANGLEImplementation::kNone;
+ }
+ 
+ // static
+@@ -120,7 +133,8 @@ bool EnumTraits<gl::mojom::ANGLEImplementation, gl::ANGLEImplementation>::
+       *out = gl::ANGLEImplementation::kDefault;
+       return true;
+   }
+-  NOTREACHED();
++  NOTREACHED();
++  return false;
+ }
+ 
+ // static

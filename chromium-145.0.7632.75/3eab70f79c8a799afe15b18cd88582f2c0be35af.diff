@@ -1,0 +1,18 @@
+diff --git a/net/socket/tcp_socket_io_completion_port_win.cc b/net/socket/tcp_socket_io_completion_port_win.cc
+index b6d38f251a755..0501615cbe592 100644
+--- a/net/socket/tcp_socket_io_completion_port_win.cc
++++ b/net/socket/tcp_socket_io_completion_port_win.cc
+@@ -367,7 +367,12 @@ void TcpSocketIoCompletionPortWin::EnsureOverlappedIOInitialized() {
+       SkipCompletionPortOnSuccessIsSupported();
+   if (g_skip_completion_port_on_success_enabled &&
+       skip_completion_port_on_success_is_supported) {
+-    BOOL result = ::SetFileCompletionNotificationModes(
++typedef BOOL (WINAPI *lpfnSetFileCompletionNotificationModes)(_In_ HANDLE FileHandle, _In_ UCHAR Flags);
++
++static lpfnSetFileCompletionNotificationModes fnSetFileCompletionNotificationModes = NULL;
++
++        fnSetFileCompletionNotificationModes = (lpfnSetFileCompletionNotificationModes)::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "SetFileCompletionNotificationModes");
++    BOOL result = fnSetFileCompletionNotificationModes && fnSetFileCompletionNotificationModes(
+         reinterpret_cast<HANDLE>(socket_),
+         FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
+     skip_completion_port_on_success_ = (result != 0);

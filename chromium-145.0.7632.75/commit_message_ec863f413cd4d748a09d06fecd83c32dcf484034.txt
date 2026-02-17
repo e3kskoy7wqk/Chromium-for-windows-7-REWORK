@@ -1,0 +1,1 @@
+[windows] Use ordinary imports for Ro{I,Uni}nitialize    2023/8/23 5:06:46    ec863f413cd4d748a09d06fecd83c32dcf484034
