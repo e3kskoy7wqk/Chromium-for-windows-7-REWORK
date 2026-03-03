@@ -1,0 +1,45 @@
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder.cc b/gpu/command_buffer/service/gles2_cmd_decoder.cc
+index b22dffb10b374..eb710696706b3 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder.cc
+@@ -3447,13 +3447,8 @@ GLES2Decoder* GLES2Decoder::Create(
+         client, command_buffer_service, outputter, group);
+   }
+ 
+-// Allow linux to run fuzzers.
+-#if BUILDFLAG(ENABLE_VALIDATING_COMMAND_DECODER) || BUILDFLAG(IS_LINUX)
+   return std::make_unique<GLES2DecoderImpl>(client, command_buffer_service,
+                                             outputter, group);
+-#else
+-  LOG(FATAL) << "Validating command decoder is not supported.";
+-#endif
+ }
+ 
+ GLES2DecoderImpl::GLES2DecoderImpl(
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index 50171e2008971..40977d9b9933e 100644
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -510,9 +510,8 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+ 
+   auto impl = gl::GetGLImplementationParts();
+   bool gl_disabled = impl == gl::kGLImplementationDisabled;
+-
+-#if BUILDFLAG(ENABLE_VALIDATING_COMMAND_DECODER)
+   bool is_swangle = impl == gl::ANGLEImplementation::kSwiftShader;
++
+   // Compute passthrough decoder status before ComputeGpuFeatureInfo below.
+   // Do this after GL is initialized so extensions can be queried.
+   // Using SwANGLE forces the passthrough command decoder.
+@@ -534,11 +533,6 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+   }
+   gpu_preferences_.use_passthrough_cmd_decoder =
+       gpu_info_.passthrough_cmd_decoder;
+-#else
+-  // Use passthrough command decoder if validating was not compiled.
+-  gpu_info_.passthrough_cmd_decoder = true;
+-  gpu_preferences_.use_passthrough_cmd_decoder = true;
+-#endif  // BUILDFLAG(ENABLE_VALIDATING_COMMAND_DECODER)
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+   // TODO(b/233238923): While passthrough is rolling out on CrOS, it's useful

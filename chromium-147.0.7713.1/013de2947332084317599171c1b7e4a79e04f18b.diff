@@ -1,0 +1,45 @@
+diff --git a/net/cert/cert_verify_proc.cc b/net/cert/cert_verify_proc.cc
+index c1c3a60b009e4..c49c82226481b 100644
+--- a/net/cert/cert_verify_proc.cc
++++ b/net/cert/cert_verify_proc.cc
+@@ -67,6 +67,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "base/threading/scoped_blocking_call.h"
+ #include "base/time/time.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "crypto/crypto_buildflags.h"
+ #include "crypto/sha2.h"
+@@ -352,6 +353,17 @@ void RecordEkuHistogram(const CertVerifyResult& verify_result) {
+   }
+ }
+ 
++bool AreSHA1IntermediatesAllowed() {
++#if BUILDFLAG(IS_WIN)
++  // TODO(rsleevi): Remove this once https://crbug.com/588789 is resolved
++  // for Windows 7/2008 users.
++  // Note: This must be kept in sync with cert_verify_proc_unittest.cc
++  return base::win::GetVersion() < base::win::Version::WIN8;
++#else
++  return false;
++#endif
++}
++
+ // Inspects the signature algorithms in a single certificate |cert|.
+ //
+ //   * Sets |verify_result->has_sha1| to true if the certificate uses SHA1.
+@@ -643,10 +655,13 @@ int CertVerifyProc::Verify(X509Certificate* cert,
+   // Current SHA-1 behaviour:
+   // - Reject all SHA-1
+   // - ... unless it's not publicly trusted and SHA-1 is allowed
++  // - ... or SHA-1 is in the intermediate and SHA-1 intermediates are
++  //   allowed for that platform. See https://crbug.com/588789
+   bool current_sha1_issue =
+       (verify_result->is_issued_by_known_root ||
+        !(flags & VERIFY_ENABLE_SHA1_LOCAL_ANCHORS)) &&
+-      (verify_result->has_sha1_leaf || verify_result->has_sha1);
++      (verify_result->has_sha1_leaf ||
++       (verify_result->has_sha1 && !AreSHA1IntermediatesAllowed()));
+ 
+   if (current_sha1_issue) {
+     verify_result->cert_status |= CERT_STATUS_WEAK_SIGNATURE_ALGORITHM;

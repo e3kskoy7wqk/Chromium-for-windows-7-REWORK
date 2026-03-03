@@ -1,0 +1,34 @@
+diff --git a/ui/gl/gl_context_egl.cc b/ui/gl/gl_context_egl.cc
+index 2216b9ffbc707..256d8b555f7af 100644
+--- a/ui/gl/gl_context_egl.cc
++++ b/ui/gl/gl_context_egl.cc
+@@ -172,11 +172,11 @@ bool GLContextEGL::Initialize(GLSurface* compatible_surface,
+     return false;
+   }
+ 
+-  if (gl_display_->ext->b_EGL_EXT_create_context_robustness || is_swangle) {
++  if (gl_display_->ext->b_EGL_EXT_create_context_robustness) {
+     DVLOG(1) << "EGL_EXT_create_context_robustness supported.";
+     context_attributes.push_back(EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT);
+-    context_attributes.push_back(
+-        (attribs.robust_buffer_access || is_swangle) ? EGL_TRUE : EGL_FALSE);
++    context_attributes.push_back(attribs.robust_buffer_access ? EGL_TRUE
++                                                              : EGL_FALSE);
+     if (attribs.lose_context_on_reset) {
+       context_attributes.push_back(
+           EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT);
+@@ -254,12 +252,10 @@ bool GLContextEGL::Initialize(GLSurface* compatible_surface,
+     DCHECK(attribs.allow_client_arrays);
+   }
+ 
+-  if (gl_display_->ext->b_EGL_ANGLE_robust_resource_initialization ||
+-      is_swangle) {
++  if (gl_display_->ext->b_EGL_ANGLE_robust_resource_initialization) {
+     context_attributes.push_back(EGL_ROBUST_RESOURCE_INITIALIZATION_ANGLE);
+     context_attributes.push_back(
+-        (attribs.robust_resource_initialization || is_swangle) ? EGL_TRUE
+-                                                               : EGL_FALSE);
++        attribs.robust_resource_initialization ? EGL_TRUE : EGL_FALSE);
+   } else {
+     DCHECK(!attribs.robust_resource_initialization);
+   }

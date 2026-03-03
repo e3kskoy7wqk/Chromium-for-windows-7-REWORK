@@ -1,0 +1,12 @@
+diff --git a/sandbox/policy/win/sandbox_win.cc b/sandbox/policy/win/sandbox_win.cc
+index 8b6ce19..86b0dcb 100644
+--- a/sandbox/policy/win/sandbox_win.cc
++++ b/sandbox/policy/win/sandbox_win.cc
+@@ -414,7 +414,6 @@ bool AddPolicyForSandboxedProcess(sandbox::TargetPolicy* policy) {
+   if (result != SBOX_ALL_OK)
+     return result;
+ 
+-  config->SetLockdownDefaultDacl();
+   // Win8+ adds a device DeviceApi that we don't need.
+   if (base::win::GetVersion() >= base::win::Version::WIN8)
+   config->AddKernelObjectToClose(HandleToClose::kDeviceApi);

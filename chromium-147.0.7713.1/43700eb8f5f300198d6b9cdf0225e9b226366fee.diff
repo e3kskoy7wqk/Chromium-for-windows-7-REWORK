@@ -1,0 +1,96 @@
+diff --git a/third_party/webrtc/rtc_base/async_dns_resolver.cc b/third_party/webrtc/rtc_base/async_dns_resolver.cc
+index 395ae7217a..0952265dd0 100644
+--- a/third_party/webrtc/rtc_base/async_dns_resolver.cc
++++ b/third_party/webrtc/rtc_base/async_dns_resolver.cc
+@@ -158,7 +158,26 @@ AsyncDnsResolver::~AsyncDnsResolver() {
+   if (state_) {
+ #if defined(WEBRTC_WIN)
+     RTC_DCHECK(cancel_);
+-    GetAddrInfoExCancel(&cancel_);
++typedef INT (WSAAPI *lpfnGetAddrInfoExCancel)(_In_ LPHANDLE lpHandle);
++  HINSTANCE hWs2_32Dll{ NULL };
++  lpfnGetAddrInfoExCancel fnGetAddrInfoExCancel{ NULL };
++  //load library
++  if ((hWs2_32Dll = LoadLibraryW(L"ws2_32.dll")) != 0)
++  {
++      fnGetAddrInfoExCancel = (lpfnGetAddrInfoExCancel)::GetProcAddress(hWs2_32Dll, "GetAddrInfoExCancel");
++    if (fnGetAddrInfoExCancel == NULL )
++    {
++      fnGetAddrInfoExCancel = NULL;
++
++      ::FreeLibrary(hWs2_32Dll);
++      hWs2_32Dll = NULL;
++    }
++  }
++  if (fnGetAddrInfoExCancel != NULL)
++    fnGetAddrInfoExCancel(&cancel_);
++  //free library
++  if (hWs2_32Dll != NULL)
++    ::FreeLibrary(hWs2_32Dll);
+ #endif
+     state_->Cancel();
+   }
+@@ -168,7 +187,26 @@ AsyncDnsResolver::~AsyncDnsResolver() {
+     worker_.Finalize();
+   }
+   if (addr_info_) {
+-    FreeAddrInfoExW(addr_info_);
++typedef void (WSAAPI *lpfnFreeAddrInfoExW)(PADDRINFOEXW pAddrInfoEx);
++  HINSTANCE hWs2_32Dll{ NULL };
++  lpfnFreeAddrInfoExW fnFreeAddrInfoExW{ NULL };
++  //load library
++  if ((hWs2_32Dll = LoadLibraryW(L"ws2_32.dll")) != 0)
++  {
++    fnFreeAddrInfoExW = (lpfnFreeAddrInfoExW)::GetProcAddress(hWs2_32Dll, "FreeAddrInfoExW");
++    if (fnFreeAddrInfoExW == NULL )
++    {
++      fnFreeAddrInfoExW = NULL;
++
++      ::FreeLibrary(hWs2_32Dll);
++      hWs2_32Dll = NULL;
++    }
++  }
++  if (fnFreeAddrInfoExW != NULL)
++    fnFreeAddrInfoExW(addr_info_);
++  //free library
++  if (hWs2_32Dll != NULL)
++    ::FreeLibrary(hWs2_32Dll);
+   }
+   if (ol_.hEvent) {
+     ::CloseHandle(ol_.hEvent);
+@@ -203,8 +241,34 @@ void AsyncDnsResolver::Start(const SocketAddress& addr,
+   std::wstring hostname = ToUtf16(addr.hostname());
+   ol_.hEvent = CreateEvent(nullptr, true, false, nullptr);
+   ADDRINFOEXW hints = {.ai_flags = AI_ADDRCONFIG, .ai_family = family};
+-  int ret = GetAddrInfoExW(hostname.c_str(), nullptr, NS_ALL, nullptr, &hints,
++typedef INT (WSAAPI *lpfnGetAddrInfoExW)(_In_opt_ PCWSTR pName, _In_opt_ PCWSTR pServiceName, _In_ DWORD dwNameSpace,
++                                         _In_opt_ LPGUID lpNspId, _In_opt_ const ADDRINFOEXW *hints,
++                                         _Outptr_ PADDRINFOEXW *ppResult, _In_opt_ struct timeval *timeout,
++                                         _In_opt_ LPOVERLAPPED lpOverlapped, _In_opt_ LPVOID lpCompletionRoutine,
++                                         _Out_opt_ LPHANDLE lpNameHandle);
++  HMODULE hWs2_32Dll{ NULL };
++  lpfnGetAddrInfoExW fnGetAddrInfoExW{ NULL };
++  //load library
++  if ((hWs2_32Dll = LoadLibraryW(L"ws2_32.dll")) != 0)
++  {
++    fnGetAddrInfoExW = (lpfnGetAddrInfoExW)::GetProcAddress(hWs2_32Dll, "GetAddrInfoExW");
++    if (fnGetAddrInfoExW == NULL )
++    {
++      fnGetAddrInfoExW = NULL;
++
++      ::FreeLibrary(hWs2_32Dll);
++      hWs2_32Dll = NULL;
++    }
++  }
++  int ret;
++  if (fnGetAddrInfoExW != NULL)
++  ret = fnGetAddrInfoExW(hostname.c_str(), nullptr, NS_ALL, nullptr, &hints,
+                            &addr_info_, nullptr, &ol_, nullptr, &cancel_);
++  if (fnGetAddrInfoExW == NULL)
++    ret = ERROR_NOT_SUPPORTED;
++  //free library
++  if (hWs2_32Dll != NULL)
++    ::FreeLibrary(hWs2_32Dll);
+ 
+   // Check if the operation is done, continues asynchronously, or failed.
+   if (ret == ERROR_IO_PENDING) {  // Async.
