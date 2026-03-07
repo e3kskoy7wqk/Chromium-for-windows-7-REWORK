@@ -1,0 +1,75 @@
+diff --git a/base/win/registry.cc b/base/win/registry.cc
+index 7c324938e4b27..d7a1890b81858 100644
+--- a/base/win/registry.cc
++++ b/base/win/registry.cc
+@@ -281,7 +281,7 @@ LONG RegKey::DeleteEmptyKey(const char16* name) {
+  }
+
+  // It's not a symbolic link, so try to delete it without recursing.
+-  return ::RegDeleteKeyEx(target_key.key_, L"", wow64access_, 0);
++  return RegDeleteKeyExWrapper(target_key.key_, L"", wow64access_, 0);
+ }
+ 
+ LONG RegKey::DeleteValue(const wchar_t* value_name) {
+@@ -430,6 +430,25 @@ bool RegKey::StartWatching(ChangeCallback callback) {
+              : ERROR_ACCESS_DENIED;
+ }
+ 
++// static
++LONG RegKey::RegDeleteKeyExWrapper(HKEY hKey,
++                                   const wchar_t* lpSubKey,
++                                   REGSAM samDesired,
++                                   DWORD Reserved) {
++  typedef LSTATUS(WINAPI* RegDeleteKeyExPtr)(HKEY, LPCWSTR, REGSAM, DWORD);
++
++  RegDeleteKeyExPtr reg_delete_key_ex_func =
++      reinterpret_cast<RegDeleteKeyExPtr>(
++          GetProcAddress(GetModuleHandleA("advapi32.dll"), "RegDeleteKeyExW"));
++
++  if (reg_delete_key_ex_func)
++    return reg_delete_key_ex_func(hKey, lpSubKey, samDesired,
++                                  Reserved);
++
++  // Windows XP does not support RegDeleteKeyEx, so fallback to RegDeleteKey.
++  return RegDeleteKey(hKey, lpSubKey);
++}
++
+ // static
+ LONG RegKey::RegDelRecurse(HKEY root_key, const wchar_t* name, REGSAM access) {
+   // First, open the key; taking care not to traverse symbolic links.
+@@ -458,7 +477,7 @@ LONG RegKey::RegDelRecurse(HKEY root_key, const wchar_t* name, REGSAM access) {
+   }
+ 
+   // It's not a symbolic link, so try to delete it without recursing.
+-  result = ::RegDeleteKeyEx(target_key.key_, L"", access, 0);
++  result = RegDeleteKeyExWrapper(target_key.key_, L"", access, 0);
+   if (result == ERROR_SUCCESS) {
+     return result;
+   }
+@@ -478,7 +497,7 @@ LONG RegKey::RegDelRecurse(HKEY root_key, const wchar_t* name, REGSAM access) {
+   }
+ 
+   // Try again to delete the key.
+-  return ::RegDeleteKeyEx(target_key.key_, L"", access, 0);
++  return RegDeleteKeyExWrapper(target_key.key_, L"", access, 0);
+ }
+ 
+ // RegistryValueIterator ------------------------------------------------------
+diff --git a/base/win/registry.h b/base/win/registry.h
+index 1c57fc9f537d7..4b859440eb9b3 100644
+--- a/base/win/registry.h
++++ b/base/win/registry.h
+@@ -142,6 +142,13 @@ class BASE_EXPORT RegKey {
+  private:
+   class Watcher;
+ 
++  // Calls RegDeleteKeyEx on supported platforms, alternatively falls back to
++  // RegDeleteKey.
++  static LONG RegDeleteKeyExWrapper(HKEY hKey,
++                                    const wchar_t* lpSubKey,
++                                    REGSAM samDesired,
++                                    DWORD Reserved);
++
+   // Opens the key `subkey` under `rootkey` with the given options and
+   // access rights. `options` may be 0 or `REG_OPTION_OPEN_LINK`. Returns
+   // ERROR_SUCCESS or a Windows error code.

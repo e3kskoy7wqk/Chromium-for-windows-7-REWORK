@@ -1,0 +1,71 @@
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.cc b/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.cc
+index d6308a9bb6bff..941ce7611ec29 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.cc
+@@ -271,6 +271,9 @@ ToolbarActionHoverCardBubbleView::ToolbarActionHoverCardBubbleView(
+   layout->SetCrossAxisAlignment(views::LayoutAlignment::kStretch);
+   layout->SetCollapseMargins(true);
+ 
++  corner_radius_ = ChromeLayoutProvider::Get()->GetCornerRadiusMetric(
++      views::Emphasis::kHigh);
++
+   // Set up content.
+   auto create_label = [](int context, int text_style,
+                          std::optional<ui::ColorId> color_id,
+@@ -211,10 +214,9 @@ ToolbarActionHoverCardBubbleView::ToolbarActionHoverCardBubbleView(
+   GetBubbleFrameView()->SetPreferredArrowAdjustment(
+       views::BubbleFrameView::PreferredArrowAdjustment::kOffset);
+   GetBubbleFrameView()->set_hit_test_transparent(true);
+-
+-  const int corner_radius = ChromeLayoutProvider::Get()->GetCornerRadiusMetric(
+-      views::Emphasis::kHigh);
+-  GetBubbleFrameView()->SetRoundedCorners(gfx::RoundedCornersF(corner_radius));
++
++  if (using_rounded_corners())
++    GetBubbleFrameView()->SetRoundedCorners(gfx::RoundedCornersF(corner_radius_.value()));
+ 
+   // Start in the fully "faded-in" position so that whatever text we initially
+   // display is visible.
+@@ -382,6 +385,17 @@ bool ToolbarActionHoverCardBubbleView::IsPolicyLabelVisible() const {
+   return policy_label_->GetVisible();
+ }
+ 
++void ToolbarActionHoverCardBubbleView::OnThemeChanged() {
++  BubbleDialogDelegateView::OnThemeChanged();
++
++  // Bubble closes if the theme changes to the point where the border has to be
++  // regenerated. See crbug.com/1140256
++  if (!using_rounded_corners()) {
++    GetWidget()->Close();
++    return;
++  }
++}
++
+ ToolbarActionHoverCardBubbleView::~ToolbarActionHoverCardBubbleView() = default;
+ 
+ BEGIN_METADATA(ToolbarActionHoverCardBubbleView)
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.h b/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.h
+index 1cf9bb7f26eb3..cf0808eeac25b 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.h
++++ b/chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.h
+@@ -47,6 +47,11 @@ class ToolbarActionHoverCardBubbleView
+   class FadeLabel;
+   class FootnoteView;
+ 
++  bool using_rounded_corners() const { return corner_radius_.has_value(); }
++
++  // views::BubbleDialogDelegateView:
++  void OnThemeChanged() override;
++
+   // TODO(emiliapaz): rename to `extension_name_label_`.
+   raw_ptr<FadeLabelView> title_label_ = nullptr;
+   raw_ptr<FadeLabelView> action_title_label_ = nullptr;
+@@ -54,6 +59,8 @@ class ToolbarActionHoverCardBubbleView
+ 
+   raw_ptr<views::Separator> site_access_separator_;
+   raw_ptr<views::Separator> policy_separator_;
++
++  std::optional<int> corner_radius_;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_TOOLBAR_TOOLBAR_ACTION_HOVER_CARD_BUBBLE_VIEW_H_

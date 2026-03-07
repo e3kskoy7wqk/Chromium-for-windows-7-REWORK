@@ -1,0 +1,26 @@
+diff --git a/third_party/dawn/src/dawn/native/d3d12/SharedFenceD3D12.cpp b/third_party/dawn/src/dawn/native/d3d12/SharedFenceD3D12.cpp
+index 2370aa3aad..fbd2581d41 100644
+--- a/third_party/dawn/src/dawn/native/d3d12/SharedFenceD3D12.cpp
++++ b/third_party/dawn/src/dawn/native/d3d12/SharedFenceD3D12.cpp
+@@ -44,8 +44,20 @@ ResultOrError<Ref<SharedFence>> SharedFence::Create(
+     DAWN_INVALID_IF(descriptor->handle == nullptr, "shared HANDLE is missing.");
+ 
+     const auto& queueFence = ToBackend(device->GetQueue())->GetSharedFence();
++  /* Since windows 10 there is an API for this. */
++  typedef BOOL (WINAPI *PFNCOMPAREOBJECTHANDLES)(HANDLE, HANDLE);
++  static int                     s_fInitialized = 0;
++  static PFNCOMPAREOBJECTHANDLES s_pfnCompareObjectHandles = NULL;
++  PFNCOMPAREOBJECTHANDLES pfnCompareObjectHandles = s_pfnCompareObjectHandles;
++  if (!pfnCompareObjectHandles && !s_fInitialized)
++    {
++      pfnCompareObjectHandles = (PFNCOMPAREOBJECTHANDLES)GetProcAddress (GetModuleHandleW (L"kernelbase.dll"),
++                                                                         "CompareObjectHandles");
++      s_pfnCompareObjectHandles = pfnCompareObjectHandles;
++      s_fInitialized = 1;
++    }
+     if (queueFence &&
+-        ::CompareObjectHandles(queueFence->GetSystemHandle().Get(), descriptor->handle)) {
++        pfnCompareObjectHandles&&pfnCompareObjectHandles(queueFence->GetSystemHandle().Get(), descriptor->handle)) {
+         return queueFence;
+     }
+ 

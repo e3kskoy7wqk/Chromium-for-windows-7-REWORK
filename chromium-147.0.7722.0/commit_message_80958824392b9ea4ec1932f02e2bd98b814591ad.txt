@@ -1,0 +1,1 @@
+Intercept CreateThread inside renderer and proxy out to CreateRemoteThread in browser.    2016/2/10 6:45:28    80958824392b9ea4ec1932f02e2bd98b814591ad

@@ -1,0 +1,13 @@
+diff --git a/third_party/perfetto/src/base/time.cc b/third_party/perfetto/src/base/time.cc
+index 3ea2343084..f26bc01465 100644
+--- a/third_party/perfetto/src/base/time.cc
++++ b/third_party/perfetto/src/base/time.cc
+@@ -122,7 +122,7 @@ TimeNanos GetWallTimeNs() {
+ }
+ 
+ TimeNanos GetThreadCPUTimeNs() {
+-#if PERFETTO_BUILDFLAG(PERFETTO_ARCH_CPU_ARM64)
++#if 1
+   // QueryThreadCycleTime versus TSCTicksPerSecond doesn't have much relation to
+   // actual elapsed time on Windows on Arm, because QueryThreadCycleTime is
+   // backed by the actual number of CPU cycles executed, rather than a

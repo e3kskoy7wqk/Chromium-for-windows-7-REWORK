@@ -1,0 +1,55 @@
+diff --git a/base/compiler_hardening_test.cc b/base/compiler_hardening_test.cc
+index 53dfe7d319c63..87aa16b3f228f 100644
+--- a/base/compiler_hardening_test.cc
++++ b/base/compiler_hardening_test.cc
+@@ -8,6 +8,11 @@
+ 
+ namespace {
+ 
++// TODO(crbug.com/386992829): differentiate `-fsanitize=array-bounds`
++// from a full-on UBSan build, and remove this particular gating
++// pattern.
++#if __has_feature(undefined_behavior_sanitizer)
++
+ template <typename T>
+ void DoNotOptimize(T t) {
+   // Ensure the compiler does not optimize the access out before the hardening
+@@ -48,4 +53,6 @@ TEST(CompilerHardeningDeathTest, ArrayOutOfBounds) {
+   EXPECT_DEATH_IF_SUPPORTED(UNSAFE_BUFFERS(b[idx] = 0), "");
+ }
+ 
++#endif  // !__has_feature(undefined_behavior_sanitizer)
++
+ }  // namespace
+diff --git a/build/config/BUILDCONFIG.gn b/build/config/BUILDCONFIG.gn
+index 69f7eb1ac466f..a8564d15ca182 100644
+--- a/build/config/BUILDCONFIG.gn
++++ b/build/config/BUILDCONFIG.gn
+@@ -363,7 +363,6 @@ default_compiler_configs = [
+   "//build/config/compiler:no_rtti",
+   "//build/config/compiler:no_unresolved_symbols",
+   "//build/config/compiler:runtime_library",
+-  "//build/config/compiler:sanitize_c_array_bounds",
+   "//build/config/compiler:thin_archive",
+   "//build/config/compiler:thinlto_optimize_default",
+   "//build/config/compiler:tot_warnings",
+diff --git a/third_party/wuffs/BUILD.gn b/third_party/wuffs/BUILD.gn
+index cab4c2851806e..6e7468ac00b07 100644
+--- a/third_party/wuffs/BUILD.gn
++++ b/third_party/wuffs/BUILD.gn
+@@ -83,15 +83,6 @@ static_library("wuffs") {
+   visibility = [ "//skia" ]
+ 
+   sources = [ "src/release/c/wuffs-v0.3.c" ]
+-
+-  # Wuffs is said to be memory-safe. Its array bounds safety checks are
+-  # proved entirely at-compile-time (when compiling either Wuffs itself
+-  # or `*.wuffs` source code to `*.c` generated code). There should be
+-  # no need to add the extra instrumentation of `-fsanitize=array-bounds`.
+-  #
+-  # TODO(crbug.com/455614314): consider building a fix directly into
+-  # Wuffs to pacify the compiler.
+-  configs -= [ "//build/config/compiler:sanitize_c_array_bounds" ]
+ }
+ # Do not add build targets, or change their configuration or visibility,
+ # without considering the "consult ENG_REVIEW_OWNERS" comment at the top of

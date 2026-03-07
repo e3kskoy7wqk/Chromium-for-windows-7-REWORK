@@ -1,0 +1,23 @@
+diff --git a/net/ssl/ssl_platform_key_win.cc b/net/ssl/ssl_platform_key_win.cc
+index 11c9d111a3d0d..d49d72f25f8ed 100644
+--- a/net/ssl/ssl_platform_key_win.cc
++++ b/net/ssl/ssl_platform_key_win.cc
+@@ -21,6 +21,7 @@
+ #include "base/lazy_instance.h"
+ #include "base/logging.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/win/windows_version.h"
+ #include "crypto/openssl_util.h"
+ #include "crypto/scoped_capi_types.h"
+ #include "crypto/scoped_cng_types.h"
+@@ -336,7 +337,9 @@ scoped_refptr<SSLPrivateKey> FetchClientCertPrivateKey(
+   HCRYPTPROV_OR_NCRYPT_KEY_HANDLE prov_or_key = 0;
+   DWORD key_spec = 0;
+   BOOL must_free = FALSE;
+-  DWORD flags = CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG;
++  DWORD flags = 0;
++  if (base::win::GetVersion() >= base::win::Version::VISTA)
++    flags |= CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG;
+ 
+   if (!CryptAcquireCertificatePrivateKey(cert_context, flags, nullptr,
+                                          &prov_or_key, &key_spec, &must_free)) {
