@@ -1,0 +1,1 @@
+Fix unsupported profiles being returned for hardware video decoding    2025/8/27 7:07:33    0baa086686b6431e38570c3d4aba52f28c82d94f

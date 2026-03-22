@@ -1,0 +1,222 @@
+diff --git a/third_party/blink/renderer/platform/text/locale_win.cc b/third_party/blink/renderer/platform/text/locale_win.cc
+index 8c400713886a0..121ca52e1bc77 100644
+--- a/third_party/blink/renderer/platform/text/locale_win.cc
++++ b/third_party/blink/renderer/platform/text/locale_win.cc
+@@ -46,11 +46,216 @@
+ 
+ namespace blink {
+ 
++typedef LCID (WINAPI* LocaleNameToLCIDPtr)(LPCWSTR, DWORD);
++typedef HashMap<String, LCID> NameToLCIDMap;
++
+ namespace {
++static String removeLastComponent(const String& name)
++{
++    size_t lastSeparator = name.ReverseFind('-');
++    if (lastSeparator == kNotFound)
++        return g_empty_string;
++    return name.Left(lastSeparator);
++}
++
++static void ensureNameToLCIDMap(NameToLCIDMap& map)
++{
++    if (!map.empty())
++        return;
++    // http://www.microsoft.com/resources/msdn/goglobal/default.mspx
++    // We add only locales used in layout tests for now.
++    map.insert("af", 0x0436);
++    map.insert("sq", 0x041C);
++    map.insert("ar", 0x0001);
++    map.insert("ar-sa", 0x0401);
++    map.insert("ar-iq", 0x0801);
++    map.insert("ar-eg", 0x0C01);
++    map.insert("ar-ly", 0x1001);
++    map.insert("ar-dz", 0x1401);
++    map.insert("ar-ma", 0x1801);
++    map.insert("ar-tn", 0x1C01);
++    map.insert("ar-om", 0x2001);
++    map.insert("ar-ye", 0x2401);
++    map.insert("ar-sy", 0x2801);
++    map.insert("ar-jo", 0x2C01);
++    map.insert("ar-lb", 0x3001);
++    map.insert("ar-kw", 0x3401);
++    map.insert("ar-ae", 0x3801);
++    map.insert("ar-bh", 0x3C01);
++    map.insert("ar-qa", 0x4001);
++    map.insert("eu", 0x042D);
++    map.insert("bg", 0x0402);
++    map.insert("be", 0x0423);
++    map.insert("ca", 0x0403);
++    map.insert("zh", 0x0004);
++    map.insert("zh-mo", 0x1404);
++    map.insert("zh-tw", 0x0404);
++    map.insert("zh-cn", 0x0804);
++    map.insert("zh-hk", 0x0C04);
++    map.insert("zh-sg", 0x1004);
++    map.insert("hr", 0x041A);
++    map.insert("cs", 0x0405);
++    map.insert("da", 0x0406);
++    map.insert("nl", 0x0413);
++    map.insert("nl-be", 0x0813);
++    map.insert("en", 0x0009);
++    map.insert("en", 0x2409);
++    map.insert("en-us", 0x0409);
++    map.insert("en-gb", 0x0809);
++    map.insert("en-au", 0x0C09);
++    map.insert("en-ca", 0x1009);
++    map.insert("en-nz", 0x1409);
++    map.insert("en-ie", 0x1809);
++    map.insert("en-za", 0x1C09);
++    map.insert("en-zw", 0x3009);
++    map.insert("en-jm", 0x2009);
++    map.insert("en-bz", 0x2809);
++    map.insert("en-tt", 0x2C09);
++    map.insert("en-ph", 0x3409);
++    map.insert("et", 0x0425);
++    map.insert("fo", 0x0438);
++    map.insert("fa", 0x0429);
++    map.insert("fi", 0x040B);
++    map.insert("fr", 0x040C);
++    map.insert("fr-be", 0x080C);
++    map.insert("fr-ca", 0x0C0C);
++    map.insert("fr-ch", 0x100C);
++    map.insert("fr-lu", 0x140C);
++    map.insert("fr-mc", 0x180C);
++    map.insert("gd", 0x043C);
++    map.insert("de", 0x0407);
++    map.insert("de-ch", 0x0807);
++    map.insert("de-at", 0x0C07);
++    map.insert("de-lu", 0x1007);
++    map.insert("de-li", 0x1407);
++    map.insert("el", 0x0408);
++    map.insert("he", 0x040D);
++    map.insert("hi", 0x0439);
++    map.insert("hu", 0x040E);
++    map.insert("is", 0x040F);
++    map.insert("id", 0x0421);
++    map.insert("it", 0x0410);
++    map.insert("it-ch", 0x0810);
++    map.insert("ja", 0x0411);
++    map.insert("ko", 0x0412);
++    map.insert("lv", 0x0426);
++    map.insert("lt", 0x0427);
++    map.insert("mk", 0x042F);
++    map.insert("ms", 0x043E);
++    map.insert("mt", 0x043A);
++    map.insert("pl", 0x0415);
++    map.insert("pt-br", 0x0416);
++    map.insert("pt", 0x0816);
++    map.insert("rm", 0x0417);
++    map.insert("ro", 0x0418);
++    map.insert("ro-md", 0x0818);
++    map.insert("ru", 0x0419);
++    map.insert("ru-md", 0x0819);
++    map.insert("sr", 0x0C1A);
++    map.insert("sr", 0x081A);
++    map.insert("sk", 0x041B);
++    map.insert("sl", 0x0424);
++    map.insert("sb", 0x042E);
++    map.insert("es", 0x040A);
++    map.insert("es-mx", 0x080A);
++    map.insert("es", 0x0C0A);
++    map.insert("es-gt", 0x100A);
++    map.insert("es-cr", 0x140A);
++    map.insert("es-pa", 0x180A);
++    map.insert("es-do", 0x1C0A);
++    map.insert("es-ve", 0x200A);
++    map.insert("es-co", 0x240A);
++    map.insert("es-pe", 0x280A);
++    map.insert("es-ar", 0x2C0A);
++    map.insert("es-ec", 0x300A);
++    map.insert("es-cl", 0x340A);
++    map.insert("es-uy", 0x380A);
++    map.insert("es-py", 0x3C0A);
++    map.insert("es-bo", 0x400A);
++    map.insert("es-sv", 0x440A);
++    map.insert("es-hn", 0x480A);
++    map.insert("es-ni", 0x4C0A);
++    map.insert("es-pr", 0x500A);
++    map.insert("sx", 0x0430);
++    map.insert("sv", 0x041D);
++    map.insert("sv-fi", 0x081D);
++    map.insert("th", 0x041E);
++    map.insert("ts", 0x0431);
++    map.insert("tn", 0x0432);
++    map.insert("tr", 0x041F);
++    map.insert("uk", 0x0422);
++    map.insert("ur", 0x0420);
++    map.insert("uz", 0x0443);
++    map.insert("uz", 0x0843);
++    map.insert("vi", 0x042A);
++    map.insert("xh", 0x0434);
++    map.insert("yi", 0x043D);
++    map.insert("zu", 0x0435);
++    map.insert("hy", 0x042B);
++    map.insert("ka", 0x0437);
++    map.insert("kk", 0x043F);
++    map.insert("sw", 0x0441);
++    map.insert("tt", 0x0444);
++    map.insert("bn", 0x0445);
++    map.insert("pa", 0x0446);
++    map.insert("gu", 0x0447);
++    map.insert("or", 0x0448);
++    map.insert("ta", 0x0449);
++    map.insert("te", 0x044A);
++    map.insert("kn", 0x044B);
++    map.insert("ml", 0x044C);
++    map.insert("as", 0x044D);
++    map.insert("mr", 0x044E);
++    map.insert("ms", 0x083E);
++    map.insert("ne", 0x0861);
++    map.insert("sa", 0x044F);
++    map.insert("lt", 0x0827);
++    map.insert("kok", 0x0457);
++    map.insert("x-az-cyrillic", 0x082C);
++    map.insert("x-az-latin", 0x042C);
++    map.insert("no", 0x0414);
++    map.insert("nb-no", 0x0414);
++    map.insert("nn-no", 0x0814);
++    map.insert("az", 0x082C);
++    map.insert("az", 0x042C);
++    map.insert("kz", 0x0440);
++    map.insert("mn", 0x0450);
++    map.insert("gl", 0x0456);
++    map.insert("syr", 0x045A);
++    map.insert("div", 0x0465);
++    map.insert("es-us", 0x540A);
++}
++
++// Fallback implementation of LocaleNameToLCID API. This is used for
++// testing on Windows XP.
++// FIXME: Remove this, ensureNameToLCIDMap, and removeLastComponent when we drop
++// Windows XP support.
++static LCID WINAPI convertLocaleNameToLCID(LPCWSTR name, DWORD)
++{
++    if (!name || !name[0])
++        return LOCALE_USER_DEFAULT;
++    DEFINE_STATIC_LOCAL(NameToLCIDMap, map, ());
++    ensureNameToLCIDMap(map);
++    String localeName = String(base::as_u16cstr(name)).Replace('_', '-');
++    localeName = localeName.DeprecatedLower();
++    do {
++        NameToLCIDMap::const_iterator iterator = map.find(localeName);
++        if (iterator != map.end())
++            return iterator->value;
++        localeName = removeLastComponent(localeName);
++    } while (!localeName.empty());
++    return LOCALE_USER_DEFAULT;
++}
++
+ // Functions that may call Csr* functions in kernelbase.dll and need proxying.
+ LCID CallLocaleNameToLCID(base::span<UChar> locale) {
+   CHECK_LT(locale.size(), static_cast<size_t>(LOCALE_NAME_MAX_LENGTH));
+-  return ::LocaleNameToLCID(base::as_writable_wcstr(locale.data()), 0);
++    // LocaleNameToLCID() is available since Windows Vista.
++    LocaleNameToLCIDPtr localeNameToLCID = reinterpret_cast<LocaleNameToLCIDPtr>(::GetProcAddress(::GetModuleHandle(L"kernel32"), "LocaleNameToLCID"));
++    if (!localeNameToLCID)
++        localeNameToLCID = convertLocaleNameToLCID;
++
++  return localeNameToLCID(base::as_writable_wcstr(locale.data()), 0);
+ }
+ 
+ String GetLocaleInfoString(LCID lcid, LCTYPE type, bool defaults_for_locale) {

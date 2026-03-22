@@ -1,0 +1,1 @@
+Wait on GPU instead of CPU in D3D12VideoEncodeAccelerator    2026/2/5 17:06:38    d6ef614e2ad385232590fcdc2a3454b9e966a8f1

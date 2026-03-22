@@ -1,0 +1,159 @@
+diff --git a/media/mojo/services/gpu_mojo_media_client_win.cc b/media/mojo/services/gpu_mojo_media_client_win.cc
+index 624f1950e4cc5..32b7ad406ce39 100644
+--- a/media/mojo/services/gpu_mojo_media_client_win.cc
++++ b/media/mojo/services/gpu_mojo_media_client_win.cc
+@@ -28,6 +28,13 @@ D3D11VideoDecoder::GetD3D11DeviceCB GetD3D11DeviceCallback() {
+ #include "media/gpu/windows/d3d11_video_decoder.h"
+ #include "media/gpu/windows/mf_audio_encoder.h"
+ 
++namespace {
++bool ShouldUseD3D11VideoDecoder(
++    const gpu::GpuDriverBugWorkarounds& gpu_workarounds) {
++  return !gpu_workarounds.disable_d3d11_video_decoder;
++}
++}  // namespace
++
+ namespace media {
+ 
+ class GpuMojoMediaClientWin final : public GpuMojoMediaClient {
+@@ -41,7 +46,7 @@ GetPlatformSupportedVideoDecoderConfigs(
+  protected:
+   std::unique_ptr<VideoDecoder> CreatePlatformVideoDecoder(
+       VideoDecoderTraits& traits) final {
+-    if (gpu_workarounds_.disable_d3d11_video_decoder) {
++  if (!ShouldUseD3D11VideoDecoder(gpu_workarounds_)) {
+     return nullptr;
+   }
+ 
+@@ -71,7 +76,7 @@ GetPlatformSupportedVideoDecoderConfigs(
+     if (gpu_preferences_.disable_accelerated_video_decode) {
+       return supported_configs;
+     }
+-    if (!gpu_workarounds_.disable_d3d11_video_decoder) {
++    if (ShouldUseD3D11VideoDecoder(gpu_workarounds_)) {
+       supported_configs = D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+           gpu_preferences_, gpu_workarounds_, GetD3DDeviceCallback());
+     }
+@@ -93,7 +98,8 @@ VideoDecoderType GetPlatformDecoderImplementationType(
+   }
+ 
+   VideoDecoderType GetPlatformDecoderImplementationType() final {
+-    return VideoDecoderType::kD3D11;
++  return ShouldUseD3D11VideoDecoder(gpu_workarounds_) ? VideoDecoderType::kD3D11
++                                                     : VideoDecoderType::kVda;
+   }
+ 
+  private:
+diff --git a/services/device/wake_lock/power_save_blocker/power_save_blocker_win.cc b/services/device/wake_lock/power_save_blocker/power_save_blocker_win.cc
+index ffe3e68ce5c1d..b3ab7d733e1dd 100644
+--- a/services/device/wake_lock/power_save_blocker/power_save_blocker_win.cc
++++ b/services/device/wake_lock/power_save_blocker/power_save_blocker_win.cc
+@@ -19,6 +19,11 @@ namespace {
+ 
+ HANDLE CreatePowerRequest(POWER_REQUEST_TYPE type,
+                           const std::string& description) {
++  if (type == PowerRequestExecutionRequired &&
++      base::win::GetVersion() == base::win::Version::WIN7) {
++    return INVALID_HANDLE_VALUE;
++  }
++
+   std::wstring wide_description = base::ASCIIToWide(description);
+   REASON_CONTEXT context = {0};
+   context.Version = POWER_REQUEST_CONTEXT_VERSION;
+@@ -43,6 +48,11 @@ void DeletePowerRequest(POWER_REQUEST_TYPE type, HANDLE handle) {
+     return;
+   }
+ 
++  if (type == PowerRequestExecutionRequired &&
++      base::win::GetVersion() == base::win::Version::WIN7) {
++    return;
++  }
++
+   BOOL success = ::PowerClearRequest(request_handle.Get(), type);
+   DCHECK(success);
+ }
+@@ -110,6 +120,9 @@ POWER_REQUEST_TYPE PowerSaveBlocker::Delegate::RequestType() {
+       type_ == mojom::WakeLockType::kPreventDisplaySleepAllowDimming)
+     return PowerRequestDisplayRequired;
+ 
++  if (base::win::GetVersion() == base::win::Version::WIN7)
++    return PowerRequestSystemRequired;
++
+   return PowerRequestExecutionRequired;
+ }
+ 
+diff --git a/services/shape_detection/face_detection_provider_win.cc b/services/shape_detection/face_detection_provider_win.cc
+index 6b5cf1417ec57..9824fc910ba7d 100644
+--- a/services/shape_detection/face_detection_provider_win.cc
++++ b/services/shape_detection/face_detection_provider_win.cc
+@@ -12,6 +12,7 @@
+ #include "base/win/core_winrt_util.h"
+ #include "base/win/post_async_results.h"
+ #include "base/win/scoped_hstring.h"
++#include "base/win/windows_version.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+ 
+@@ -49,6 +50,11 @@ BitmapPixelFormat GetPreferredPixelFormat(IFaceDetectorStatics* factory) {
+ void FaceDetectionProviderWin::CreateFaceDetection(
+     mojo::PendingReceiver<shape_detection::mojom::FaceDetection> receiver,
+     shape_detection::mojom::FaceDetectorOptionsPtr options) {
++  // FaceDetector class is only available in Win 10 onwards (v10.0.10240.0).
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    DVLOG(1) << "FaceDetector not supported before Windows 10";
++    return;
++  }
+   // Loads functions dynamically at runtime to prevent library dependencies.
+   if (!(base::win::ResolveCoreWinRTDelayload() &&
+         ScopedHString::ResolveCoreWinRTStringDelayload())) {
+diff --git a/services/shape_detection/text_detection_impl_win.cc b/services/shape_detection/text_detection_impl_win.cc
+index e639c7b25d61e..b0796c72cff9e 100644
+--- a/services/shape_detection/text_detection_impl_win.cc
++++ b/services/shape_detection/text_detection_impl_win.cc
+@@ -14,6 +14,7 @@
+ #include "base/win/core_winrt_util.h"
+ #include "base/win/post_async_results.h"
+ #include "base/win/scoped_hstring.h"
++#include "base/win/windows_version.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+ #include "services/shape_detection/detection_utils_win.h"
+@@ -42,6 +43,15 @@ using Microsoft::WRL::ComPtr;
+ // static
+ void TextDetectionImpl::Create(
+     mojo::PendingReceiver<mojom::TextDetection> receiver) {
++  // OcrEngine class is only available in Win 10 onwards (v10.0.10240.0) that
++  // documents in
++  // https://docs.microsoft.com/en-us/uwp/api/windows.media.ocr.ocrengine.
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    DVLOG(1) << "Optical character recognition not supported before Windows 10";
++    return;
++  }
++  DCHECK_GE(base::win::OSInfo::GetInstance()->version_number().build, 10240u);
++
+   // Loads functions dynamically at runtime to prevent library dependencies.
+   if (!(base::win::ResolveCoreWinRTDelayload() &&
+         ScopedHString::ResolveCoreWinRTStringDelayload())) {
+diff --git a/services/shape_detection/text_detection_impl_win_unittest.cc b/services/shape_detection/text_detection_impl_win_unittest.cc
+index 453506471bdcc..c571fd23e3dc4 100644
+--- a/services/shape_detection/text_detection_impl_win_unittest.cc
++++ b/services/shape_detection/text_detection_impl_win_unittest.cc
+@@ -13,6 +13,7 @@
+ #include "base/run_loop.h"
+ #include "base/test/task_environment.h"
+ #include "base/win/scoped_com_initializer.h"
++#include "base/win/windows_version.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "services/shape_detection/public/mojom/textdetection.mojom.h"
+ #include "services/shape_detection/text_detection_impl.h"
+@@ -54,6 +55,10 @@ class TextDetectionImplWinTest : public testing::Test {
+ };
+ 
+ TEST_F(TextDetectionImplWinTest, ScanOnce) {
++  // OCR not supported before Windows 10
++  if (base::win::GetVersion() < base::win::Version::WIN10)
++    return;
++
+   mojo::Remote<mojom::TextDetection> text_service;
+   TextDetectionImpl::Create(text_service.BindNewPipeAndPassReceiver());
+ 

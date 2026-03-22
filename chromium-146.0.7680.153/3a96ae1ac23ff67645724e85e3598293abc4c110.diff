@@ -1,0 +1,333 @@
+diff --git a/base/threading/scoped_thread_priority.cc b/base/threading/scoped_thread_priority.cc
+index 3ab17d2c714c7..c2da993a53d68 100644
+--- a/base/threading/scoped_thread_priority.cc
++++ b/base/threading/scoped_thread_priority.cc
+@@ -35,58 +35,36 @@ PlatformThreadHandle PortableCurrentThreadHandle() {
+ #endif
+ }
+ 
+-constinit thread_local internal::ScopedBoostPriorityBase* current_boost_scope =
+-    nullptr;
+-
+ }  // namespace
+ 
+-namespace internal {
+-
+-ScopedBoostPriorityBase::ScopedBoostPriorityBase()
+-    : initial_thread_type_(current_boost_scope &&
+-                                   current_boost_scope->target_thread_type_
+-                               ? *current_boost_scope->target_thread_type_
+-                               : PlatformThread::GetCurrentThreadType()) {
+-  previous_boost_scope_ = std::exchange(current_boost_scope, this);
+-}
+-
+-ScopedBoostPriorityBase::~ScopedBoostPriorityBase() {
+-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+-  DCHECK_EQ(current_boost_scope, this);
+-  current_boost_scope = previous_boost_scope_;
+-}
+-
+-bool ScopedBoostPriorityBase::ShouldBoostTo(
+-    ThreadType target_thread_type) const {
+-  return initial_thread_type_ < target_thread_type &&
+-         PlatformThread::CanChangeThreadType(initial_thread_type_,
+-                                             target_thread_type) &&
+-         PlatformThread::CanChangeThreadType(target_thread_type,
+-                                             initial_thread_type_);
+-}
+-
+-}  // namespace internal
+-
+ ScopedBoostPriority::ScopedBoostPriority(ThreadType target_thread_type) {
+   CHECK_LT(target_thread_type, ThreadType::kRealtimeAudio);
+-  const bool should_boost = ShouldBoostTo(target_thread_type);
++  const ThreadType original_thread_type =
++      PlatformThread::GetCurrentThreadType();
++  const bool should_boost = original_thread_type < target_thread_type &&
++                            PlatformThread::CanChangeThreadType(
++                                original_thread_type, target_thread_type) &&
++                            PlatformThread::CanChangeThreadType(
++                                target_thread_type, original_thread_type);
+   if (should_boost) {
+-    target_thread_type_ = target_thread_type;
++    original_thread_type_.emplace(original_thread_type);
+     priority_override_handle_ = internal::SetThreadTypeOverride(
+         PlatformThread::CurrentHandle(), target_thread_type);
+   }
+ }
+ 
+ ScopedBoostPriority::~ScopedBoostPriority() {
+-  if (target_thread_type_) {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  if (original_thread_type_.has_value()) {
+     internal::RemoveThreadTypeOverride(PlatformThread::CurrentHandle(),
+                                        priority_override_handle_,
+-                                       initial_thread_type_);
++                                       *original_thread_type_);
+   }
+ }
+ 
+ ScopedBoostablePriority::ScopedBoostablePriority()
+-    : thread_handle_(PortableCurrentThreadHandle())
++    : initial_thread_type_(PlatformThread::GetCurrentThreadType()),
++      thread_handle_(PortableCurrentThreadHandle())
+ #if BUILDFLAG(IS_WIN)
+       ,
+       scoped_handle_(thread_handle_.platform_handle())
+@@ -95,6 +73,7 @@ ScopedBoostablePriority::ScopedBoostablePriority()
+ }
+ 
+ ScopedBoostablePriority::~ScopedBoostablePriority() {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+   Reset();
+ }
+ 
+@@ -103,14 +82,18 @@ bool ScopedBoostablePriority::BoostPriority(ThreadType target_thread_type) {
+   if (thread_handle_.is_null()) {
+     return false;
+   }
+-  const bool should_boost = ShouldBoostTo(target_thread_type);
++  const bool should_boost = target_thread_type > initial_thread_type_ &&
++                            PlatformThread::CanChangeThreadType(
++                                initial_thread_type_, target_thread_type) &&
++                            PlatformThread::CanChangeThreadType(
++                                target_thread_type, initial_thread_type_);
+   if (!should_boost) {
+     return false;
+   }
+-  if (target_thread_type_) {
++  if (did_override_priority_) {
+     return false;
+   }
+-  target_thread_type_ = target_thread_type;
++  did_override_priority_ = true;
+   priority_override_handle_ =
+       internal::SetThreadTypeOverride(thread_handle_, target_thread_type);
+   return priority_override_handle_;
+@@ -120,10 +103,37 @@ void ScopedBoostablePriority::Reset() {
+   if (thread_handle_.is_null()) {
+     return;
+   }
+-  if (target_thread_type_) {
++  if (did_override_priority_) {
+     internal::RemoveThreadTypeOverride(
+         thread_handle_, priority_override_handle_, initial_thread_type_);
+-    target_thread_type_ = std::nullopt;
++    did_override_priority_ = false;
++  }
++}
++
++TaskMonitoringScopedBoostPriority::TaskMonitoringScopedBoostPriority(
++    ThreadType target_thread_type,
++    RepeatingCallback<bool()> should_boost_callback)
++    : target_thread_type_(target_thread_type),
++      should_boost_callback_(std::move(should_boost_callback)) {
++  CHECK(should_boost_callback_);
++}
++
++TaskMonitoringScopedBoostPriority::~TaskMonitoringScopedBoostPriority() {
++  scoped_boost_priority_.reset();
++}
++
++void TaskMonitoringScopedBoostPriority::WillProcessTask(
++    const PendingTask& pending_task,
++    bool was_blocked_or_low_priority) {
++  bool should_boost = should_boost_callback_.Run();
++  if (scoped_boost_priority_.has_value() == should_boost) {
++    return;
++  }
++
++  if (should_boost) {
++    scoped_boost_priority_.emplace(target_thread_type_);
++  } else {
++    scoped_boost_priority_.reset();
+   }
+ }
+ 
+@@ -148,14 +158,29 @@ ScopedMayLoadLibraryAtBackgroundPriority::
+     return;
+   }
+ 
+-  boost_priority_.emplace(base::ThreadType::kDefault);
++  const base::ThreadType thread_type = PlatformThread::GetCurrentThreadType();
++  if (thread_type == base::ThreadType::kBackground) {
++    original_thread_type_ = thread_type;
++    PlatformThread::SetCurrentThreadType(base::ThreadType::kDefault);
++
++    TRACE_EVENT_BEGIN0(
++        "base",
++        "ScopedMayLoadLibraryAtBackgroundPriority : Priority Increased");
++  }
+ #endif  // BUILDFLAG(IS_WIN)
+ }
+ 
+ ScopedMayLoadLibraryAtBackgroundPriority::
+     ~ScopedMayLoadLibraryAtBackgroundPriority() {
++  // Trace events must be closed in reverse order of opening so that they nest
++  // correctly.
+ #if BUILDFLAG(IS_WIN)
+-  boost_priority_.reset();
++  if (original_thread_type_) {
++    TRACE_EVENT_END0(
++        "base",
++        "ScopedMayLoadLibraryAtBackgroundPriority : Priority Increased");
++    PlatformThread::SetCurrentThreadType(original_thread_type_.value());
++  }
+ 
+   if (already_loaded_) {
+     already_loaded_->store(true, std::memory_order_relaxed);
+diff --git a/base/threading/scoped_thread_priority.h b/base/threading/scoped_thread_priority.h
+index 332ef8bd38ff4..7d1761aeb4772 100644
+--- a/base/threading/scoped_thread_priority.h
++++ b/base/threading/scoped_thread_priority.h
+@@ -56,39 +56,22 @@ enum class ThreadType : int;
+   base::internal::ScopedMayLoadLibraryAtBackgroundPriority BASE_UNIQUIFY( \
+       scoped_may_load_library_at_background_priority)(FROM_HERE, nullptr);
+ 
+-namespace internal {
+-
+-class BASE_EXPORT ScopedBoostPriorityBase {
+- public:
+-  ScopedBoostPriorityBase();
+-  ~ScopedBoostPriorityBase();
+-
+-  ScopedBoostPriorityBase(const ScopedBoostPriorityBase&) = delete;
+-  ScopedBoostPriorityBase& operator=(const ScopedBoostPriorityBase&) = delete;
+-
+- protected:
+-  bool ShouldBoostTo(ThreadType target_thread_type) const;
+-
+-  const ThreadType initial_thread_type_;
+-  std::optional<ThreadType> target_thread_type_;
+-  internal::PlatformPriorityOverride priority_override_handle_ = {};
+-
+- private:
+-  raw_ptr<ScopedBoostPriorityBase> previous_boost_scope_;
+-  THREAD_CHECKER(thread_checker_);
+-};
+-
+-}  // namespace internal
+-
+ // Boosts the current thread's priority to match the priority of threads of
+ // `target_thread_type` in this scope. `target_thread_type` must be lower
+ // priority than kRealtimeAudio, since realtime priority should only be used by
+ // dedicated media threads.
+-class BASE_EXPORT ScopedBoostPriority
+-    : public internal::ScopedBoostPriorityBase {
++class BASE_EXPORT ScopedBoostPriority {
+  public:
+   explicit ScopedBoostPriority(ThreadType target_thread_type);
+   ~ScopedBoostPriority();
++
++  ScopedBoostPriority(const ScopedBoostPriority&) = delete;
++  ScopedBoostPriority& operator=(const ScopedBoostPriority&) = delete;
++
++ private:
++  std::optional<ThreadType> original_thread_type_;
++  internal::PlatformPriorityOverride priority_override_handle_;
++  THREAD_CHECKER(thread_checker_);
+ };
+ 
+ // Allows another thread to temporarily boost the current thread's priority to
+@@ -96,12 +79,15 @@ class BASE_EXPORT ScopedBoostPriority
+ // when the object is destroyed, which must happens on the current thread.
+ // `target_thread_type` must be lower priority than kRealtimeAudio, since
+ // realtime priority should only be used by dedicated media threads.
+-class BASE_EXPORT ScopedBoostablePriority
+-    : public internal::ScopedBoostPriorityBase {
++class BASE_EXPORT ScopedBoostablePriority {
+  public:
+   ScopedBoostablePriority();
+   ~ScopedBoostablePriority();
+ 
++  ScopedBoostablePriority(const ScopedBoostablePriority&) = delete;
++  ScopedBoostablePriority& operator=(const ScopedBoostablePriority& other) =
++      delete;
++
+   // Boosts the priority of the thread where this ScopedBoostablePriority was
+   // created. Can be called from any thread, but requires proper external
+   // synchronization with the constructor, destructor and any other call to
+@@ -116,10 +102,39 @@ class BASE_EXPORT ScopedBoostablePriority
+   void Reset();
+ 
+  private:
++  const ThreadType initial_thread_type_;
+   PlatformThreadHandle thread_handle_;
+ #if BUILDFLAG(IS_WIN)
+   win::ScopedHandle scoped_handle_;
+ #endif
++  bool did_override_priority_{false};
++  internal::PlatformPriorityOverride priority_override_handle_;
++  THREAD_CHECKER(thread_checker_);
++};
++
++// This wraps ScopedBoostPriority with a callback to determine whether
++// the priority should be boosted or not before every task execution.
++class BASE_EXPORT TaskMonitoringScopedBoostPriority : public TaskObserver {
++ public:
++  explicit TaskMonitoringScopedBoostPriority(
++      ThreadType target_thread_type,
++      RepeatingCallback<bool()> should_boost_callback);
++  ~TaskMonitoringScopedBoostPriority() override;
++
++  TaskMonitoringScopedBoostPriority(const TaskMonitoringScopedBoostPriority&) =
++      delete;
++  TaskMonitoringScopedBoostPriority& operator=(
++      const TaskMonitoringScopedBoostPriority&) = delete;
++
++  // TaskObserver implementation:
++  void WillProcessTask(const PendingTask& pending_task,
++                       bool was_blocked_or_low_priority) override;
++  void DidProcessTask(const PendingTask& pending_task) override {}
++
++ private:
++  std::optional<ScopedBoostPriority> scoped_boost_priority_;
++  ThreadType target_thread_type_;
++  RepeatingCallback<bool()> should_boost_callback_;
+ };
+ 
+ namespace internal {
+@@ -142,7 +157,7 @@ class BASE_EXPORT ScopedMayLoadLibraryAtBackgroundPriority {
+  private:
+ #if BUILDFLAG(IS_WIN)
+   // The original priority when invoking entering the scope().
+-  std::optional<ScopedBoostPriority> boost_priority_;
++  std::optional<ThreadType> original_thread_type_;
+   const raw_ptr<std::atomic_bool> already_loaded_;
+ #endif
+ };
+diff --git a/base/threading/scoped_thread_priority_unittest.cc b/base/threading/scoped_thread_priority_unittest.cc
+index ff207dd14402e..28a055b0009c5 100644
+--- a/base/threading/scoped_thread_priority_unittest.cc
++++ b/base/threading/scoped_thread_priority_unittest.cc
+@@ -261,6 +261,30 @@ TEST_F(ScopedThreadPriorityTest, FunctionThatBoostsPriorityOnEveryInvoke) {
+   PlatformThread::SetCurrentThreadType(ThreadType::kDefault);
+ }
+ 
++TEST_F(ScopedThreadPriorityTest, TaskMonitoringBoost) {
++  ASSERT_EQ(ThreadType::kDefault,
++            PlatformThread::GetCurrentEffectiveThreadTypeForTest());
++
++  {
++    // A `TaskMonitoringScopedBoostPriority` object with a callback that always
++    // returns true.
++    TaskMonitoringScopedBoostPriority scoped_boost_priority(
++        ThreadType::kAudioProcessing, BindRepeating([]() { return true; }));
++    // Not boosted before `WillProcessTask` is called.
++    ASSERT_EQ(ThreadType::kDefault,
++              PlatformThread::GetCurrentEffectiveThreadTypeForTest());
++
++    // After `WillProcessTask` is called, the thread priority should be boosted.
++    scoped_boost_priority.WillProcessTask(PendingTask(), false);
++    ASSERT_EQ(ThreadType::kAudioProcessing,
++              PlatformThread::GetCurrentEffectiveThreadTypeForTest());
++  }
++
++  // Back to normal outside the scope.
++  ASSERT_EQ(ThreadType::kDefault,
++            PlatformThread::GetCurrentEffectiveThreadTypeForTest());
++}
++
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ }  // namespace base

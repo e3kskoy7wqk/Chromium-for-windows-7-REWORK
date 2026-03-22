@@ -1,0 +1,337 @@
+diff --git a/sandbox/features.cc b/sandbox/features.cc
+index 1ed46ef1522d8..2053968b8442a 100644
+--- a/sandbox/features.cc
++++ b/sandbox/features.cc
+@@ -4,10 +4,6 @@
+ 
+ #include "sandbox/features.h"
+ 
+-#if BUILDFLAG(IS_WIN)
+-#include "base/win/windows_version.h"
+-#endif
+-
+ namespace sandbox::features {
+ #if BUILDFLAG(IS_WIN)
+ bool IsAppContainerSandboxSupported() {
+diff --git a/sandbox/features.h b/sandbox/features.h
+index c2f8e4af53229..8c0cd7cd9185e 100644
+--- a/sandbox/features.h
++++ b/sandbox/features.h
+@@ -7,6 +7,10 @@
+ 
+ #include "build/build_config.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ namespace sandbox::features {
+ #if BUILDFLAG(IS_WIN)
+ // Returns whether the App Container Sandbox is supported by the current
+diff --git a/sandbox/policy/switches.cc b/sandbox/policy/switches.cc
+index c3b754dfc5f07..80810c5b57588 100644
+--- a/sandbox/policy/switches.cc
++++ b/sandbox/policy/switches.cc
+@@ -10,6 +10,7 @@
+ #include "sandbox/policy/switches.h"
+ 
+ #include "build/build_config.h"
++#include "base/win/windows_version.h"
+ 
+ namespace sandbox::policy::switches {
+ 
+diff --git a/sandbox/win/src/address_sanitizer_test.cc b/sandbox/win/src/address_sanitizer_test.cc
+index 7f437d40d2da8..47466cbbe9376 100644
+--- a/sandbox/win/src/address_sanitizer_test.cc
++++ b/sandbox/win/src/address_sanitizer_test.cc
+@@ -13,6 +13,7 @@
+ #include "base/logging.h"
+ #include "base/path_service.h"
+ #include "base/win/scoped_handle.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/tests/common/controller.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+diff --git a/sandbox/win/src/filesystem_policy.cc b/sandbox/win/src/filesystem_policy.cc
+index c185e013e422a..dfd8197a4fa4e 100644
+--- a/sandbox/win/src/filesystem_policy.cc
++++ b/sandbox/win/src/filesystem_policy.cc
+@@ -10,6 +10,7 @@
+ #include "base/notreached.h"
+ #include "base/win/scoped_handle.h"
+ #include "base/win/windows_handle_util.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/internal_types.h"
+ #include "sandbox/win/src/ipc_tags.h"
+ #include "sandbox/win/src/nt_internals.h"
+diff --git a/sandbox/win/src/handle_inheritance_test.cc b/sandbox/win/src/handle_inheritance_test.cc
+index 9b7e3ba0d9592..44c3608e11036 100644
+--- a/sandbox/win/src/handle_inheritance_test.cc
++++ b/sandbox/win/src/handle_inheritance_test.cc
+@@ -7,6 +7,7 @@
+ #include "base/files/file_util.h"
+ #include "base/files/scoped_temp_dir.h"
+ #include "base/win/scoped_handle.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/tests/common/controller.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+diff --git a/sandbox/win/src/heap_helper.cc b/sandbox/win/src/heap_helper.cc
+index 2ac0928f9b6c7..907249f71765f 100644
+--- a/sandbox/win/src/heap_helper.cc
++++ b/sandbox/win/src/heap_helper.cc
+@@ -9,6 +9,7 @@
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr_exclusion.h"
+ #include "base/memory/ref_counted.h"
++#include "base/win/windows_version.h"
+ 
+ namespace sandbox {
+ namespace {
+@@ -97,6 +98,10 @@ bool HeapFlags(HANDLE handle, DWORD* flags) {
+ }
+ 
+ HANDLE FindCsrPortHeap() {
++  if (base::win::GetVersion() < base::win::Version::WIN10) {
++    // This functionality has not been verified on versions before Win10.
++    return nullptr;
++  }
+   DWORD number_of_heaps = ::GetProcessHeaps(0, nullptr);
+   auto all_heaps = base::HeapArray<HANDLE>::Uninit(number_of_heaps);
+   if (::GetProcessHeaps(number_of_heaps, all_heaps.data()) != number_of_heaps) {
+diff --git a/sandbox/win/src/job.cc b/sandbox/win/src/job.cc
+index 6e1cccd11abab..d5e230719a210 100644
+--- a/sandbox/win/src/job.cc
++++ b/sandbox/win/src/job.cc
+@@ -9,6 +9,7 @@
+ 
+ #include <utility>
+ 
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/security_level.h"
+ 
+ namespace sandbox {
+diff --git a/sandbox/win/src/lpc_policy_test.cc b/sandbox/win/src/lpc_policy_test.cc
+index e11c3c3e31aa4..fb317d594a2bd 100644
+--- a/sandbox/win/src/lpc_policy_test.cc
++++ b/sandbox/win/src/lpc_policy_test.cc
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ 
++#include "base/win/windows_version.h"
+ #include "base/containers/heap_array.h"
+ #include "build/build_config.h"
+ #include "sandbox/win/src/heap_helper.h"
+@@ -25,11 +26,12 @@ namespace sandbox {
+ namespace {
+ 
+ bool CsrssDisconnectSupported() {
+-#if defined(_WIN64) && !defined(ADDRESS_SANITIZER)
+-  return true;
+-#else
+-  return false;
+-#endif  // defined(_WIN64) && !defined(ADDRESS_SANITIZER)
++  // This functionality has not been verified on versions before Win10.
++  if (base::win::GetVersion() < base::win::Version::WIN10)
++    return false;
++
++  // Does not work on 32-bit on x64 (ie Wow64).
++  return (!base::win::OSInfo::GetInstance()->IsWowX86OnAMD64());
+ }
+ 
+ }  // namespace
+@@ -214,10 +216,11 @@ TEST(LpcPolicyTest, TestCanFindCsrPortHeap) {
+ #endif
+ 
+ TEST(LpcPolicyTest, MAYBE_TestHeapFlags) {
+-  if (!CsrssDisconnectSupported())
++  if (!CsrssDisconnectSupported()) {
++    // This functionality has not been verified on versions before Win10.
+     return;
+-
+-  // Windows does not support callers supplying arbitrary flag values. So we
++  }
++  // Windows does not support callers supplying arbritary flag values. So we
+   // write some non-trivial value to reduce the chance we match this in random
+   // data.
+   DWORD flags = 0x41007;
+diff --git a/sandbox/win/src/policy_broker.cc b/sandbox/win/src/policy_broker.cc
+index e8226eea36fdd..180a34b5bc965 100644
+--- a/sandbox/win/src/policy_broker.cc
++++ b/sandbox/win/src/policy_broker.cc
+@@ -10,6 +10,7 @@
+ 
+ #include "base/check.h"
+ #include "base/win/pe_image.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/interception.h"
+ #include "sandbox/win/src/interceptors.h"
+ #include "sandbox/win/src/internal_types.h"
+diff --git a/sandbox/win/src/process_mitigations_win32k_dispatcher.cc b/sandbox/win/src/process_mitigations_win32k_dispatcher.cc
+index 4fb3b5b76bb65..d637e32a5b576 100644
+--- a/sandbox/win/src/process_mitigations_win32k_dispatcher.cc
++++ b/sandbox/win/src/process_mitigations_win32k_dispatcher.cc
+@@ -10,6 +10,7 @@
+ #include "base/memory/platform_shared_memory_region.h"
+ #include "base/memory/unsafe_shared_memory_region.h"
+ #include "base/unguessable_token.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/interception.h"
+ #include "sandbox/win/src/interceptors.h"
+ #include "sandbox/win/src/ipc_tags.h"
+diff --git a/sandbox/win/src/process_thread_interception.cc b/sandbox/win/src/process_thread_interception.cc
+index 1cbb219eb0164..7baeebd1d9e32 100644
+--- a/sandbox/win/src/process_thread_interception.cc
++++ b/sandbox/win/src/process_thread_interception.cc
+@@ -6,6 +6,7 @@
+ #include <stdint.h>
+ 
+ #include <optional>
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/crosscall_client.h"
+ #include "sandbox/win/src/ipc_tags.h"
+ #include "sandbox/win/src/policy_params.h"
+diff --git a/sandbox/win/src/restricted_token_utils.cc b/sandbox/win/src/restricted_token_utils.cc
+index d16bf8fdfe046..c02c0931b68d7 100644
+--- a/sandbox/win/src/restricted_token_utils.cc
++++ b/sandbox/win/src/restricted_token_utils.cc
+@@ -13,6 +13,7 @@
+ #include "base/notreached.h"
+ #include "base/win/access_token.h"
+ #include "base/win/security_descriptor.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/acl.h"
+ #include "sandbox/win/src/restricted_token.h"
+ #include "sandbox/win/src/sandbox_nt_util.h"
+diff --git a/sandbox/win/src/sandbox_policy_base.cc b/sandbox/win/src/sandbox_policy_base.cc
+index c77e7b5ed1812..c93d4212a126c 100644
+--- a/sandbox/win/src/sandbox_policy_base.cc
++++ b/sandbox/win/src/sandbox_policy_base.cc
+@@ -192,12 +192,16 @@ ResultCode ConfigBase::AddRuleInternal(SubSystem subsystem,
+ }
+ 
+ ResultCode ConfigBase::SetFakeGdiInit() {
++  // Win32k intercept rules only supported on Windows 8 and above. This must
++  // match the version checks in process_mitigations.cc for consistency.
++  if (base::win::GetVersion() >= base::win::Version::WIN8) {
+   DCHECK_EQ(MITIGATION_WIN32K_DISABLE, mitigations_ & MITIGATION_WIN32K_DISABLE)
+       << "Enable MITIGATION_WIN32K_DISABLE before adding win32k policy "
+          "rules.";
+   if (!ProcessMitigationsWin32KLockdownPolicy::GenerateRules(PolicyMaker())) {
+     return SBOX_ERROR_BAD_PARAMS;
+   }
++  }
+   return SBOX_ALL_OK;
+ }
+ 
+@@ -395,8 +399,10 @@ ResultCode ConfigBase::SetDisconnectCsrss() {
+ // CreateThread EAT patch used when this is enabled.
+ // See https://crbug.com/783296#c27.
+ #if defined(_WIN64) && !defined(ADDRESS_SANITIZER)
++  if (base::win::GetVersion() >= base::win::Version::WIN10) {
+   is_csrss_connected_ = false;
+   AddKernelObjectToClose(HandleToClose::kDisconnectCsrss);
++  }
+ #endif  // !defined(_WIN64) || defined(ADDRESS_SANITIZER)
+ }
+ 
+diff --git a/sandbox/win/src/startup_information_helper.cc b/sandbox/win/src/startup_information_helper.cc
+index 1d0767a4bf4c1..cb110efaed355 100644
+--- a/sandbox/win/src/startup_information_helper.cc
++++ b/sandbox/win/src/startup_information_helper.cc
+@@ -68,6 +68,8 @@ void StartupInformationHelper::AddInheritedHandle(HANDLE handle) {
+ }
+ 
+ void StartupInformationHelper::SetAppContainer(AppContainer* container) {
++  // Only supported for Windows 8+.
++  DCHECK(base::win::GetVersion() >= base::win::Version::WIN8);
+   // LowPrivilegeAppContainer only supported for Windows 10+
+   DCHECK(!container->GetEnableLowPrivilegeAppContainer() ||
+          base::win::GetVersion() >= base::win::Version::WIN10_RS1);
+diff --git a/sandbox/win/src/startup_information_helper.h b/sandbox/win/src/startup_information_helper.h
+index 0c82da5e4c643..20ebc76e0764e 100644
+--- a/sandbox/win/src/startup_information_helper.h
++++ b/sandbox/win/src/startup_information_helper.h
+@@ -11,6 +11,7 @@
+ 
+ #include "base/memory/scoped_refptr.h"
+ #include "base/win/startup_information.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/app_container_base.h"
+ #include "sandbox/win/src/process_mitigations.h"
+ #include "sandbox/win/src/security_capabilities.h"
+diff --git a/sandbox/win/src/target_process.cc b/sandbox/win/src/target_process.cc
+index a2ab0ca5068b0..a0e608a98fb38 100644
+--- a/sandbox/win/src/target_process.cc
++++ b/sandbox/win/src/target_process.cc
+@@ -19,6 +19,7 @@
+ #include "base/win/scoped_handle.h"
+ #include "base/win/security_util.h"
+ #include "base/win/startup_information.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/crosscall_client.h"
+ #include "sandbox/win/src/crosscall_server.h"
+ #include "sandbox/win/src/policy_low_level.h"
+diff --git a/sandbox/win/src/target_services.cc b/sandbox/win/src/target_services.cc
+index faf3cc0680a3e..2a45f9ad58072 100644
+--- a/sandbox/win/src/target_services.cc
++++ b/sandbox/win/src/target_services.cc
+@@ -13,6 +13,7 @@
+ #include "base/containers/span.h"
+ #include "base/logging.h"
+ #include "base/win/access_token.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/acl.h"
+ #include "sandbox/win/src/crosscall_client.h"
+ #include "sandbox/win/src/handle_closer_agent.h"
+diff --git a/sandbox/win/src/window.cc b/sandbox/win/src/window.cc
+index b467a56b0d4fc..91ed4c98e47d6 100644
+--- a/sandbox/win/src/window.cc
++++ b/sandbox/win/src/window.cc
+@@ -13,6 +13,7 @@
+ #include "base/win/security_descriptor.h"
+ #include "base/win/sid.h"
+ #include "base/win/win_util.h"
++#include "base/win/windows_version.h"
+ 
+ namespace sandbox {
+ 
+@@ -135,8 +136,10 @@ ResultCode CreateAltDesktop(HWINSTA winsta, HDESK* desktop) {
+       // replace the NULL DACL with one that has a single ACE that allows access
+       // to everyone, so the desktop remains accessible when we further modify
+       // the DACL. Also need WinBuiltinAnyPackageSid for AppContainer processes.
+-    sd->SetDaclEntry(base::win::WellKnownSid::kAllApplicationPackages,
+-                     base::win::SecurityAccessMode::kGrant, GENERIC_ALL, 0);
++      if (base::win::GetVersion() >= base::win::Version::WIN8) {
++      sd->SetDaclEntry(base::win::WellKnownSid::kAllApplicationPackages,
++                       base::win::SecurityAccessMode::kGrant, GENERIC_ALL, 0);
++      }
+     sd->SetDaclEntry(base::win::WellKnownSid::kWorld,
+                      base::win::SecurityAccessMode::kGrant, GENERIC_ALL, 0);
+   }
+diff --git a/sandbox/win/tests/integration_tests/cfi_unittest.cc b/sandbox/win/tests/integration_tests/cfi_unittest.cc
+index 31c7e554484a8..cbf30b93124b3 100644
+--- a/sandbox/win/tests/integration_tests/cfi_unittest.cc
++++ b/sandbox/win/tests/integration_tests/cfi_unittest.cc
+@@ -9,6 +9,7 @@
+ #include "base/files/scoped_temp_dir.h"
+ #include "base/notreached.h"
+ #include "base/path_service.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+@@ -76,6 +77,12 @@ TEST(CFGSupportTests, LongJmp) {
+ // Make sure Microsoft binaries compiled with CFG cannot call indirect pointers
+ // not listed in the loader config for this test binary.
+ TEST(CFGSupportTests, MsIndirectFailure) {
++  // CFG is only supported on >= Win8.1 Update 3.
++  // Not checking for update, since test infra is updated and it would add
++  // a lot of complexity.
++  if (base::win::GetVersion() < base::win::Version::WIN8_1)
++    return;
++
+   base::FilePath exe_path;
+   ASSERT_TRUE(base::PathService::Get(base::FILE_EXE, &exe_path));
+ 

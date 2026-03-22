@@ -1,0 +1,58 @@
+diff --git a/base/win/win_util.cc b/base/win/win_util.cc
+index d08976d11de6e..dcfa47b6d6fb5 100644
+--- a/base/win/win_util.cc
++++ b/base/win/win_util.cc
+@@ -606,10 +606,20 @@ bool IsJoinedToAzureAD() {
+ bool IsUser32AndGdi32Available() {
+   static const bool is_user32_and_gdi32_available = [] {
+     // If win32k syscalls aren't disabled, then user32 and gdi32 are available.
++
++    using GetProcessMitigationPolicyType =
++        decltype(GetProcessMitigationPolicy)*;
++    GetProcessMitigationPolicyType get_process_mitigation_policy_func =
++        reinterpret_cast<GetProcessMitigationPolicyType>(GetProcAddress(
++            GetModuleHandle(L"kernel32.dll"), "GetProcessMitigationPolicy"));
++
++    if (!get_process_mitigation_policy_func)
++      return true;
++
+     PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY policy = {};
+-    if (::GetProcessMitigationPolicy(GetCurrentProcess(),
+-                                     ProcessSystemCallDisablePolicy, &policy,
+-                                     sizeof(policy))) {
++    if (get_process_mitigation_policy_func(GetCurrentProcess(),
++                                           ProcessSystemCallDisablePolicy,
++                                           &policy, sizeof(policy))) {
+       return policy.DisallowWin32kSystemCalls == 0;
+     }
+ 
+diff --git a/chrome/services/util_win/processor_metrics.cc b/chrome/services/util_win/processor_metrics.cc
+index 4852a753e5edf..c8cfe9fb0f1f2 100644
+--- a/chrome/services/util_win/processor_metrics.cc
++++ b/chrome/services/util_win/processor_metrics.cc
+@@ -107,6 +107,9 @@ void RecordCetAvailability() {
+       reinterpret_cast<decltype(&IsUserCetAvailableInEnvironment)>(
+           ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"),
+                            "IsUserCetAvailableInEnvironment"));
++  auto get_process_mitigation_policy =
++      reinterpret_cast<decltype(&GetProcessMitigationPolicy)>(::GetProcAddress(
++          ::GetModuleHandleW(L"kernel32.dll"), "GetProcessMitigationPolicy"));
+ 
+   if (is_user_cet_available_in_environment) {
+     available = is_user_cet_available_in_environment(
+@@ -114,11 +117,11 @@ void RecordCetAvailability() {
+   }
+   base::UmaHistogramBoolean("Windows.CetAvailable", available);
+ 
+-  if (available) {
++  if (available && get_process_mitigation_policy) {
+     PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY policy = {0};
+-    if (::GetProcessMitigationPolicy(GetCurrentProcess(),
+-                                     ProcessUserShadowStackPolicy, &policy,
+-                                     sizeof(policy))) {
++    if (get_process_mitigation_policy(GetCurrentProcess(),
++                                      ProcessUserShadowStackPolicy, &policy,
++                                      sizeof(policy))) {
+       base::UmaHistogramBoolean("Windows.CetEnabled",
+                                 policy.EnableUserShadowStack);
+     }

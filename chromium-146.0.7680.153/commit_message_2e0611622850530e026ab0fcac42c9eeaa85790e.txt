@@ -1,0 +1,1 @@
+Switch to DXVA GUIDs for HEVC range extension decode.    2025/4/5 20:52:58    2e0611622850530e026ab0fcac42c9eeaa85790e

@@ -1,0 +1,1163 @@
+diff --git a/media/base/win/d3d12_mocks.cc b/media/base/win/d3d12_mocks.cc
+index f3c459f75380c..96bd718ca3f53 100644
+--- a/media/base/win/d3d12_mocks.cc
++++ b/media/base/win/d3d12_mocks.cc
+@@ -15,7 +15,4 @@ D3D12ResourceMock::~D3D12ResourceMock() = default;
+ D3D12GraphicsCommandListMock::D3D12GraphicsCommandListMock() = default;
+ D3D12GraphicsCommandListMock::~D3D12GraphicsCommandListMock() = default;
+ 
+-D3D12FenceMock::D3D12FenceMock() = default;
+-D3D12FenceMock::~D3D12FenceMock() = default;
+-
+ }  // namespace media
+diff --git a/media/base/win/d3d12_mocks.h b/media/base/win/d3d12_mocks.h
+index c0e2c6326960a..040dc32e71c15 100644
+--- a/media/base/win/d3d12_mocks.h
++++ b/media/base/win/d3d12_mocks.h
+@@ -417,33 +417,6 @@ class D3D12GraphicsCommandListMock
+                             UINT64 CountBufferOffset));
+ };
+ 
+-class D3D12FenceMock
+-    : public Microsoft::WRL::RuntimeClass<
+-          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+-          ID3D12Fence> {
+- public:
+-  D3D12FenceMock();
+-  ~D3D12FenceMock() override;
+-
+-  // Interfaces of ID3D12Object
+-
+-  MOCK_STDCALL_METHOD3(GetPrivateData, HRESULT(REFGUID, UINT*, void*));
+-  MOCK_STDCALL_METHOD3(SetPrivateData, HRESULT(REFGUID, UINT, const void*));
+-  MOCK_STDCALL_METHOD2(SetPrivateDataInterface,
+-                       HRESULT(REFGUID, const IUnknown*));
+-  MOCK_STDCALL_METHOD1(SetName, HRESULT(LPCWSTR));
+-
+-  // Interface of ID3D12DeviceChild
+-
+-  MOCK_STDCALL_METHOD2(GetDevice, HRESULT(REFIID riid, void** ppvDevice));
+-
+-  // Interfaces of ID3D12Fence
+-
+-  MOCK_STDCALL_METHOD0(GetCompletedValue, UINT64(void));
+-  MOCK_STDCALL_METHOD2(SetEventOnCompletion, HRESULT(UINT64, HANDLE));
+-  MOCK_STDCALL_METHOD1(Signal, HRESULT(UINT64));
+-};
+-
+ }  // namespace media
+ 
+ #endif  // MEDIA_BASE_WIN_D3D12_MOCKS_H_
+diff --git a/media/gpu/windows/d3d12_copy_command_list_wrapper.cc b/media/gpu/windows/d3d12_copy_command_list_wrapper.cc
+index f412f0552d01e..031a36d7b83f5 100644
+--- a/media/gpu/windows/d3d12_copy_command_list_wrapper.cc
++++ b/media/gpu/windows/d3d12_copy_command_list_wrapper.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "media/gpu/windows/d3d12_copy_command_list_wrapper.h"
+ 
++#include "third_party/microsoft_dxheaders/src/include/directx/d3dx12_barriers.h"
++
+ namespace media {
+ 
+ // static
+@@ -62,22 +64,18 @@ D3D12CopyCommandQueueWrapper::D3D12CopyCommandQueueWrapper(
+ 
+ D3D12CopyCommandQueueWrapper::~D3D12CopyCommandQueueWrapper() = default;
+ 
+-bool D3D12CopyCommandQueueWrapper::CopyTextureRegion(
++void D3D12CopyCommandQueueWrapper::CopyTextureRegion(
+     const D3D12_TEXTURE_COPY_LOCATION& dst_location,
+     uint32_t x,
+     uint32_t y,
+     uint32_t z,
+     const D3D12_TEXTURE_COPY_LOCATION& src_location,
+     const D3D12_BOX* src_box) {
+-  if (!is_open_ && !Reset()) {
+-    return false;
+-  }
+   command_list_->CopyTextureRegion(&dst_location, x, y, z, &src_location,
+                                    src_box);
+-  return true;
+ }
+ 
+-bool D3D12CopyCommandQueueWrapper::CopyBufferToNV12Texture(
++void D3D12CopyCommandQueueWrapper::CopyBufferToNV12Texture(
+     ID3D12Resource* target_texture,
+     ID3D12Resource* source_buffer,
+     uint32_t y_offset,
+@@ -90,73 +88,64 @@ bool D3D12CopyCommandQueueWrapper::CopyBufferToNV12Texture(
+   // The COPY_SOURCE/COPY_DEST states can be promote/decayed. So the resource
+   // barriers are not necessary here. See
+   // https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12#common-state-promotion
+-  return CopyTextureRegion(
+-             {.pResource = target_texture,
+-              .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+-              .SubresourceIndex = 0},
+-             0, 0, 0,
+-             {.pResource = source_buffer,
+-              .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+-              .PlacedFootprint =
+-                  {
+-                      .Offset = y_offset,
+-                      .Footprint = {.Format = DXGI_FORMAT_R8_TYPELESS,
+-                                    .Width = static_cast<UINT>(
+-                                        target_texture_desc.Width),
+-                                    .Height = target_texture_desc.Height,
+-                                    .Depth = 1,
+-                                    .RowPitch = y_stride},
+-                  }}) &&
+-         CopyTextureRegion(
+-             {.pResource = target_texture,
+-              .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+-              .SubresourceIndex = 1},
+-             0, 0, 0,
+-             {.pResource = source_buffer,
+-              .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+-              .PlacedFootprint = {
+-                  .Offset = uv_offset,
+-                  .Footprint = {.Format = DXGI_FORMAT_R8G8_TYPELESS,
+-                                .Width = static_cast<UINT>(
+-                                             target_texture_desc.Width + 1) /
+-                                         2,
+-                                .Height = (target_texture_desc.Height + 1) / 2,
+-                                .Depth = 1,
+-                                .RowPitch = uv_stride},
+-              }});
++  CopyTextureRegion(
++      {.pResource = target_texture,
++       .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
++       .SubresourceIndex = 0},
++      0, 0, 0,
++      {.pResource = source_buffer,
++       .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
++       .PlacedFootprint = {
++           .Offset = y_offset,
++           .Footprint = {.Format = DXGI_FORMAT_R8_TYPELESS,
++                         .Width = static_cast<UINT>(target_texture_desc.Width),
++                         .Height = target_texture_desc.Height,
++                         .Depth = 1,
++                         .RowPitch = y_stride},
++       }});
++  CopyTextureRegion(
++      {.pResource = target_texture,
++       .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
++       .SubresourceIndex = 1},
++      0, 0, 0,
++      {.pResource = source_buffer,
++       .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
++       .PlacedFootprint = {
++           .Offset = uv_offset,
++           .Footprint = {.Format = DXGI_FORMAT_R8G8_TYPELESS,
++                         .Width =
++                             static_cast<UINT>(target_texture_desc.Width + 1) /
++                             2,
++                         .Height = (target_texture_desc.Height + 1) / 2,
++                         .Depth = 1,
++                         .RowPitch = uv_stride},
++       }});
+ }
+ 
+-D3D12FenceAndValue D3D12CopyCommandQueueWrapper::Execute() {
++bool D3D12CopyCommandQueueWrapper::ExecuteAndWait() {
+   HRESULT hr = command_list_->Close();
+   if (FAILED(hr)) {
+     LOG(ERROR) << "Failed to close d3d12 copy command list: "
+                << logging::SystemErrorCodeToString(hr);
+-    return {};
++    return false;
+   }
+-  is_open_ = false;
+ 
+   ID3D12CommandList* command_lists[] = {command_list_.Get()};
+   command_queue_->ExecuteCommandLists(1, command_lists);
+-  auto value_or_error = fence_->Signal(*command_queue_.Get());
+-  if (!value_or_error.has_value()) {
+-    LOG(ERROR) << "Failed to call Signal: "
+-               << std::move(value_or_error).error().message();
+-    return {};
++  D3D11Status status = fence_->SignalAndWaitCPU(*command_queue_.Get());
++  if (!status.is_ok()) {
++    LOG(ERROR) << "Failed to SignalAndWait: " << status.message();
++    return false;
+   }
+-  return {fence_->Get(), std::move(value_or_error).value()};
++  return Reset();
+ }
+ 
+ bool D3D12CopyCommandQueueWrapper::Reset() {
+-  HRESULT hr;
+-  // Resetting command allocator is only valid after the GPU has finished
+-  // executing all command lists that were recorded with it.
+-  if (fence_->GetCompletedValue() >= fence_->Value()) {
+-    hr = command_allocator_->Reset();
+-    if (FAILED(hr)) {
+-      LOG(ERROR) << "Failed to reset d3d12 copy command allocator: "
+-                 << logging::SystemErrorCodeToString(hr);
+-      return false;
+-    }
++  HRESULT hr = command_allocator_->Reset();
++  if (FAILED(hr)) {
++    LOG(ERROR) << "Failed to reset d3d12 copy command allocator: "
++               << logging::SystemErrorCodeToString(hr);
++    return false;
+   }
+   hr = command_list_->Reset(command_allocator_.Get(), nullptr);
+   if (FAILED(hr)) {
+@@ -164,7 +153,6 @@ bool D3D12CopyCommandQueueWrapper::Reset() {
+                << logging::SystemErrorCodeToString(hr);
+     return false;
+   }
+-  is_open_ = true;
+   return true;
+ }
+ 
+diff --git a/media/gpu/windows/d3d12_copy_command_list_wrapper.h b/media/gpu/windows/d3d12_copy_command_list_wrapper.h
+index 78fe8228cd3f3..39d9640b335ea 100644
+--- a/media/gpu/windows/d3d12_copy_command_list_wrapper.h
++++ b/media/gpu/windows/d3d12_copy_command_list_wrapper.h
+@@ -13,7 +13,6 @@
+ #include "base/containers/span.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "media/gpu/windows/d3d12_fence.h"
+-#include "media/gpu/windows/d3d12_helpers.h"
+ 
+ namespace media {
+ 
+@@ -29,30 +28,29 @@ class D3D12CopyCommandQueueWrapper {
+       Microsoft::WRL::ComPtr<ID3D12Fence> fence);
+   ~D3D12CopyCommandQueueWrapper();
+ 
+-  bool CopyTextureRegion(const D3D12_TEXTURE_COPY_LOCATION& dst_location,
++  void CopyTextureRegion(const D3D12_TEXTURE_COPY_LOCATION& dst_location,
+                          uint32_t x,
+                          uint32_t y,
+                          uint32_t z,
+                          const D3D12_TEXTURE_COPY_LOCATION& src_location,
+                          const D3D12_BOX* src_box = nullptr);
+ 
+-  bool CopyBufferToNV12Texture(ID3D12Resource* target_texture,
++  void CopyBufferToNV12Texture(ID3D12Resource* target_texture,
+                                ID3D12Resource* source_buffer,
+                                uint32_t y_offset,
+                                uint32_t y_stride,
+                                uint32_t uv_offset,
+                                uint32_t uv_stride);
+ 
+-  D3D12FenceAndValue Execute();
++  bool ExecuteAndWait();
+ 
+  private:
+-  // This will be automatically called before CopyTextureRegion().
++  // This will be automatically called after ExecuteAndWait().
+   bool Reset();
+ 
+   Microsoft::WRL::ComPtr<ID3D12CommandQueue> command_queue_;
+   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator_;
+   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list_;
+-  bool is_open_ = true;
+   scoped_refptr<D3D12Fence> fence_;
+ };
+ 
+diff --git a/media/gpu/windows/d3d12_fence.cc b/media/gpu/windows/d3d12_fence.cc
+index 7bd9acd4c2613..fe3f4a9737f3f 100644
+--- a/media/gpu/windows/d3d12_fence.cc
++++ b/media/gpu/windows/d3d12_fence.cc
+@@ -6,16 +6,13 @@
+ 
+ #include <d3d11_4.h>
+ 
+-#include "base/check_is_test.h"
+ #include "base/logging.h"
+ #include "base/threading/scoped_blocking_call.h"
+ #include "base/win/scoped_handle.h"
+ 
+ namespace media {
+ 
+-D3D12Fence::D3D12Fence(ComD3D12Fence fence) : fence_(std::move(fence)) {
+-  CHECK(fence_);
+-}
++D3D12Fence::D3D12Fence(ComD3D12Fence fence) : fence_(std::move(fence)) {}
+ 
+ // static
+ scoped_refptr<D3D12Fence> D3D12Fence::Create(ID3D12Device* device,
+@@ -30,10 +27,6 @@ scoped_refptr<D3D12Fence> D3D12Fence::Create(ID3D12Device* device,
+   return base::MakeRefCounted<D3D12Fence>(std::move(d3d12_fence));
+ }
+ 
+-ID3D12Fence* D3D12Fence::Get() const {
+-  return fence_.Get();
+-}
+-
+ uint64_t D3D12Fence::Value() const {
+   return fence_value_;
+ }
+diff --git a/media/gpu/windows/d3d12_fence.h b/media/gpu/windows/d3d12_fence.h
+index 618e96102528d..0a4969554f30b 100644
+--- a/media/gpu/windows/d3d12_fence.h
++++ b/media/gpu/windows/d3d12_fence.h
+@@ -10,15 +10,13 @@
+ 
+ #include "base/memory/ref_counted.h"
+ #include "base/memory/scoped_refptr.h"
+-#include "media/gpu/media_gpu_export.h"
+ #include "media/gpu/windows/d3d11_status.h"
+ #include "media/gpu/windows/d3d_com_defs.h"
+ 
+ namespace media {
+ 
+ // D3D12Fence wraps a ID3D12Fence pointer and its last signaled fence value.
+-class MEDIA_GPU_EXPORT D3D12Fence
+-    : public base::RefCountedThreadSafe<D3D12Fence> {
++class D3D12Fence : public base::RefCountedThreadSafe<D3D12Fence> {
+  public:
+   REQUIRE_ADOPTION_FOR_REFCOUNTED_TYPE();
+ 
+@@ -28,9 +26,6 @@ class MEDIA_GPU_EXPORT D3D12Fence
+       ID3D12Device* device,
+       D3D12_FENCE_FLAGS flags = D3D12_FENCE_FLAG_NONE);
+ 
+-  // Get the underlying ID3D12Fence pointer.
+-  ID3D12Fence* Get() const;
+-
+   // Get the last signaled fence value.
+   uint64_t Value() const;
+ 
+diff --git a/media/gpu/windows/d3d12_helpers.cc b/media/gpu/windows/d3d12_helpers.cc
+index 720da326d601a..0c95115501685 100644
+--- a/media/gpu/windows/d3d12_helpers.cc
++++ b/media/gpu/windows/d3d12_helpers.cc
+@@ -14,25 +14,6 @@
+ 
+ namespace media {
+ 
+-D3D12PictureBuffer::D3D12PictureBuffer(
+-    const Microsoft::WRL::ComPtr<ID3D12Resource>& resource,
+-    UINT subresource,
+-    const D3D12FenceAndValue& fence_and_value)
+-    : resource(resource),
+-      subresource(subresource),
+-      fence_and_value(fence_and_value) {}
+-
+-D3D12PictureBuffer::~D3D12PictureBuffer() = default;
+-
+-D3D12PictureBuffer::D3D12PictureBuffer(const D3D12PictureBuffer& other) =
+-    default;
+-D3D12PictureBuffer::D3D12PictureBuffer(D3D12PictureBuffer&& other) noexcept =
+-    default;
+-D3D12PictureBuffer& D3D12PictureBuffer::operator=(
+-    const D3D12PictureBuffer& other) = default;
+-D3D12PictureBuffer& D3D12PictureBuffer::operator=(
+-    D3D12PictureBuffer&& other) noexcept = default;
+-
+ D3D12ReferenceFrameList::D3D12ReferenceFrameList(ComD3D12VideoDecoderHeap heap)
+     : heap_(std::move(heap)) {
+   std::fill(heaps_.begin(), heaps_.end(), heap_.Get());
+diff --git a/media/gpu/windows/d3d12_helpers.h b/media/gpu/windows/d3d12_helpers.h
+index 8e074cf442a82..af3bcf56d3ddf 100644
+--- a/media/gpu/windows/d3d12_helpers.h
++++ b/media/gpu/windows/d3d12_helpers.h
+@@ -13,7 +13,6 @@
+ #include "media/base/video_codecs.h"
+ #include "media/gpu/h264_dpb.h"
+ #include "media/gpu/media_gpu_export.h"
+-#include "media/gpu/windows/d3d12_fence.h"
+ #include "media/gpu/windows/d3d_com_defs.h"
+ #include "media/parsers/h265_parser.h"
+ #include "media/parsers/vp9_parser.h"
+@@ -30,29 +29,6 @@ struct D3D12HeapProperties {
+ 
+ class D3D11PictureBuffer;
+ 
+-using D3D11FenceAndValue =
+-    std::pair<Microsoft::WRL::ComPtr<ID3D11Fence>, uint64_t>;
+-using D3D12FenceAndValue =
+-    std::pair<Microsoft::WRL::ComPtr<ID3D12Fence>, uint64_t>;
+-
+-struct MEDIA_GPU_EXPORT D3D12PictureBuffer {
+-  D3D12PictureBuffer(
+-      const Microsoft::WRL::ComPtr<ID3D12Resource>& resource = nullptr,
+-      UINT subresource = 0,
+-      const D3D12FenceAndValue& fence_and_value = {});
+-  ~D3D12PictureBuffer();
+-
+-  D3D12PictureBuffer(const D3D12PictureBuffer& other);
+-  D3D12PictureBuffer(D3D12PictureBuffer&& other) noexcept;
+-  D3D12PictureBuffer& operator=(const D3D12PictureBuffer& other);
+-  D3D12PictureBuffer& operator=(D3D12PictureBuffer&& other) noexcept;
+-
+-  Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+-  UINT subresource = 0;
+-  // Fence and value indicating when the resource is ready for read.
+-  D3D12FenceAndValue fence_and_value;
+-};
+-
+ // Manages reference frame buffers, for reference frame descriptors to index on.
+ class MEDIA_GPU_EXPORT D3D12ReferenceFrameList {
+  public:
+@@ -160,6 +136,8 @@ GetD3D12VideoDecodeGUID(VideoCodecProfile profile,
+                         VideoChromaSampling chroma_sampling);
+ 
+ // Helpers for synchronizing same underlying resource between D3D11 and D3D12.
++using D3D11FenceAndValue =
++    std::pair<Microsoft::WRL::ComPtr<ID3D11Fence>, uint64_t>;
+ class MEDIA_GPU_EXPORT D3D11To12Fence {
+  public:
+   explicit D3D11To12Fence(Microsoft::WRL::ComPtr<ID3D11Fence> d3d11_fence,
+diff --git a/media/gpu/windows/d3d12_video_encode_accelerator.cc b/media/gpu/windows/d3d12_video_encode_accelerator.cc
+index 2b01726460652..48a6c5a2d1293 100644
+--- a/media/gpu/windows/d3d12_video_encode_accelerator.cc
++++ b/media/gpu/windows/d3d12_video_encode_accelerator.cc
+@@ -7,7 +7,6 @@
+ #include <d3d11.h>
+ 
+ #include <algorithm>
+-#include <ranges>
+ 
+ #include "base/check_is_test.h"
+ #include "base/logging.h"
+@@ -16,6 +15,7 @@
+ #include "base/strings/strcat.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/synchronization/waitable_event.h"
+ #include "base/task/bind_post_task.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -140,8 +140,11 @@ struct D3D12VideoEncodeAccelerator::InputFrameRef {
+   bool resolve_shared_image_requested = false;
+   bool resolving_shared_image = false;
+   gpu::Mailbox shared_image_token;
+-  D3D12PictureBuffer resolved_picture;
++  Microsoft::WRL::ComPtr<ID3D12Resource> resolved_resource;
+   base::TimeTicks frame_encode_start_time = base::TimeTicks::Now();
++  // Fence value for GPU-side synchronization of the source texture when
++  // encoding shared images.
++  std::optional<uint64_t> source_texture_fence_value;
+ };
+ 
+ void GenerateResourceOnSynTokenReleased(
+@@ -644,7 +647,7 @@ void D3D12VideoEncodeAccelerator::RequestEncodingParametersChangeTask(
+   }
+ }
+ 
+-D3D12PictureBuffer
++Microsoft::WRL::ComPtr<ID3D12Resource>
+ D3D12VideoEncodeAccelerator::CreateResourceForDXGIHandleBackedVideoFrame(
+     const VideoFrame& frame) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(encoder_sequence_checker_);
+@@ -677,7 +680,7 @@ D3D12VideoEncodeAccelerator::CreateResourceForDXGIHandleBackedVideoFrame(
+   if (FAILED(hr)) {
+     NotifyError({EncoderStatus::Codes::kInvalidInputFrame,
+                  "Failed to OpenSharedHandle for input_texture"});
+-    return {};
++    return nullptr;
+   }
+ 
+   if (caching_enabled) {
+@@ -686,14 +689,14 @@ D3D12VideoEncodeAccelerator::CreateResourceForDXGIHandleBackedVideoFrame(
+   return input_texture;
+ }
+ 
+-D3D12PictureBuffer
++Microsoft::WRL::ComPtr<ID3D12Resource>
+ D3D12VideoEncodeAccelerator::CreateResourceForSharedMemoryVideoFrame(
+     const VideoFrame& frame) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(encoder_sequence_checker_);
+   if (frame.storage_type() != VideoFrame::STORAGE_SHMEM &&
+       frame.storage_type() != VideoFrame::STORAGE_UNOWNED_MEMORY) {
+     LOG(ERROR) << "Unsupported frame storage type for mapping";
+-    return {};
++    return nullptr;
+   }
+   CHECK(frame.IsMappable());
+ 
+@@ -709,7 +712,7 @@ D3D12VideoEncodeAccelerator::CreateResourceForSharedMemoryVideoFrame(
+         IID_PPV_ARGS(&input_texture_));
+     if (FAILED(hr)) {
+       LOG(ERROR) << "Failed to CreateCommittedResource for input_texture";
+-      return {};
++      return nullptr;
+     }
+     std::wstring debug_name = base::UTF8ToWide(base::StringPrintf(
+         "D3D12VEA input_texture_ %dx%d", config_.input_visible_size.width(),
+@@ -733,7 +736,7 @@ D3D12VideoEncodeAccelerator::CreateResourceForSharedMemoryVideoFrame(
+         IID_PPV_ARGS(&upload_buffer_));
+     if (FAILED(hr)) {
+       LOG(ERROR) << "Failed to CreateCommittedResource for upload_buffer";
+-      return {};
++      return nullptr;
+     }
+     std::wstring debug_name = base::UTF8ToWide(base::StringPrintf(
+         "D3D12VEA upload_buffer_ %dx%d", config_.input_visible_size.width(),
+@@ -745,7 +748,7 @@ D3D12VideoEncodeAccelerator::CreateResourceForSharedMemoryVideoFrame(
+     ScopedD3D12ResourceMap map;
+     if (!map.Map(upload_buffer_.Get())) {
+       LOG(ERROR) << "Failed to map upload_buffer";
+-      return {};
++      return nullptr;
+     }
+     scoped_refptr<VideoFrame> upload_frame = VideoFrame::WrapExternalYuvData(
+         PIXEL_FORMAT_NV12, config_.input_visible_size,
+@@ -756,24 +759,21 @@ D3D12VideoEncodeAccelerator::CreateResourceForSharedMemoryVideoFrame(
+         frame_converter_.ConvertAndScale(frame, *upload_frame);
+     if (!result.is_ok()) {
+       LOG(ERROR) << "Failed to ConvertAndScale frame: " << result.message();
+-      return {};
++      return nullptr;
+     }
+   }
+ 
+-  if (!copy_command_queue_->CopyBufferToNV12Texture(
+-          input_texture_.Get(), upload_buffer_.Get(), 0, y_size.width(),
+-          uv_offset, uv_size.width())) {
+-    LOG(ERROR) << "Failed to CopyBufferToNV12Texture";
+-    return {};
+-  }
++  copy_command_queue_->CopyBufferToNV12Texture(
++      input_texture_.Get(), upload_buffer_.Get(), 0, y_size.width(), uv_offset,
++      uv_size.width());
+ 
+-  auto fence_and_value = copy_command_queue_->Execute();
+-  if (!fence_and_value.first) {
+-    LOG(ERROR) << "Failed to Execute on copy_command_list";
+-    return {};
++  // TODO(crbug.com/382316466): Let command queue wait on the GPU
++  if (!copy_command_queue_->ExecuteAndWait()) {
++    LOG(ERROR) << "Failed to ExecuteAndWait copy_command_list";
++    return nullptr;
+   }
+ 
+-  return {input_texture_, 0, fence_and_value};
++  return input_texture_;
+ }
+ 
+ void D3D12VideoEncodeAccelerator::EncodeTask(
+@@ -819,8 +819,7 @@ void D3D12VideoEncodeAccelerator::TryEncodeFrames() {
+     auto& next_input = input_frames_queue_.front();
+     if (next_input.resolving_shared_image ||
+         (!next_input.frame->HasMappableSharedImage() &&
+-         next_input.frame->HasSharedImage() &&
+-         !next_input.resolved_picture.resource)) {
++         next_input.frame->HasSharedImage() && !next_input.resolved_resource)) {
+       // D3D12 VEA encodes frames one-by-one, so we will not try following
+       // frames.
+       break;
+@@ -845,10 +844,10 @@ void D3D12VideoEncodeAccelerator::DoEncodeTask(
+   DCHECK_CALLED_ON_VALID_SEQUENCE(encoder_sequence_checker_);
+ 
+   scoped_refptr<VideoFrame> frame = input_frame.frame;
+-  D3D12PictureBuffer picture_buffer;
++  Microsoft::WRL::ComPtr<ID3D12Resource> input_texture;
+   if (frame->HasMappableSharedImage()) {
+     if (frame->HasNativeMappableSharedImage()) {
+-      picture_buffer = CreateResourceForDXGIHandleBackedVideoFrame(*frame);
++      input_texture = CreateResourceForDXGIHandleBackedVideoFrame(*frame);
+     } else {
+       frame = ConvertToMemoryMappedFrame(std::move(frame));
+       if (!frame) {
+@@ -856,23 +855,37 @@ void D3D12VideoEncodeAccelerator::DoEncodeTask(
+             {EncoderStatus::Codes::kInvalidInputFrame,
+              "Failed to convert shared memory mappable SI for encoding"});
+       }
+-      picture_buffer = CreateResourceForSharedMemoryVideoFrame(*frame);
++      input_texture = CreateResourceForSharedMemoryVideoFrame(*frame);
+     }
+   } else if (frame->storage_type() == VideoFrame::STORAGE_SHMEM) {
+-    picture_buffer = CreateResourceForSharedMemoryVideoFrame(*frame);
++    input_texture = CreateResourceForSharedMemoryVideoFrame(*frame);
+   } else if (frame->HasSharedImage()) {
+-    picture_buffer = input_frame.resolved_picture;
++    input_texture = input_frame.resolved_resource;
++
++    // TODO(crbug.com/382316466): This CPU-side wait is a temporary solution.
++    // The plan is to replace this with proper GPU-side synchronization (for
++    // example, making the D3D12 VP/encoder command queue wait on the shared
++    // fence).
++    CHECK(source_texture_fence_);
++    CHECK(input_frame.source_texture_fence_value.has_value());
++    auto fence = base::MakeRefCounted<D3D12Fence>(
++        source_texture_fence_->GetD3D12Fence());
++    if (fence->WaitCPU(*input_frame.source_texture_fence_value) !=
++        D3D11StatusCode::kOk) {
++      return NotifyError({EncoderStatus::Codes::kSystemAPICallError,
++                          "Failed to wait shared fence on CPU side"});
++    }
+   } else {
+     return NotifyError({EncoderStatus::Codes::kInvalidInputFrame,
+                         "Unsupported frame storage type for encoding"});
+   }
+-  if (!picture_buffer.resource) {
++  if (!input_texture) {
+     return NotifyError({EncoderStatus::Codes::kInvalidInputFrame,
+                         "Failed to create input_texture"});
+   }
+ 
+   auto result_or_error =
+-      encoder_->Encode(picture_buffer, frame->ColorSpace(), bitstream_buffer,
++      encoder_->Encode(input_texture, 0, frame->ColorSpace(), bitstream_buffer,
+                        input_frame.options);
+   if (!result_or_error.has_value()) {
+     return NotifyError(std::move(result_or_error).error());
+@@ -1037,12 +1050,12 @@ void D3D12VideoEncodeAccelerator::OnSharedImageResolved(
+   }
+ 
+   // Find the matching frame in the queue and update it.
+-  auto it = std::ranges::find_if(input_frames_queue_,
+-                                 [&](const InputFrameRef& input_frame) {
+-                                   return input_frame.resolving_shared_image &&
+-                                          input_frame.shared_image_token ==
+-                                              frame->shared_image()->mailbox();
+-                                 });
++  auto it = std::find_if(input_frames_queue_.begin(), input_frames_queue_.end(),
++                         [&](InputFrameRef& input_frame) {
++                           return input_frame.resolving_shared_image &&
++                                  input_frame.shared_image_token ==
++                                      frame->shared_image()->mailbox();
++                         });
+ 
+   if (it == input_frames_queue_.end()) {
+     return NotifyError(
+@@ -1050,11 +1063,8 @@ void D3D12VideoEncodeAccelerator::OnSharedImageResolved(
+          "Failed to find input frame for resolved shared image"});
+   }
+   it->resolving_shared_image = false;
+-  it->resolved_picture = {
+-      std::move(input_texture),
+-      0,
+-      {source_texture_fence_->GetD3D12Fence(), source_texture_fence_value},
+-  };
++  it->resolved_resource = std::move(input_texture);
++  it->source_texture_fence_value = source_texture_fence_value;
+ 
+   // Check if we can encode the front frames now.
+   TryEncodeFrames();
+diff --git a/media/gpu/windows/d3d12_video_encode_accelerator.h b/media/gpu/windows/d3d12_video_encode_accelerator.h
+index aa24496bd7aea..2dadc0a1ae3f9 100644
+--- a/media/gpu/windows/d3d12_video_encode_accelerator.h
++++ b/media/gpu/windows/d3d12_video_encode_accelerator.h
+@@ -113,11 +113,11 @@ class MEDIA_GPU_EXPORT D3D12VideoEncodeAccelerator
+       uint32_t framerate,
+       const std::optional<gfx::Size>& size);
+ 
+-  D3D12PictureBuffer CreateResourceForDXGIHandleBackedVideoFrame(
+-      const VideoFrame& frame);
++  Microsoft::WRL::ComPtr<ID3D12Resource>
++  CreateResourceForDXGIHandleBackedVideoFrame(const VideoFrame& frame);
+ 
+-  D3D12PictureBuffer CreateResourceForSharedMemoryVideoFrame(
+-      const VideoFrame& frame);
++  Microsoft::WRL::ComPtr<ID3D12Resource>
++  CreateResourceForSharedMemoryVideoFrame(const VideoFrame& frame);
+ 
+   void EncodeTask(scoped_refptr<VideoFrame> frame,
+                   const VideoEncoder::EncodeOptions& options);
+diff --git a/media/gpu/windows/d3d12_video_encode_accelerator_unittest.cc b/media/gpu/windows/d3d12_video_encode_accelerator_unittest.cc
+index de844fcefc649..90429792120fd 100644
+--- a/media/gpu/windows/d3d12_video_encode_accelerator_unittest.cc
++++ b/media/gpu/windows/d3d12_video_encode_accelerator_unittest.cc
+@@ -53,9 +53,10 @@ class MockVideoEncoderDelegate : public D3D12VideoEncodeDelegate {
+   MOCK_METHOD(size_t, GetMaxNumOfRefFrames, (), (const override));
+   MOCK_METHOD(size_t, GetMaxNumOfManualRefBuffers, (), (const override));
+   MOCK_METHOD(bool, SupportsRateControlReconfiguration, (), (const override));
+-  MOCK_METHOD4(
++  MOCK_METHOD5(
+       Encode,
+-      EncoderStatus::Or<EncodeResult>(D3D12PictureBuffer,
++      EncoderStatus::Or<EncodeResult>(Microsoft::WRL::ComPtr<ID3D12Resource>,
++                                      UINT,
+                                       const gfx::ColorSpace&,
+                                       const BitstreamBuffer&,
+                                       const VideoEncoder::EncodeOptions&));
+@@ -91,8 +92,9 @@ class MockVideoEncoderDelegateFactory
+         .WillByDefault(Return(16));
+     ON_CALL(*encoder_delegate, GetMaxNumOfManualRefBuffers())
+         .WillByDefault(Return(0));
+-    ON_CALL(*encoder_delegate, Encode(_, _, _, _))
+-        .WillByDefault([](D3D12PictureBuffer, const gfx::ColorSpace&,
++    ON_CALL(*encoder_delegate, Encode(_, _, _, _, _))
++        .WillByDefault([](Microsoft::WRL::ComPtr<ID3D12Resource>, UINT,
++                          const gfx::ColorSpace&,
+                           const BitstreamBuffer& bitstream_buffer,
+                           const VideoEncoder::EncodeOptions&)
+                            -> D3D12VideoEncodeDelegate::EncodeResult {
+@@ -127,15 +129,12 @@ class D3D12VideoEncodeAcceleratorTest : public testing::Test {
+     mock_video_device3_ = MakeComPtr<NiceMock<D3D12VideoDevice3Mock>>();
+     mock_command_list_ = MakeComPtr<NiceMock<D3D12GraphicsCommandListMock>>();
+     mock_resource_ = MakeComPtr<NiceMock<D3D12ResourceMock>>();
+-    mock_fence_ = MakeComPtr<NiceMock<D3D12FenceMock>>();
+     COM_ON_CALL(mock_device_, QueryInterface(IID_ID3D12VideoDevice3, _))
+         .WillByDefault(SetComPointeeAndReturnOk<1>(mock_video_device3_.Get()));
+     COM_ON_CALL(mock_device_, CreateCommandList(_, _, _, _, _, _))
+         .WillByDefault(SetComPointeeAndReturnOk<5>(mock_command_list_.Get()));
+     COM_ON_CALL(mock_device_, OpenSharedHandle(_, IID_ID3D12Resource, _))
+         .WillByDefault(SetComPointeeAndReturnOk<2>(mock_resource_.Get()));
+-    COM_ON_CALL(mock_device_, CreateFence(_, _, IID_ID3D12Fence, _))
+-        .WillByDefault(SetComPointeeAndReturnOk<3>(mock_fence_.Get()));
+ 
+     video_encode_accelerator_.reset(
+         new D3D12VideoEncodeAccelerator(mock_device_, {}));
+@@ -227,7 +226,6 @@ class D3D12VideoEncodeAcceleratorTest : public testing::Test {
+   Microsoft::WRL::ComPtr<D3D12VideoDevice3Mock> mock_video_device3_;
+   Microsoft::WRL::ComPtr<D3D12GraphicsCommandListMock> mock_command_list_;
+   Microsoft::WRL::ComPtr<D3D12ResourceMock> mock_resource_;
+-  Microsoft::WRL::ComPtr<D3D12FenceMock> mock_fence_;
+   std::unique_ptr<VideoEncodeAccelerator> video_encode_accelerator_;
+   std::unique_ptr<MockVideoEncodeAcceleratorClient> client_;
+   scoped_refptr<gpu::TestSharedImageInterface> test_sii_;
+diff --git a/media/gpu/windows/d3d12_video_encode_av1_delegate_unittest.cc b/media/gpu/windows/d3d12_video_encode_av1_delegate_unittest.cc
+index 7579f69a88185..f1373c7894455 100644
+--- a/media/gpu/windows/d3d12_video_encode_av1_delegate_unittest.cc
++++ b/media/gpu/windows/d3d12_video_encode_av1_delegate_unittest.cc
+@@ -263,7 +263,8 @@ TEST_F(D3D12VideoEncodeAV1DelegateTest, EncodeFrame) {
+         .WillRepeatedly(Return(kStreamSize));
+ 
+     auto result = encoder_delegate_->Encode(
+-        {input_frame.Get()}, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
++        input_frame.Get(), 0 /*input_frame_subresource*/,
++        gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
+         VideoEncoder::EncodeOptions());
+     EXPECT_EQ(result.has_value(), true);
+     auto [bitstream_buffer_id, metadata] = std::move(result).value();
+@@ -306,9 +307,9 @@ TEST_F(D3D12VideoEncodeAV1DelegateTest, ExternalRateControl) {
+ 
+     VideoEncoder::EncodeOptions options;
+     options.quantizer = quantizers[i];
+-    auto result = encoder_delegate_->Encode({input_frame.Get()},
+-                                            gfx::ColorSpace::CreateSRGB(),
+-                                            bitstream_buffer, options);
++    auto result = encoder_delegate_->Encode(
++        input_frame.Get(), 0 /*input_frame_subresource*/,
++        gfx::ColorSpace::CreateSRGB(), bitstream_buffer, options);
+     EXPECT_EQ(result.has_value(), true);
+     auto [bitstream_buffer_id, metadata] = std::move(result).value();
+     EXPECT_EQ(metadata.qp, quantizers[i]);
+diff --git a/media/gpu/windows/d3d12_video_encode_delegate.cc b/media/gpu/windows/d3d12_video_encode_delegate.cc
+index 6c2c1eba12818..d86fcd8b9fdd4 100644
+--- a/media/gpu/windows/d3d12_video_encode_delegate.cc
++++ b/media/gpu/windows/d3d12_video_encode_delegate.cc
+@@ -269,10 +269,12 @@ bool D3D12VideoEncodeDelegate::UpdateRateControl(
+ }
+ 
+ EncoderStatus::Or<D3D12VideoEncodeDelegate::EncodeResult>
+-D3D12VideoEncodeDelegate::Encode(D3D12PictureBuffer picture_buffer,
+-                                 const gfx::ColorSpace& input_frame_color_space,
+-                                 const BitstreamBuffer& bitstream_buffer,
+-                                 const VideoEncoder::EncodeOptions& options) {
++D3D12VideoEncodeDelegate::Encode(
++    Microsoft::WRL::ComPtr<ID3D12Resource> input_frame,
++    UINT input_frame_subresource,
++    const gfx::ColorSpace& input_frame_color_space,
++    const BitstreamBuffer& bitstream_buffer,
++    const VideoEncoder::EncodeOptions& options) {
+   if (options.reference_buffers.size() > GetMaxNumOfManualRefBuffers()) {
+     return {EncoderStatus::Codes::kBadReferenceBuffer,
+             "Number of manual reference buffers exceeds that is supported by "
+@@ -281,7 +283,7 @@ D3D12VideoEncodeDelegate::Encode(D3D12PictureBuffer picture_buffer,
+ 
+   const gfx::ColorSpace& output_color_space =
+       GetEncoderOutputColorSpaceFromInputColorSpace(input_frame_color_space);
+-  if (D3D12_RESOURCE_DESC input_frame_desc = picture_buffer.resource->GetDesc();
++  if (D3D12_RESOURCE_DESC input_frame_desc = input_frame->GetDesc();
+       input_frame_desc.Width != input_size_.Width ||
+       input_frame_desc.Height != input_size_.Height ||
+       input_frame_desc.Format != input_format_ ||
+@@ -298,34 +300,22 @@ D3D12VideoEncodeDelegate::Encode(D3D12PictureBuffer picture_buffer,
+           hr, "CreateCommittedResource for processed input frame failed",
+           EncoderStatus::Codes::kSystemAPICallError);
+     }
+-    if (picture_buffer.fence_and_value.first) {
+-      if (!video_processor_wrapper_->Wait(picture_buffer.fence_and_value)) {
+-        return {EncoderStatus::Codes::kSystemAPICallError,
+-                "D3D12 video processor wait failed"};
+-      }
+-    }
+-    auto fence_or_value = video_processor_wrapper_->ProcessFrames(
+-        picture_buffer.resource.Get(), picture_buffer.subresource,
+-        input_frame_color_space,
++    bool ok = video_processor_wrapper_->ProcessFrames(
++        input_frame.Get(), input_frame_subresource, input_frame_color_space,
+         gfx::Rect(0, 0, input_frame_desc.Width, input_frame_desc.Height),
+         processed_input_frame_.Get(), 0, output_color_space,
+         gfx::Rect(0, 0, input_size_.Width, input_size_.Height));
+-    if (!fence_or_value.first) {
++    if (!ok) {
+       return {EncoderStatus::Codes::kSystemAPICallError,
+               "D3D12 video processor process frame failed"};
+     }
+ 
+-    picture_buffer = {processed_input_frame_, 0, fence_or_value};
+-  }
+-  if (picture_buffer.fence_and_value.first) {
+-    if (!video_encoder_wrapper_->Wait(picture_buffer.fence_and_value)) {
+-      return {EncoderStatus::Codes::kSystemAPICallError,
+-              "D3D12 video encoder wait failed"};
+-    }
++    input_frame = processed_input_frame_;
++    input_frame_subresource = 0;
+   }
+-  auto impl_result =
+-      EncodeImpl(picture_buffer.resource.Get(), picture_buffer.subresource,
+-                 options, output_color_space);
++
++  auto impl_result = EncodeImpl(input_frame.Get(), input_frame_subresource,
++                                options, output_color_space);
+   if (!impl_result.is_ok()) {
+     return std::move(impl_result);
+   }
+diff --git a/media/gpu/windows/d3d12_video_encode_delegate.h b/media/gpu/windows/d3d12_video_encode_delegate.h
+index d21d95cd70b41..77b9715d4fc22 100644
+--- a/media/gpu/windows/d3d12_video_encode_delegate.h
++++ b/media/gpu/windows/d3d12_video_encode_delegate.h
+@@ -64,7 +64,8 @@ class MEDIA_GPU_EXPORT D3D12VideoEncodeDelegate {
+   // Do video processing if the input frame format or resolution is not
+   // expected and then call |EncodeImpl()|.
+   virtual EncoderStatus::Or<EncodeResult> Encode(
+-      D3D12PictureBuffer picture_buffer,
++      Microsoft::WRL::ComPtr<ID3D12Resource> input_frame,
++      UINT input_frame_subresource,
+       const gfx::ColorSpace& input_frame_color_space,
+       const BitstreamBuffer& bitstream_buffer,
+       const VideoEncoder::EncodeOptions& options);
+diff --git a/media/gpu/windows/d3d12_video_encode_delegate_unittest.cc b/media/gpu/windows/d3d12_video_encode_delegate_unittest.cc
+index 2a57aebf7782d..f9f9bbdbdac5e 100644
+--- a/media/gpu/windows/d3d12_video_encode_delegate_unittest.cc
++++ b/media/gpu/windows/d3d12_video_encode_delegate_unittest.cc
+@@ -72,16 +72,8 @@ D3D12VideoEncodeDelegateTestBase::CreateVideoProcessorWrapper(
+     Microsoft::WRL::ComPtr<ID3D12VideoDevice>&& video_device) {
+   auto video_processor_wrapper =
+       std::make_unique<NiceMock<MockD3D12VideoProcessorWrapper>>(video_device);
+-  // The lambda captures the fence ComPtr by value, which ensures the fence
+-  // outlives the lambda stored in ON_CALL.
+-  auto fence = MakeComPtr<NiceMock<D3D12FenceMock>>();
+   ON_CALL(*video_processor_wrapper, Init).WillByDefault(Return(true));
+-  ON_CALL(*video_processor_wrapper, ProcessFrames)
+-      .WillByDefault([fence](ID3D12Resource*, UINT, const gfx::ColorSpace&,
+-                             const gfx::Rect&, ID3D12Resource*, UINT,
+-                             const gfx::ColorSpace&, const gfx::Rect&) {
+-        return D3D12FenceAndValue{fence.Get(), 0};
+-      });
++  ON_CALL(*video_processor_wrapper, ProcessFrames).WillByDefault(Return(true));
+   return std::move(video_processor_wrapper);
+ }
+ 
+@@ -97,7 +89,6 @@ D3D12VideoEncodeDelegateTestBase::CreateVideoEncoderWrapper(
+   auto video_encoder_wrapper =
+       std::make_unique<NiceMock<MockD3D12VideoEncoderWrapper>>();
+   ON_CALL(*video_encoder_wrapper, Initialize).WillByDefault(Return(true));
+-  ON_CALL(*video_encoder_wrapper, Wait).WillByDefault(Return(true));
+   ON_CALL(*video_encoder_wrapper, Encode)
+       .WillByDefault(Return(EncoderStatus::Codes::kOk));
+   ON_CALL(*video_encoder_wrapper, ReadbackBitstream)
+@@ -250,11 +241,10 @@ TEST_F(D3D12VideoEncodeDelegateTestWithProcessFrame, EncodeFrameWithoutVP) {
+   EXPECT_CALL(*GetVideoEncoderWrapper(), GetEncoderOutputMetadata)
+       .WillOnce(Return(GetEncoderOutputMetadataResourceMap(kPayloadSize)));
+   auto result_or_error =
+-      encoder_delegate_->Encode(input_frame, color_space, bitstream_buffer,
++      encoder_delegate_->Encode(input_frame, 0, color_space, bitstream_buffer,
+                                 VideoEncoder::EncodeOptions());
+   Mock::VerifyAndClearExpectations(GetVideoProcessorWrapper());
+-  ASSERT_TRUE(result_or_error.has_value())
+-      << std::move(result_or_error).error().message();
++  ASSERT_TRUE(result_or_error.has_value());
+ 
+   auto [bitstream_buffer_id, metadata] = std::move(result_or_error).value();
+   EXPECT_EQ(bitstream_buffer_id, bitstream_buffer.id());
+@@ -275,7 +265,6 @@ TEST_F(D3D12VideoEncodeDelegateTestWithProcessFrame, EncodeFrameWithVP) {
+   BitstreamBuffer bitstream_buffer(
+       base::RandIntInclusive(0, H264DPB::kDPBMaxSize - 1),
+       shared_memory.Duplicate(), kPayloadSize);
+-  auto fence = MakeComPtr<NiceMock<D3D12FenceMock>>();
+   EXPECT_CALL(*GetVideoProcessorWrapper(), ProcessFrames)
+       .WillOnce([&](ID3D12Resource*, UINT, const gfx::ColorSpace&,
+                     const gfx::Rect& input_rectangle, ID3D12Resource*, UINT,
+@@ -285,17 +274,16 @@ TEST_F(D3D12VideoEncodeDelegateTestWithProcessFrame, EncodeFrameWithVP) {
+         EXPECT_EQ(output_rectangle.width(), config.input_visible_size.width());
+         EXPECT_EQ(output_rectangle.height(),
+                   config.input_visible_size.height());
+-        return D3D12FenceAndValue{fence.Get(), 0};
++        return true;
+       });
+ 
+   EXPECT_CALL(*GetVideoEncoderWrapper(), GetEncoderOutputMetadata)
+       .WillOnce(Return(GetEncoderOutputMetadataResourceMap(kPayloadSize)));
+   auto result_or_error =
+-      encoder_delegate_->Encode(input_frame, color_space, bitstream_buffer,
++      encoder_delegate_->Encode(input_frame, 0, color_space, bitstream_buffer,
+                                 VideoEncoder::EncodeOptions());
+   Mock::VerifyAndClearExpectations(GetVideoProcessorWrapper());
+-  ASSERT_TRUE(result_or_error.has_value())
+-      << std::move(result_or_error).error().message();
++  ASSERT_TRUE(result_or_error.has_value());
+ 
+   auto [bitstream_buffer_id, metadata] = std::move(result_or_error).value();
+   EXPECT_EQ(bitstream_buffer_id, bitstream_buffer.id());
+@@ -325,7 +313,7 @@ TEST_F(D3D12VideoEncodeDelegateTest, EncodeWithTooManyReferenceBuffersFails) {
+     options.reference_buffers.push_back(static_cast<uint8_t>(i));
+   }
+ 
+-  auto result_or_error = encoder_delegate_->Encode(input_frame, color_space,
++  auto result_or_error = encoder_delegate_->Encode(input_frame, 0u, color_space,
+                                                    bitstream_buffer, options);
+ 
+   // Expect an error indicating too many reference buffers.
+diff --git a/media/gpu/windows/d3d12_video_encode_delegate_unittest.h b/media/gpu/windows/d3d12_video_encode_delegate_unittest.h
+index 0317fd93b1ac4..e4b0e89ecb9a6 100644
+--- a/media/gpu/windows/d3d12_video_encode_delegate_unittest.h
++++ b/media/gpu/windows/d3d12_video_encode_delegate_unittest.h
+@@ -22,7 +22,7 @@ class MockD3D12VideoProcessorWrapper : public D3D12VideoProcessorWrapper {
+   ~MockD3D12VideoProcessorWrapper() override;
+ 
+   MOCK_METHOD(bool, Init, ());
+-  MOCK_METHOD(D3D12FenceAndValue,
++  MOCK_METHOD(bool,
+               ProcessFrames,
+               (ID3D12Resource*,
+                UINT,
+@@ -40,7 +40,6 @@ class MockD3D12VideoEncoderWrapper : public D3D12VideoEncoderWrapper {
+   ~MockD3D12VideoEncoderWrapper() override;
+ 
+   MOCK_METHOD(bool, Initialize, (uint32_t));
+-  MOCK_METHOD(bool, Wait, (D3D12FenceAndValue));
+   MOCK_METHOD2(
+       Encode,
+       EncoderStatus(const D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS&,
+diff --git a/media/gpu/windows/d3d12_video_encode_h264_delegate_unittest.cc b/media/gpu/windows/d3d12_video_encode_h264_delegate_unittest.cc
+index 457d49b68f2fb..d04df6952d495 100644
+--- a/media/gpu/windows/d3d12_video_encode_h264_delegate_unittest.cc
++++ b/media/gpu/windows/d3d12_video_encode_h264_delegate_unittest.cc
+@@ -361,7 +361,7 @@ TEST_F(D3D12VideoEncodeH264DelegateTest, EncodeFrame) {
+         return EncoderStatus::Codes::kOk;
+       });
+   auto result_or_error = encoder_delegate_->Encode(
+-      input_frame, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
++      input_frame, 0, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
+       VideoEncoder::EncodeOptions());
+   ASSERT_TRUE(result_or_error.has_value());
+ 
+@@ -420,7 +420,7 @@ TEST_F(D3D12VideoEncodeH264DelegateTest, EncodeFramesAndVerifyKeyFrameFlag) {
+           return EncoderStatus::Codes::kOk;
+         });
+     auto result_or_error = encoder_delegate_->Encode(
+-        input_frame, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
++        input_frame, 0, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
+         VideoEncoder::EncodeOptions());
+     ASSERT_TRUE(result_or_error.has_value());
+     Mock::VerifyAndClearExpectations(GetVideoEncoderWrapper());
+@@ -460,7 +460,7 @@ TEST_F(D3D12VideoEncodeH264DelegateTest,
+     EXPECT_CALL(*GetVideoEncoderWrapper(), GetEncoderOutputMetadata())
+         .WillOnce(Return(GetEncoderOutputMetadataResourceMap(kStreamSize)));
+     auto result_or_error = encoder_delegate_->Encode(
+-        input_frame, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
++        input_frame, 0, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
+         VideoEncoder::EncodeOptions());
+     ASSERT_TRUE(result_or_error.has_value());
+ 
+@@ -493,21 +493,21 @@ TEST_F(D3D12VideoEncodeH264DelegateTest, EncodeWithManualReferenceControl) {
+   encode_opts.reference_buffers = {};
+   encode_opts.update_buffer = 0;
+   auto result_or_error =
+-      encoder_delegate_->Encode(input_frame, gfx::ColorSpace::CreateSRGB(),
++      encoder_delegate_->Encode(input_frame, 0, gfx::ColorSpace::CreateSRGB(),
+                                 bitstream_buffer, encode_opts);
+   ASSERT_TRUE(result_or_error.has_value());
+ 
+   encode_opts.reference_buffers = {0};
+   encode_opts.update_buffer = std::nullopt;
+   result_or_error =
+-      encoder_delegate_->Encode(input_frame, gfx::ColorSpace::CreateSRGB(),
++      encoder_delegate_->Encode(input_frame, 0, gfx::ColorSpace::CreateSRGB(),
+                                 bitstream_buffer, encode_opts);
+   ASSERT_TRUE(result_or_error.has_value());
+ 
+   encode_opts.reference_buffers = {0};
+   encode_opts.update_buffer = 0;
+   result_or_error =
+-      encoder_delegate_->Encode(input_frame, gfx::ColorSpace::CreateSRGB(),
++      encoder_delegate_->Encode(input_frame, 0, gfx::ColorSpace::CreateSRGB(),
+                                 bitstream_buffer, encode_opts);
+   ASSERT_TRUE(result_or_error.has_value());
+ }
+diff --git a/media/gpu/windows/d3d12_video_encode_h265_delegate_unittest.cc b/media/gpu/windows/d3d12_video_encode_h265_delegate_unittest.cc
+index 21b2d3ef66ad0..049efcb7b9ec0 100644
+--- a/media/gpu/windows/d3d12_video_encode_h265_delegate_unittest.cc
++++ b/media/gpu/windows/d3d12_video_encode_h265_delegate_unittest.cc
+@@ -352,7 +352,7 @@ TEST_F(D3D12VideoEncodeH265DelegateTest, EncodeFrame) {
+         return EncoderStatus::Codes::kOk;
+       });
+   auto result_or_error = encoder_delegate_->Encode(
+-      input_frame, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
++      input_frame, 0, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
+       VideoEncoder::EncodeOptions());
+   ASSERT_TRUE(result_or_error.has_value());
+ 
+@@ -420,7 +420,7 @@ TEST_F(D3D12VideoEncodeH265DelegateTest, EncodeFramesAndVerifyKeyFrameFlag) {
+           return EncoderStatus::Codes::kOk;
+         });
+     auto result_or_error = encoder_delegate_->Encode(
+-        input_frame, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
++        input_frame, 0, gfx::ColorSpace::CreateSRGB(), bitstream_buffer,
+         VideoEncoder::EncodeOptions());
+     ASSERT_TRUE(result_or_error.has_value());
+     Mock::VerifyAndClearExpectations(GetVideoEncoderWrapper());
+diff --git a/media/gpu/windows/d3d12_video_encoder_wrapper.cc b/media/gpu/windows/d3d12_video_encoder_wrapper.cc
+index 5c4151841c2ea..7f3461f266afd 100644
+--- a/media/gpu/windows/d3d12_video_encoder_wrapper.cc
++++ b/media/gpu/windows/d3d12_video_encoder_wrapper.cc
+@@ -172,15 +172,6 @@ bool D3D12VideoEncoderWrapper::Initialize(uint32_t max_subregions_number) {
+   return true;
+ }
+ 
+-bool D3D12VideoEncoderWrapper::Wait(D3D12FenceAndValue fence_and_value) {
+-  auto [fence, value] = fence_and_value;
+-  CHECK(fence);
+-  HRESULT hr = command_queue_->Wait(fence.Get(), value);
+-  RETURN_ON_HR_FAILURE(hr, "Failed to wait on video encoder command queue",
+-                       false);
+-  return true;
+-}
+-
+ EncoderStatus D3D12VideoEncoderWrapper::Encode(
+     const D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS& input_arguments,
+     const D3D12_VIDEO_ENCODER_RECONSTRUCTED_PICTURE& reconstructed_picture) {
+diff --git a/media/gpu/windows/d3d12_video_encoder_wrapper.h b/media/gpu/windows/d3d12_video_encoder_wrapper.h
+index fe4261924d1a5..9d183f731f164 100644
+--- a/media/gpu/windows/d3d12_video_encoder_wrapper.h
++++ b/media/gpu/windows/d3d12_video_encoder_wrapper.h
+@@ -34,10 +34,6 @@ class MEDIA_GPU_EXPORT D3D12VideoEncoderWrapper {
+   // should be 1.
+   virtual bool Initialize(uint32_t max_subregions_number);
+ 
+-  // Wait for the fence to reach the value before executing further commands.
+-  // The fence must not be null. Returns whether the wait is successful.
+-  virtual bool Wait(D3D12FenceAndValue fence_and_value);
+-
+   // Do the encode and wait for the completion of the encoding.
+   virtual EncoderStatus Encode(
+       const D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS& input_arguments,
+diff --git a/media/gpu/windows/d3d12_video_processor_wrapper.cc b/media/gpu/windows/d3d12_video_processor_wrapper.cc
+index a66e30507cea2..942eb285c0add 100644
+--- a/media/gpu/windows/d3d12_video_processor_wrapper.cc
++++ b/media/gpu/windows/d3d12_video_processor_wrapper.cc
+@@ -64,19 +64,7 @@ bool D3D12VideoProcessorWrapper::Init() {
+   return true;
+ }
+ 
+-bool D3D12VideoProcessorWrapper::Wait(D3D12FenceAndValue fence_and_value) {
+-  auto [fence, value] = fence_and_value;
+-  CHECK(fence);
+-  HRESULT hr = command_queue_->Wait(fence.Get(), value);
+-  if (FAILED(hr)) {
+-    DLOG(ERROR) << "D3D12 video process command queue wait failed: "
+-                << logging::SystemErrorCodeToString(hr);
+-    return false;
+-  }
+-  return true;
+-}
+-
+-D3D12FenceAndValue D3D12VideoProcessorWrapper::ProcessFrames(
++bool D3D12VideoProcessorWrapper::ProcessFrames(
+     ID3D12Resource* input_texture,
+     UINT input_subresource,
+     const gfx::ColorSpace& input_color_space,
+@@ -132,7 +120,7 @@ D3D12FenceAndValue D3D12VideoProcessorWrapper::ProcessFrames(
+     }
+     if (support.SupportFlags != D3D12_VIDEO_PROCESS_SUPPORT_FLAG_SUPPORTED) {
+       DLOG(ERROR) << "D3D12 cannot support video processing.";
+-      return {};
++      return false;
+     }
+ 
+     hr = video_device_->CreateVideoProcessor(0, &output_stream_desc, 1,
+@@ -141,7 +129,7 @@ D3D12FenceAndValue D3D12VideoProcessorWrapper::ProcessFrames(
+     if (FAILED(hr)) {
+       DLOG(ERROR) << "Create video processor failed: "
+                   << logging::SystemErrorCodeToString(hr);
+-      return {};
++      return false;
+     }
+     input_stream_desc_ = input_stream_desc;
+     output_stream_desc_ = output_stream_desc;
+@@ -151,14 +139,14 @@ D3D12FenceAndValue D3D12VideoProcessorWrapper::ProcessFrames(
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Reset video process command allocator failed:"
+                 << logging::SystemErrorCodeToString(hr);
+-    return {};
++    return false;
+   }
+ 
+   hr = command_list_->Reset(command_allocator_.Get());
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Reset video process command list failed:"
+                 << logging::SystemErrorCodeToString(hr);
+-    return {};
++    return false;
+   }
+ 
+   std::vector<D3D12_RESOURCE_BARRIER> resource_barriers;
+@@ -197,19 +185,14 @@ D3D12FenceAndValue D3D12VideoProcessorWrapper::ProcessFrames(
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Close video process command list failed:"
+                 << logging::SystemErrorCodeToString(hr);
+-    return {};
++    return false;
+   }
+ 
+   ID3D12CommandList* command_list = command_list_.Get();
+   command_queue_->ExecuteCommandLists(1, &command_list);
+ 
+-  auto value_or_error = fence_->Signal(*command_queue_.Get());
+-  if (!value_or_error.has_value()) {
+-    DLOG(ERROR) << "Failed to call Signal: "
+-                << std::move(value_or_error).error().message();
+-    return {};
+-  }
+-  return {fence_->Get(), std::move(value_or_error).value()};
++  return fence_->SignalAndWaitCPU(*command_queue_.Get()) ==
++         D3D11StatusCode::kOk;
+ }
+ 
+ }  // namespace media
+diff --git a/media/gpu/windows/d3d12_video_processor_wrapper.h b/media/gpu/windows/d3d12_video_processor_wrapper.h
+index aa221ad951b4e..f2f019715d44c 100644
+--- a/media/gpu/windows/d3d12_video_processor_wrapper.h
++++ b/media/gpu/windows/d3d12_video_processor_wrapper.h
+@@ -9,7 +9,6 @@
+ 
+ #include "media/gpu/media_gpu_export.h"
+ #include "media/gpu/windows/d3d12_fence.h"
+-#include "media/gpu/windows/d3d12_helpers.h"
+ #include "media/gpu/windows/d3d_com_defs.h"
+ #include "ui/gfx/color_space.h"
+ #include "ui/gfx/geometry/rect.h"
+@@ -28,21 +27,16 @@ class MEDIA_GPU_EXPORT D3D12VideoProcessorWrapper {
+   // initialization was successful.
+   virtual bool Init();
+ 
+-  // Wait until the GPU has finished processing the previous frames. The fence
+-  // must not be null. Returns whether the wait was successful.
+-  virtual bool Wait(D3D12FenceAndValue fence_and_value);
+-
+   // Processes the |input_texture| and writes the result to |output_texture|.
+-  // Returns {nullptr, 0} on failure, otherwise returns a valid fence and value.
+-  virtual D3D12FenceAndValue ProcessFrames(
+-      ID3D12Resource* input_texture,
+-      UINT input_subresource,
+-      const gfx::ColorSpace& input_color_space,
+-      const gfx::Rect& input_rectangle,
+-      ID3D12Resource* output_texture,
+-      UINT output_subresource,
+-      const gfx::ColorSpace& output_color_space,
+-      const gfx::Rect& output_rectangle);
++  // Returns whether the processing was successful.
++  virtual bool ProcessFrames(ID3D12Resource* input_texture,
++                             UINT input_subresource,
++                             const gfx::ColorSpace& input_color_space,
++                             const gfx::Rect& input_rectangle,
++                             ID3D12Resource* output_texture,
++                             UINT output_subresource,
++                             const gfx::ColorSpace& output_color_space,
++                             const gfx::Rect& output_rectangle);
+ 
+  private:
+   ComD3D12Device device_;

@@ -1,0 +1,117 @@
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 7efa0a5..05ca954 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -152,10 +152,13 @@ LRESULT CALLBACK MoveLoopMouseWatcher::KeyHook(int n_code,
+                                                WPARAM w_param,
+                                                LPARAM l_param) {
+   if (n_code == HC_ACTION && w_param == VK_ESCAPE) {
+-    int value = TRUE;
+-    DwmSetWindowAttribute(instance_->host_->hwnd(),
+-                          DWMWA_TRANSITIONS_FORCEDISABLED, &value,
+-                          sizeof(value));
++    if (base::win::GetVersion() >= base::win::Version::VISTA) {
++      int value = TRUE;
++      DwmSetWindowAttribute(instance_->host_->hwnd(),
++                            DWMWA_TRANSITIONS_FORCEDISABLED,
++                            &value,
++                            sizeof(value));
++    }
+     if (instance_->hide_on_escape_) {
+       instance_->host_->Hide();
+     }
+@@ -385,7 +389,9 @@ void HWNDMessageHandler::Init(HWND parent, const gfx::Rect& bounds) {
+   }
+ 
+   // Disable pen flicks (http://crbug.com/506977)
+-  base::win::DisableFlicks(hwnd());
++  if (base::win::GetVersion() >= base::win::Version::WIN7) {
++    base::win::DisableFlicks(hwnd());
++  }
+ }
+ 
+ int HWNDMessageHandler::GetAppbarAutohideEdges(HMONITOR monitor) {
+@@ -416,7 +422,8 @@ void HWNDMessageHandler::Close() {
+   RestoreEnabledIfNecessary();
+ 
+   // Re-enable flicks which removes the window property.
+-  base::win::EnableFlicks(hwnd());
++  if (base::win::GetVersion() >= base::win::Version::WIN7)
++    base::win::EnableFlicks(hwnd());
+ 
+   if (!waiting_for_close_now_) {
+     // And we delay the close so that if we are called from an ATL callback,
+@@ -758,9 +761,11 @@ bool HWNDMessageHandler::HasCapture() const {
+ }
+ 
+ void HWNDMessageHandler::SetVisibilityChangedAnimationsEnabled(bool enabled) {
+-  int dwm_value = enabled ? FALSE : TRUE;
+-  DwmSetWindowAttribute(hwnd(), DWMWA_TRANSITIONS_FORCEDISABLED, &dwm_value,
+-                        sizeof(dwm_value));
++  if (base::win::GetVersion() >= base::win::Version::VISTA) {
++    int dwm_value = enabled ? FALSE : TRUE;
++    DwmSetWindowAttribute(
++        hwnd(), DWMWA_TRANSITIONS_FORCEDISABLED, &dwm_value, sizeof(dwm_value));
++  }
+ }
+ 
+ bool HWNDMessageHandler::SetTitle(const std::u16string& title) {
+@@ -789,13 +794,21 @@ void HWNDMessageHandler::SetCursor(HCURSOR cursor) {
+ }
+ 
+ void HWNDMessageHandler::FrameTypeChanged() {
+-  needs_dwm_frame_clear_ = true;
+-  if (!custom_window_region_.is_valid() && IsFrameSystemDrawn()) {
+-    dwm_transition_desired_ = true;
+-  }
+-  if (!dwm_transition_desired_ || !IsFullscreen()) {
+-    PerformDwmTransition();
+-  }
++  if (base::win::GetVersion() < base::win::Version::VISTA) {
++    // Don't redraw the window here, because we invalidate the window later.
++    ResetWindowRegion(true, false);
++    // The non-client view needs to update too.
++    delegate_->HandleFrameChanged();
++    InvalidateRect(hwnd(), NULL, FALSE);
++  } else {
++    needs_dwm_frame_clear_ = true;
++    if (!custom_window_region_.is_valid() && IsFrameSystemDrawn()) {
++      dwm_transition_desired_ = true;
++    }
++    if (!dwm_transition_desired_ || !fullscreen_handler_->fullscreen()) {
++      PerformDwmTransition();
++    }
++  }
+ }
+ 
+ void HWNDMessageHandler::PaintAsActiveChanged() {
+@@ -1298,10 +1309,12 @@ void HWNDMessageHandler::OnCommand(UINT notification_code,
+ 
+ LRESULT HWNDMessageHandler::OnCreate(CREATESTRUCT* create_struct) {
+   if (is_translucent_) {
+-    // This is part of the magic to emulate layered windows with Aura
+-    // see the explanation elsewere when we set is_translucent_.
+-    MARGINS margins = {-1, -1, -1, -1};
+-    DwmExtendFrameIntoClientArea(hwnd(), &margins);
++    if (base::win::GetVersion() >= base::win::Version::VISTA) {
++      // This is part of the magic to emulate layered windows with Aura
++      // see the explanation elsewere when we set is_translucent_.
++      MARGINS margins = {-1,-1,-1,-1};
++      DwmExtendFrameIntoClientArea(hwnd(), &margins);
++    }
+ 
+     ::SetProp(hwnd(), ui::kWindowTranslucent, reinterpret_cast<HANDLE>(1));
+   }
+@@ -1615,7 +1629,10 @@ LRESULT HWNDMessageHandler::OnNCActivate(UINT message,
+   // drawn. Otherwise it can draw an incorrect title bar and cause visual
+   // corruption.
+-  if (!delegate_->HasFrame() ||
+-      delegate_->GetFrameMode() == FrameMode::CUSTOM_DRAWN) {
++  // Avoid DefWindowProc non-client rendering over our custom frame on newer
++  // Windows versions only (breaks taskbar activation indication on XP/Vista).
++  if ((!delegate_->HasFrame() ||
++      delegate_->GetFrameMode() == FrameMode::CUSTOM_DRAWN) &&
++      base::win::GetVersion() > base::win::Version::VISTA) {
+     SetMsgHandled(TRUE);
+     return TRUE;
+   }

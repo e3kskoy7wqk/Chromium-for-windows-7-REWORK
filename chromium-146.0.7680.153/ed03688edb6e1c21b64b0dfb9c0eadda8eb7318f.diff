@@ -1,0 +1,398 @@
+diff --git a/components/viz/service/display_embedder/compositor_gpu_thread.cc b/components/viz/service/display_embedder/compositor_gpu_thread.cc
+index 762a6499b0ce0..ae5f085519327 100644
+--- a/components/viz/service/display_embedder/compositor_gpu_thread.cc
++++ b/components/viz/service/display_embedder/compositor_gpu_thread.cc
+@@ -15,6 +15,7 @@
+ #include "components/viz/common/features.h"
+ #include "components/viz/common/gpu/vulkan_context_provider.h"
+ #include "components/viz/common/switches.h"
++#include "gpu/command_buffer/service/service_utils.h"
+ #include "gpu/command_buffer/service/feature_info.h"
+ #include "gpu/config/gpu_finch_features.h"
+ #include "gpu/ipc/common/gpu_client_ids.h"
+@@ -135,6 +136,7 @@ CompositorGpuThread::GetSharedContextState() {
+   const auto& gpu_preferences = gpu_channel_manager_->gpu_preferences();
+ 
+   const bool use_passthrough_decoder =
++      gpu::gles2::PassthroughCommandDecoderSupported() &&
+       gpu_preferences.use_passthrough_cmd_decoder;
+   gl::GLContextAttribs attribs =
+       gpu::gles2::GenerateGLContextAttribsForCompositor(
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
+index b4eaaf5d40506..47b2eac7b428a 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
+@@ -35,7 +35,6 @@
+ #include "gpu/command_buffer/service/shared_image/shared_image_representation.h"
+ #include "gpu/config/gpu_finch_features.h"
+ #include "third_party/perfetto/include/perfetto/tracing/track.h"
+-#include "ui/gl/gl_implementation.h"
+ #include "ui/gl/gl_utils.h"
+ #include "ui/gl/gl_version_info.h"
+ #include "ui/gl/gpu_switching_manager.h"
+@@ -800,9 +799,6 @@ gpu::ContextResult GLES2DecoderPassthroughImpl::Initialize(
+     ContextType context_type,
+     bool lose_context_when_out_of_memory) {
+   TRACE_EVENT0("gpu", "GLES2DecoderPassthroughImpl::Initialize");
+-  CHECK(gl::GetGLImplementation() == gl::kGLImplementationEGLANGLE)
+-      << "Running WebGL through passthrough command decoder without ANGLE's "
+-      << "validation is a security risk";
+   DCHECK(context->IsCurrent(surface.get()));
+   api_ = gl::g_current_gl_context;
+   // Take ownership of the context and surface. The surface can be replaced
+diff --git a/gpu/command_buffer/service/raster_decoder.cc b/gpu/command_buffer/service/raster_decoder.cc
+index 52cf3c471e99e..40f71a93533ff 100644
+--- a/gpu/command_buffer/service/raster_decoder.cc
++++ b/gpu/command_buffer/service/raster_decoder.cc
+@@ -1004,7 +1004,8 @@ RasterDecoderImpl::RasterDecoderImpl(
+     bool is_privileged)
+     : RasterDecoder(client, command_buffer_service, outputter),
+       raster_decoder_id_(g_raster_decoder_id.GetNext() + 1),
+-      use_passthrough_(gpu_preferences.use_passthrough_cmd_decoder),
++      use_passthrough_(gles2::PassthroughCommandDecoderSupported() &&
++                       gpu_preferences.use_passthrough_cmd_decoder),
+       gpu_preferences_(gpu_preferences),
+       logger_(&debug_marker_manager_,
+               base::BindRepeating(&DecoderClient::OnConsoleMessage,
+diff --git a/gpu/command_buffer/service/raster_decoder_unittest_base.cc b/gpu/command_buffer/service/raster_decoder_unittest_base.cc
+index fbcb9133c752c..39f705383d554 100644
+--- a/gpu/command_buffer/service/raster_decoder_unittest_base.cc
++++ b/gpu/command_buffer/service/raster_decoder_unittest_base.cc
+@@ -31,6 +31,7 @@
+ #include "gpu/command_buffer/service/gpu_switches.h"
+ #include "gpu/command_buffer/service/logger.h"
+ #include "gpu/command_buffer/service/program_manager.h"
++#include "gpu/command_buffer/service/service_utils.h"
+ #include "gpu/command_buffer/service/shared_context_state.h"
+ #include "gpu/command_buffer/service/shared_image/gl_texture_image_backing_factory.h"
+ #include "gpu/command_buffer/service/test_helper.h"
+@@ -131,7 +132,8 @@ void RasterDecoderTestBase::InitDecoder(const InitState& init) {
+       gl_.get(), all_extensions.c_str(), "", init.gl_version.c_str(),
+       context_type);
+   feature_info_->Initialize(context_type,
+-                            gpu_preferences_.use_passthrough_cmd_decoder,
++                            gpu_preferences_.use_passthrough_cmd_decoder &&
++                                gles2::PassthroughCommandDecoderSupported(),
+                             gles2::DisallowedFeatures());
+ 
+   // Setup expectations for SharedContextState::InitializeGL().
+diff --git a/gpu/command_buffer/service/service_utils.cc b/gpu/command_buffer/service/service_utils.cc
+index 85fdad9c54253..d653f604bb26e 100644
+--- a/gpu/command_buffer/service/service_utils.cc
++++ b/gpu/command_buffer/service/service_utils.cc
+@@ -211,6 +211,10 @@ bool UsePassthroughCommandDecoder(const base::CommandLine* command_line) {
+   return gl::UsePassthroughCommandDecoder(command_line);
+ }
+ 
++bool PassthroughCommandDecoderSupported() {
++  return gl::PassthroughCommandDecoderSupported();
++}
++
+ GpuPreferences ParseGpuPreferences(const base::CommandLine* command_line) {
+   GpuPreferences gpu_preferences;
+   gpu_preferences.compile_shader_always_succeeds =
+diff --git a/gpu/command_buffer/service/service_utils.h b/gpu/command_buffer/service/service_utils.h
+index 0abcf48a0e16d..738f82c39d2c2 100644
+--- a/gpu/command_buffer/service/service_utils.h
++++ b/gpu/command_buffer/service/service_utils.h
+@@ -28,6 +28,9 @@ GPU_GLES2_EXPORT gl::GLContextAttribs GenerateGLContextAttribsForCompositor(
+ GPU_GLES2_EXPORT bool UsePassthroughCommandDecoder(
+     const base::CommandLine* command_line);
+ 
++// Returns true if the driver supports creating passthrough command decoders
++GPU_GLES2_EXPORT bool PassthroughCommandDecoderSupported();
++
+ GPU_GLES2_EXPORT GpuPreferences
+ ParseGpuPreferences(const base::CommandLine* command_line);
+ 
+diff --git a/gpu/command_buffer/service/shared_context_state.cc b/gpu/command_buffer/service/shared_context_state.cc
+index d6e956805eae4..f5af277377d9b 100644
+--- a/gpu/command_buffer/service/shared_context_state.cc
++++ b/gpu/command_buffer/service/shared_context_state.cc
+@@ -752,7 +752,8 @@ bool SharedContextState::InitializeGL(
+   DCHECK(context_->IsCurrent(nullptr));
+ 
+   bool use_passthrough_cmd_decoder =
+-      gpu_preferences.use_passthrough_cmd_decoder;
++      gpu_preferences.use_passthrough_cmd_decoder &&
++      gles2::PassthroughCommandDecoderSupported();
+   // Virtualized contexts don't work with passthrough command decoder.
+   // See https://crbug.com/914976
+   DCHECK(!use_passthrough_cmd_decoder || !use_virtualized_gl_contexts_);
+diff --git a/gpu/command_buffer/service/shared_image/ahardwarebuffer_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/ahardwarebuffer_image_backing_factory.cc
+index f5c9cf3a8f2c1..a23e6a31e9fa7 100644
+--- a/gpu/command_buffer/service/shared_image/ahardwarebuffer_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/ahardwarebuffer_image_backing_factory.cc
+@@ -743,7 +743,8 @@ AHardwareBufferImageBackingFactory::AHardwareBufferImageBackingFactory(
+     const scoped_refptr<viz::VulkanContextProvider>& vulkan_context_provider)
+     : SharedImageBackingFactory(kSupportedUsage),
+       vulkan_context_provider_(vulkan_context_provider),
+-      use_passthrough_(gpu_preferences.use_passthrough_cmd_decoder),
++      use_passthrough_(gpu_preferences.use_passthrough_cmd_decoder &&
++                       gl::PassthroughCommandDecoderSupported()),
+       gl_format_caps_(GLFormatCaps(feature_info)) {
+ 
+   // Build the feature info for all the supported formats.
+diff --git a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+index 5fa7685f684ea..3bce4f1476b99 100644
+--- a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+@@ -220,7 +220,8 @@ D3DImageBackingFactory::SwapChainBackings::operator=(
+     ID3D11Device* d3d11_device,
+     const GpuPreferences& gpu_preferences) {
+   // Only supported for passthrough command decoder.
+-  if (!gpu_preferences.use_passthrough_cmd_decoder) {
++  if (!gpu_preferences.use_passthrough_cmd_decoder ||
++      !gl::PassthroughCommandDecoderSupported()) {
+     return false;
+   }
+ 
+diff --git a/gpu/command_buffer/service/shared_image/gl_common_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/gl_common_image_backing_factory.cc
+index 68233cf7a861b..90f7bf32394bc 100644
+--- a/gpu/command_buffer/service/shared_image/gl_common_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/gl_common_image_backing_factory.cc
+@@ -12,6 +12,7 @@
+ #include "components/viz/common/resources/shared_image_format.h"
+ #include "gpu/command_buffer/common/mailbox.h"
+ #include "gpu/command_buffer/common/shared_image_usage.h"
++#include "gpu/command_buffer/service/service_utils.h"
+ #include "gpu/command_buffer/service/shared_image/gl_texture_holder.h"
+ #include "gpu/config/gpu_preferences.h"
+ #include "ui/gfx/color_space.h"
+@@ -100,7 +101,8 @@ GLCommonImageBackingFactory::GLCommonImageBackingFactory(
+     const gles2::FeatureInfo* feature_info,
+     gl::ProgressReporter* progress_reporter)
+     : SharedImageBackingFactory(supported_usages),
+-      use_passthrough_(gpu_preferences.use_passthrough_cmd_decoder),
++      use_passthrough_(gpu_preferences.use_passthrough_cmd_decoder &&
++                       gles2::PassthroughCommandDecoderSupported()),
+       workarounds_(workarounds),
+       gl_format_caps_(GLFormatCaps(feature_info)),
+       use_webgpu_adapter_(gpu_preferences.use_webgpu_adapter),
+diff --git a/gpu/command_buffer/service/shared_image/shared_image_factory.cc b/gpu/command_buffer/service/shared_image/shared_image_factory.cc
+index e2a66c042c959..299a9c4be14ca 100644
+--- a/gpu/command_buffer/service/shared_image/shared_image_factory.cc
++++ b/gpu/command_buffer/service/shared_image/shared_image_factory.cc
+@@ -205,7 +205,8 @@ SharedImageFactory::SharedImageFactory(
+   if (!feature_info) {
+     // For some unit tests like SharedImageFactoryTest, |shared_context_state_|
+     // could be nullptr.
+-    bool use_passthrough = gpu_preferences.use_passthrough_cmd_decoder;
++    bool use_passthrough = gpu_preferences.use_passthrough_cmd_decoder &&
++                           gles2::PassthroughCommandDecoderSupported();
+     feature_info = new gles2::FeatureInfo(workarounds_, gpu_feature_info);
+     feature_info->Initialize(ContextType::CONTEXT_TYPE_OPENGLES2,
+                              use_passthrough, gles2::DisallowedFeatures());
+diff --git a/gpu/command_buffer/service/shared_image/shared_image_test_base.cc b/gpu/command_buffer/service/shared_image/shared_image_test_base.cc
+index 1adbe7feb3b26..677577bbf92b4 100644
+--- a/gpu/command_buffer/service/shared_image/shared_image_test_base.cc
++++ b/gpu/command_buffer/service/shared_image/shared_image_test_base.cc
+@@ -124,7 +124,8 @@ std::vector<SkPixmap> SharedImageTestBase::GetSkPixmaps(
+ SharedImageTestBase::SharedImageTestBase() {
+   gpu_preferences_.use_passthrough_cmd_decoder =
+       gles2::UsePassthroughCommandDecoder(
+-          base::CommandLine::ForCurrentProcess());
++          base::CommandLine::ForCurrentProcess()) &&
++      gles2::PassthroughCommandDecoderSupported();
+ }
+ 
+ SharedImageTestBase::~SharedImageTestBase() {
+diff --git a/gpu/config/gpu_info_collector.cc b/gpu/config/gpu_info_collector.cc
+index 0a25fbdfedcd0..c549a81c59e5b 100644
+--- a/gpu/config/gpu_info_collector.cc
++++ b/gpu/config/gpu_info_collector.cc
+@@ -585,6 +585,11 @@ bool CollectGraphicsInfoGL(GPUInfo* gpu_info, gl::GLDisplay* display) {
+   DCHECK_NE(gl::GetGLImplementationParts(), gl::kGLImplementationNone);
+   gl::GLDisplayEGL* egl_display = display->GetAs<gl::GLDisplayEGL>();
+ 
++  // Now that we can check GL extensions, update passthrough support info.
++  if (!gl::PassthroughCommandDecoderSupported()) {
++    gpu_info->passthrough_cmd_decoder = false;
++  }
++
+   scoped_refptr<gl::GLSurface> surface(InitializeGLSurface(display));
+   if (!surface.get()) {
+     LOG(ERROR) << "Could not create surface for info collection.";
+diff --git a/gpu/ipc/in_process_command_buffer.cc b/gpu/ipc/in_process_command_buffer.cc
+index ede43e8fda304..57f4f7f0a1bea 100644
+--- a/gpu/ipc/in_process_command_buffer.cc
++++ b/gpu/ipc/in_process_command_buffer.cc
+@@ -249,7 +249,8 @@ gpu::ContextResult InProcessCommandBuffer::InitializeOnGpuThread(
+   auto feature_info = base::MakeRefCounted<gles2::FeatureInfo>(
+       workarounds, task_executor_->gpu_feature_info());
+   context_group_ = base::MakeRefCounted<gles2::ContextGroup>(
+-      task_executor_->gpu_preferences(), true, std::move(memory_tracker),
++      task_executor_->gpu_preferences(),
++      gles2::PassthroughCommandDecoderSupported(), std::move(memory_tracker),
+       task_executor_->shader_translator_cache(),
+       task_executor_->framebuffer_completeness_cache(), feature_info,
+       /*progress_reporter=*/nullptr, task_executor_->gpu_feature_info(),
+diff --git a/gpu/ipc/in_process_gpu_thread_holder.cc b/gpu/ipc/in_process_gpu_thread_holder.cc
+index 978376b87a5b1..9afa6ba5fbde6 100644
+--- a/gpu/ipc/in_process_gpu_thread_holder.cc
++++ b/gpu/ipc/in_process_gpu_thread_holder.cc
+@@ -71,7 +71,8 @@ void InProcessGpuThreadHolder::InitializeOnGpuThread(
+   shared_image_manager_ = std::make_unique<SharedImageManager>();
+ 
+   bool use_passthrough_cmd_decoder =
+-      gpu_preferences_.use_passthrough_cmd_decoder;
++      gpu_preferences_.use_passthrough_cmd_decoder &&
++      gles2::PassthroughCommandDecoderSupported();
+ 
+   share_group_ = new gl::GLShareGroup();
+   surface_ =
+diff --git a/gpu/ipc/raster_in_process_context.cc b/gpu/ipc/raster_in_process_context.cc
+index b1218883f2d67..73003145eb2c6 100644
+--- a/gpu/ipc/raster_in_process_context.cc
++++ b/gpu/ipc/raster_in_process_context.cc
+@@ -130,7 +130,8 @@ bool RasterInProcessContext::SupportedInTest() {
+   const base::CommandLine* command_line =
+       base::CommandLine::ForCurrentProcess();
+   GpuPreferences gpu_preferences = gles2::ParseGpuPreferences(command_line);
+-  return !gpu_preferences.use_passthrough_cmd_decoder;
++  return !gpu_preferences.use_passthrough_cmd_decoder ||
++         !gles2::PassthroughCommandDecoderSupported();
+ }
+ 
+ }  // namespace gpu
+diff --git a/gpu/ipc/service/gles2_command_buffer_stub.cc b/gpu/ipc/service/gles2_command_buffer_stub.cc
+index 230ac10bf313b..8373ab0c8785f 100644
+--- a/gpu/ipc/service/gles2_command_buffer_stub.cc
++++ b/gpu/ipc/service/gles2_command_buffer_stub.cc
+@@ -103,8 +103,8 @@ gpu::ContextResult GLES2CommandBufferStub::Initialize(
+   auto feature_info = base::MakeRefCounted<gles2::FeatureInfo>(
+       manager->gpu_driver_bug_workarounds(), manager->gpu_feature_info());
+   context_group_ = base::MakeRefCounted<gles2::ContextGroup>(
+-        manager->gpu_preferences(), true, CreateMemoryTracker(),
+-        manager->shader_translator_cache(),
++        manager->gpu_preferences(), gles2::PassthroughCommandDecoderSupported(),
++        CreateMemoryTracker(), manager->shader_translator_cache(),
+       manager->framebuffer_completeness_cache(), feature_info,
+       manager->watchdog() /* progress_reporter */, manager->gpu_feature_info(),
+       manager->shared_image_manager());
+diff --git a/gpu/ipc/service/gpu_channel_manager.h b/gpu/ipc/service/gpu_channel_manager.h
+index adebe5a2752a9..ad85a809b8abf 100644
+--- a/gpu/ipc/service/gpu_channel_manager.h
++++ b/gpu/ipc/service/gpu_channel_manager.h
+@@ -212,7 +212,8 @@ class GPU_IPC_SERVICE_EXPORT GpuChannelManager
+   Scheduler* scheduler() const { return scheduler_; }
+ 
+   bool use_passthrough_cmd_decoder() const {
+-    return gpu_preferences_.use_passthrough_cmd_decoder;
++    return gpu_preferences_.use_passthrough_cmd_decoder &&
++           gles2::PassthroughCommandDecoderSupported();
+   }
+ 
+   // Retrieve GPU Resource consumption statistics for the task manager
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index d2613908c2838..149fa4e55b85d 100644
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -28,6 +28,7 @@
+ #include "components/crash/core/common/crash_key.h"
+ #include "components/viz/common/resources/shared_image_format.h"
+ #include "gpu/command_buffer/service/gpu_switches.h"
++#include "gpu/command_buffer/service/service_utils.h"
+ #include "gpu/config/gpu_driver_bug_list.h"
+ #include "gpu/config/gpu_driver_bug_workaround_type.h"
+ #include "gpu/config/gpu_driver_bug_workarounds.h"
+@@ -553,9 +554,24 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+   // Compute passthrough decoder status before ComputeGpuFeatureInfo below.
+   // Do this after GL is initialized so extensions can be queried.
+   // Using SwANGLE forces the passthrough command decoder.
+-  gpu_preferences_.use_passthrough_cmd_decoder |= is_swangle;
+-  gpu_info_.passthrough_cmd_decoder =
+-      gpu_preferences_.use_passthrough_cmd_decoder;
++  if (gpu_preferences_.use_passthrough_cmd_decoder || is_swangle) {
++    gpu_info_.passthrough_cmd_decoder =
++        gles2::PassthroughCommandDecoderSupported();
++#if BUILDFLAG(IS_ANDROID)
++    // We never use swiftshader on Android
++    LOG_IF(DFATAL, !gpu_info_.passthrough_cmd_decoder)
++#else
++    LOG_IF(ERROR, !gpu_info_.passthrough_cmd_decoder)
++#endif
++        << "Passthrough is not supported, GL is "
++        << gl::GetGLImplementationGLName(gl::GetGLImplementationParts())
++        << ", ANGLE is "
++        << gl::GetGLImplementationANGLEName(gl::GetGLImplementationParts());
++  } else {
++    gpu_info_.passthrough_cmd_decoder = false;
++  }
++  gpu_preferences_.use_passthrough_cmd_decoder =
++      gpu_info_.passthrough_cmd_decoder;
+ #else
+   // Use passthrough command decoder if validating was not compiled.
+   gpu_info_.passthrough_cmd_decoder = true;
+diff --git a/ui/gl/gl_utils.cc b/ui/gl/gl_utils.cc
+index 2eaeb19790cfc..90c0d3778b4c5 100644
+--- a/ui/gl/gl_utils.cc
++++ b/ui/gl/gl_utils.cc
+@@ -117,6 +117,17 @@ bool UsePassthroughCommandDecoder(const base::CommandLine* command_line) {
+ #endif  // !BUILDFLAG(ENABLE_VALIDATING_COMMAND_DECODER)
+ }
+ 
++bool PassthroughCommandDecoderSupported() {
++  GLDisplayEGL* display = gl::GLSurfaceEGL::GetGLDisplayEGL();
++  // Using the passthrough command buffer requires that specific ANGLE
++  // extensions are exposed
++  return display->ext->b_EGL_CHROMIUM_create_context_bind_generates_resource &&
++         display->ext->b_EGL_ANGLE_create_context_webgl_compatibility &&
++         display->ext->b_EGL_ANGLE_robust_resource_initialization &&
++         display->ext->b_EGL_ANGLE_display_texture_share_group &&
++         display->ext->b_EGL_ANGLE_create_context_client_arrays;
++}
++
+ const GlWorkarounds& GetGlWorkarounds() {
+   return g_workarounds;
+ }
+diff --git a/ui/gl/gl_utils.h b/ui/gl/gl_utils.h
+index 2df6abe7aa388..5ddd73dd00889 100644
+--- a/ui/gl/gl_utils.h
++++ b/ui/gl/gl_utils.h
+@@ -39,6 +39,8 @@ GL_EXPORT void DisableANGLE();
+ GL_EXPORT bool UsePassthroughCommandDecoder(
+     const base::CommandLine* command_line);
+ 
++GL_EXPORT bool PassthroughCommandDecoderSupported();
++
+ // Defines a set of workarounds that can be passed to ui/gl using the
+ // SetGlWorkarounds function below.
+ struct GlWorkarounds {
+diff --git a/ui/gl/init/gl_factory_android.cc b/ui/gl/init/gl_factory_android.cc
+index 5d973c9405638..07f62b764a73d 100644
+--- a/ui/gl/init/gl_factory_android.cc
++++ b/ui/gl/init/gl_factory_android.cc
+@@ -5,7 +5,6 @@
+ #include "ui/gl/init/gl_factory.h"
+ 
+ #include "base/check_op.h"
+-#include "base/command_line.h"
+ #include "base/notreached.h"
+ #include "base/trace_event/trace_event.h"
+ #include "ui/gl/android/scoped_a_native_window.h"
+@@ -19,7 +18,6 @@
+ #include "ui/gl/gl_surface.h"
+ #include "ui/gl/gl_surface_egl.h"
+ #include "ui/gl/gl_surface_stub.h"
+-#include "ui/gl/gl_utils.h"
+ 
+ namespace gl {
+ namespace init {
+@@ -74,14 +72,9 @@ bool GLNonOwnedContext::IsCurrent(GLSurface* surface) {
+ }  // namespace
+ 
+ std::vector<GLImplementationParts> GetAllowedGLImplementations() {
+-  static bool use_passthrough =
+-      gl::UsePassthroughCommandDecoder(base::CommandLine::ForCurrentProcess());
+   std::vector<GLImplementationParts> impls;
+-  if (use_passthrough) {
+-    impls.emplace_back(kGLImplementationEGLANGLE);
+-  } else {
+-    impls.emplace_back(kGLImplementationEGLGLES2);
+-  }
++  impls.emplace_back(kGLImplementationEGLGLES2);
++  impls.emplace_back(kGLImplementationEGLANGLE);
+   return impls;
+ }
+ 

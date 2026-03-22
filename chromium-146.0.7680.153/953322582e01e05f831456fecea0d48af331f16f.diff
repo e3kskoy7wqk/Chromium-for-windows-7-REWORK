@@ -1,0 +1,58 @@
+diff --git a/content/browser/speech/tts_win.cc b/content/browser/speech/tts_win.cc
+index de559b11439a7..6cdd5a3bfeb58 100644
+--- a/content/browser/speech/tts_win.cc
++++ b/content/browser/speech/tts_win.cc
+@@ -187,6 +187,36 @@ bool TtsPlatformImplWin::IsSpeaking() {
+                                 std::string()));
+ }
+ 
++static BOOL LookupLocaleStringFromLCID(LCID lcid, LPWSTR pszISOCode, DWORD cchISOCode)
++{
++    WCHAR   szCountry[MAX_PATH];
++    BOOL    fRet = FALSE;
++
++    if (GetLocaleInfoW(lcid, LOCALE_SISO639LANGNAME,
++                      pszISOCode, cchISOCode) == FALSE)
++    {
++        goto done;
++    }
++
++    szCountry[0] = L'-';
++
++    if (GetLocaleInfoW(lcid, LOCALE_SISO3166CTRYNAME,
++                      szCountry + 1, sizeof(szCountry)/sizeof(szCountry[0]) - 1) == FALSE)
++    {
++        goto done;
++    }
++    else
++    {
++        wcscat(pszISOCode, szCountry);
++    }
++
++    fRet = TRUE;
++
++done:
++    return fRet;
++}
++
++
+ void TtsPlatformImplBackgroundWorker::GetVoices(
+     std::vector<VoiceData>* out_voices) {
+   if (!speech_synthesizer_.Get())
+@@ -226,7 +256,15 @@ void TtsPlatformImplWin::GetVoices(
+       base::HexStringToInt(base::WideToUTF8(language.get()), &lcid_value);
+       LCID lcid = MAKELCID(lcid_value, SORT_DEFAULT);
+       WCHAR locale_name[LOCALE_NAME_MAX_LENGTH] = {};
+-      LCIDToLocaleName(lcid, locale_name, LOCALE_NAME_MAX_LENGTH, 0);
++int (WINAPI * pfnLCIDToLocaleName)(LCID, LPWSTR, int, DWORD);
++        HMODULE hmod = GetModuleHandleW(L"kernel32");
++        *(FARPROC*)&pfnLCIDToLocaleName =
++            GetProcAddress(hmod, "LCIDToLocaleName");
++        if (pfnLCIDToLocaleName != NULL) {
++          pfnLCIDToLocaleName(lcid, locale_name, LOCALE_NAME_MAX_LENGTH, 0);
++        } else {
++          LookupLocaleStringFromLCID(lcid, locale_name, LOCALE_NAME_MAX_LENGTH);
++        }
+       voice.lang = base::WideToUTF8(locale_name);
+     }
+ 
