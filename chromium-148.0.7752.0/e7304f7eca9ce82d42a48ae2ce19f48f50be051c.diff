@@ -1,0 +1,20 @@
+diff --git a/chrome/browser/ui/views/tabs/tab.cc b/chrome/browser/ui/views/tabs/tab.cc
+index a57971e19a065..0e51b1f884e84 100644
+--- a/chrome/browser/ui/views/tabs/tab.cc
++++ b/chrome/browser/ui/views/tabs/tab.cc
+@@ -54,6 +54,7 @@
+ #include "chrome/browser/ui/views/tabs/tab_strip_layout.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip_types.h"
+ #include "chrome/browser/ui/views/tabs/tab_style_views.h"
++#include "chrome/browser/win/mica_titlebar.h"
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "chrome/grit/theme_resources.h"
+@@ -238,6 +239,7 @@ Tab::Tab(tabs::TabHandle handle, TabSlotController* controller)
+   title_->SetHandlesTooltips(false);
+   title_->SetAutoColorReadabilityEnabled(false);
+   title_->SetText(CoreTabHelper::GetDefaultTitle());
++  if (SystemTitlebarCanUseMicaMaterial())
+   title_->SetBackgroundColor(SK_ColorTRANSPARENT);
+   // `title_` paints on top of an opaque region (the tab background) of a
+   // non-opaque layer (the tabstrip's layer), which cannot currently be detected

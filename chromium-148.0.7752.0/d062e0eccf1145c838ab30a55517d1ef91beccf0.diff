@@ -1,0 +1,516 @@
+diff --git a/components/network_session_configurator/browser/network_session_configurator.cc b/components/network_session_configurator/browser/network_session_configurator.cc
+index 4423403712fc6..8dae902535072 100644
+--- a/components/network_session_configurator/browser/network_session_configurator.cc
++++ b/components/network_session_configurator/browser/network_session_configurator.cc
+@@ -316,6 +316,14 @@ bool ShouldQuicUseNewAlpsCodepoint(
+       "false");
+ }
+ 
++bool ShouldQuicReportEcn(
++    const VariationParameters& quic_trial_params) {
++  return GetVariationBoolParamOrFeatureSetting(
++      quic_trial_params, "report_ecn",
++      base::FeatureList::IsEnabled(net::features::kReportEcn),
++      "false");
++}
++
+ bool ShouldQuicMigrateSessionsEarlyV2(
+     const VariationParameters& quic_trial_params) {
+   return base::EqualsCaseInsensitiveASCII(
+@@ -705,6 +712,7 @@ void ConfigureQuicParams(const base::CommandLine& command_line,
+     if (DelayMainJobWithAvailableSpdySession(quic_trial_params)) {
+       quic_params->delay_main_job_with_available_spdy_session = true;
+     }
++    quic_params->report_ecn = ShouldQuicReportEcn(quic_trial_params);
+     quic_params->enable_origin_frame = IsOriginFrameEnabled(quic_trial_params);
+     quic_params->skip_dns_with_origin_frame =
+         IsDnsSkippedWithOriginFrame(quic_trial_params);
+diff --git a/net/base/features.cc b/net/base/features.cc
+index a5066d4698fc6..2116df3a45887 100644
+--- a/net/base/features.cc
++++ b/net/base/features.cc
+@@ -557,6 +557,8 @@ BASE_FEATURE(kSpdyHeadersToHttpResponseUseBuilder,
+ BASE_FEATURE(kSpdyHeadersToHttpResponseUseBuilder,
+              base::FEATURE_DISABLED_BY_DEFAULT);
+ 
++BASE_FEATURE(kReportEcn, base::FEATURE_DISABLED_BY_DEFAULT);
++
+ BASE_FEATURE(kUseNewAlpsCodepointHttp2, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kUseNewAlpsCodepointQUIC, base::FEATURE_ENABLED_BY_DEFAULT);
+diff --git a/net/base/features.h b/net/base/features.h
+index 9b84399f3a667..ea28cab01e850 100644
+--- a/net/base/features.h
++++ b/net/base/features.h
+@@ -562,6 +562,10 @@ NET_EXPORT BASE_DECLARE_FEATURE(kThirdPartyPartitionedStorageAllowedByDefault);
+ // Enables a more efficient implementation of SpdyHeadersToHttpResponse().
+ NET_EXPORT BASE_DECLARE_FEATURE(kSpdyHeadersToHttpResponseUseBuilder);
+ 
++// Enables receiving ECN bit by UDP sockets in Chrome, and reporting the counts
++// to QUIC servers via ACK frames.
++NET_EXPORT BASE_DECLARE_FEATURE(kReportEcn);
++
+ // Enables using the new ALPS codepoint to negotiate application settings for
+ // HTTP2.
+ NET_EXPORT BASE_DECLARE_FEATURE(kUseNewAlpsCodepointHttp2);
+diff --git a/net/http/http_stream_factory_job_controller_unittest.cc b/net/http/http_stream_factory_job_controller_unittest.cc
+index 0ba32d9b3aaa4..b3201364b7026 100644
+--- a/net/http/http_stream_factory_job_controller_unittest.cc
++++ b/net/http/http_stream_factory_job_controller_unittest.cc
+@@ -719,6 +719,7 @@ class JobControllerReconsiderProxyAfterErrorTest
+         base::DefaultTickClock::GetInstance(),
+         base::SingleThreadTaskRunner::GetCurrentDefault().get(),
+         /*socket_performance_watcher=*/nullptr, ConnectionEndpointMetadata(),
++        /*report_ecn=*/true,
+         /*enable_origin_frame=*/true,
+         /*allow_server_preferred_address=*/true,
+         MultiplexedSessionCreationInitiator::kUnknown,
+diff --git a/net/quic/bidirectional_stream_quic_impl_unittest.cc b/net/quic/bidirectional_stream_quic_impl_unittest.cc
+index bbfa6aa616f10..0794bbe9cf252 100644
+--- a/net/quic/bidirectional_stream_quic_impl_unittest.cc
++++ b/net/quic/bidirectional_stream_quic_impl_unittest.cc
+@@ -565,7 +565,8 @@ class BidirectionalStreamQuicImplTest
+         base::DefaultTickClock::GetInstance(),
+         base::SingleThreadTaskRunner::GetCurrentDefault().get(),
+         /*socket_performance_watcher=*/nullptr, ConnectionEndpointMetadata(),
+-        /*enable_origin_frame=*/true, /*server_preferred_address=*/true,
++        /*report_ecn=*/true, /*enable_origin_frame=*/true,
++        /*server_preferred_address=*/true,
+         MultiplexedSessionCreationInitiator::kUnknown,
+         NetLogWithSource::Make(NetLogSourceType::NONE));
+     session_->Initialize();
+diff --git a/net/quic/dedicated_web_transport_http3_client.cc b/net/quic/dedicated_web_transport_http3_client.cc
+index b1c857e8a8880..1b2a516b9be5e 100644
+--- a/net/quic/dedicated_web_transport_http3_client.cc
++++ b/net/quic/dedicated_web_transport_http3_client.cc
+@@ -624,7 +624,7 @@ void DedicatedWebTransportHttp3Client::CreateConnection() {
+       kQuicYieldAfterPacketsRead,
+       quic::QuicTime::Delta::FromMilliseconds(
+           kQuicYieldAfterDurationMilliseconds),
+-      net_log_);
++      quic_context_->params()->report_ecn, net_log_);
+ 
+   event_logger_ = std::make_unique<QuicEventLogger>(session_.get(), net_log_);
+   connection_->set_debug_visitor(event_logger_.get());
+diff --git a/net/quic/quic_chromium_client_session.cc b/net/quic/quic_chromium_client_session.cc
+index 00af896b207c1..d61ee614deaf5 100644
+--- a/net/quic/quic_chromium_client_session.cc
++++ b/net/quic/quic_chromium_client_session.cc
+@@ -976,6 +976,7 @@ QuicChromiumClientSession::QuicChromiumClientSession(
+     base::SequencedTaskRunner* task_runner,
+     std::unique_ptr<SocketPerformanceWatcher> socket_performance_watcher,
+     const ConnectionEndpointMetadata& metadata,
++    bool report_ecn,
+     bool enable_origin_frame,
+     bool allow_server_preferred_address,
+     MultiplexedSessionCreationInitiator session_creation_initiator,
+@@ -1011,6 +1012,7 @@ QuicChromiumClientSession::QuicChromiumClientSession(
+       transport_security_state_(transport_security_state),
+       ssl_config_service_(ssl_config_service),
+       server_info_(std::move(server_info)),
++      report_ecn_(report_ecn),
+       enable_origin_frame_(enable_origin_frame),
+       task_runner_(task_runner),
+       net_log_(NetLogWithSource::Make(net_log.net_log(),
+@@ -1029,7 +1031,7 @@ QuicChromiumClientSession::QuicChromiumClientSession(
+   auto* socket_raw = socket.get();
+   packet_readers_.push_back(std::make_unique<QuicChromiumPacketReader>(
+       std::move(socket), clock, this, yield_after_packets, yield_after_duration,
+-      net_log_));
++      report_ecn, net_log_));
+   crypto_stream_ = crypto_client_stream_factory->CreateQuicCryptoClientStream(
+       session_key_.server_id(), this,
+       std::make_unique<ProofVerifyContextChromium>(cert_verify_flags, net_log_),
+@@ -1100,6 +1102,12 @@ QuicChromiumClientSession::~QuicChromiumClientSession() {
+     RecordHandshakeState(STATE_FAILED);
+   }
+ 
++  UMA_HISTOGRAM_ENUMERATION(
++      "Net.QuicSession.EcnMarksObserved",
++      static_cast<EcnPermutations>(observed_incoming_ecn_));
++  UMA_HISTOGRAM_COUNTS_10M(
++      "Net.QuicSession.PacketsBeforeEcnTransition",
++      observed_ecn_transition_ ? incoming_packets_before_ecn_transition_ : 0);
+   UMA_HISTOGRAM_COUNTS_1M("Net.QuicSession.NumTotalStreams",
+                           num_total_streams_);
+ 
+@@ -3236,7 +3244,7 @@ void QuicChromiumClientSession::FinishCreateContextForMultiPortPath(
+       probing_socket.get(), task_runner_);
+   auto probing_reader = std::make_unique<QuicChromiumPacketReader>(
+       std::move(probing_socket), clock_, this, yield_after_packets_,
+-      yield_after_duration_, net_log_);
++      yield_after_duration_, session_pool_->report_ecn(), net_log_);
+ 
+   probing_reader->StartReading();
+   path_validation_writer_delegate_.set_network(default_network_);
+@@ -3332,7 +3340,7 @@ void QuicChromiumClientSession::FinishStartProbing(
+       probing_socket.get(), task_runner_);
+   auto probing_reader = std::make_unique<QuicChromiumPacketReader>(
+       std::move(probing_socket), clock_, this, yield_after_packets_,
+-      yield_after_duration_, net_log_);
++      yield_after_duration_, session_pool_->report_ecn(), net_log_);
+ 
+   probing_reader->StartReading();
+   path_validation_writer_delegate_.set_network(network);
+@@ -3732,6 +3740,16 @@ bool QuicChromiumClientSession::OnPacket(
+     const quic::QuicSocketAddress& local_address,
+     const quic::QuicSocketAddress& peer_address) {
+   ProcessUdpPacket(local_address, peer_address, packet);
++  uint8_t new_incoming_ecn =
++      (0x1 << static_cast<uint8_t>(packet.ecn_codepoint()));
++  if (new_incoming_ecn != observed_incoming_ecn_ &&
++      incoming_packets_before_ecn_transition_ > 0) {
++    observed_ecn_transition_ = true;
++  }
++  if (!observed_ecn_transition_) {
++    ++incoming_packets_before_ecn_transition_;
++  }
++  observed_incoming_ecn_ |= new_incoming_ecn;
+   if (!connection()->connected()) {
+     NotifyFactoryOfSessionClosedLater();
+     return false;
+@@ -3905,7 +3923,7 @@ void QuicChromiumClientSession::FinishMigrate(
+   // Create new packet reader and writer on the new socket.
+   auto new_reader = std::make_unique<QuicChromiumPacketReader>(
+       std::move(socket), clock_, this, yield_after_packets_,
+-      yield_after_duration_, net_log_);
++      yield_after_duration_, session_pool_->report_ecn(), net_log_);
+   new_reader->StartReading();
+   auto new_writer = std::make_unique<QuicChromiumPacketWriter>(
+       new_reader->socket(), task_runner_);
+diff --git a/net/quic/quic_chromium_client_session.h b/net/quic/quic_chromium_client_session.h
+index ff3bf4b0e3fbd..eb8033b8600ef 100644
+--- a/net/quic/quic_chromium_client_session.h
++++ b/net/quic/quic_chromium_client_session.h
+@@ -620,6 +620,8 @@ class NET_EXPORT_PRIVATE QuicChromiumClientSession
+   // connection), the `dns_resolution_*_time` arguments should be equal and
+   // the current time, and `endpoint_result` should be an empty value, with an
+   // empty address list.
++  // TODO(crbug.com/332924003): Delete the |report_ecn| argument when the
++  // feature is deprecated.
+   QuicChromiumClientSession(
+       quic::QuicConnection* connection,
+       std::unique_ptr<DatagramClientSocket> socket,
+@@ -654,6 +656,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientSession
+       base::SequencedTaskRunner* task_runner,
+       std::unique_ptr<SocketPerformanceWatcher> socket_performance_watcher,
+       const ConnectionEndpointMetadata& metadata,
++      bool report_ecn,
+       bool enable_origin_frame,
+       bool allow_server_preferred_address,
+       MultiplexedSessionCreationInitiator session_creation_initiator,
+@@ -1176,6 +1179,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientSession
+   std::unique_ptr<CertVerifyResult> cert_verify_result_;
+   bool pkp_bypassed_ = false;
+   bool is_fatal_cert_error_ = false;
++  bool report_ecn_;
+   const bool enable_origin_frame_;
+   HandleSet handles_;
+   StreamRequestQueue stream_requests_;
+@@ -1240,6 +1244,19 @@ class NET_EXPORT_PRIVATE QuicChromiumClientSession
+ 
+   std::vector<uint8_t> ech_config_list_;
+ 
++  // Bitmap of incoming IP ECN marks observed on this session. Bit 0 = Not-ECT,
++  // Bit 1 = ECT(1), Bit 2 = ECT(0), Bit 3 = CE. Reported to metrics at the
++  // end of the session.
++  uint8_t observed_incoming_ecn_ = 0;
++
++  // The number of incoming packets in this session before it observes a change
++  // in the incoming packet ECN marking.
++  uint64_t incoming_packets_before_ecn_transition_ = 0;
++
++  // When true, the session has observed a transition and can stop incrementing
++  // incoming_packets_before_ecn_transition_.
++  bool observed_ecn_transition_ = false;
++
+   // The list of TLS Trust Anchor IDs, each in binary representation, advertised
+   // by the server in DNS.
+   std::vector<std::vector<uint8_t>> trust_anchor_ids_;
+diff --git a/net/quic/quic_chromium_packet_reader.cc b/net/quic/quic_chromium_packet_reader.cc
+index 41344ef41d72c..dcdb77723ea2b 100644
+--- a/net/quic/quic_chromium_packet_reader.cc
++++ b/net/quic/quic_chromium_packet_reader.cc
+@@ -29,6 +29,7 @@ QuicChromiumPacketReader::QuicChromiumPacketReader(
+     Visitor* visitor,
+     int yield_after_packets,
+     quic::QuicTime::Delta yield_after_duration,
++    bool report_ecn,
+     const NetLogWithSource& net_log)
+     : socket_(std::move(socket)),
+       visitor_(visitor),
+@@ -37,7 +38,8 @@ QuicChromiumPacketReader::QuicChromiumPacketReader(
+       yield_after_duration_(yield_after_duration),
+       yield_after_(quic::QuicTime::Infinite()),
+       read_buffer_(base::MakeRefCounted<IOBufferWithSize>(kReadBufferSize)),
+-      net_log_(net_log) {}
++      net_log_(net_log),
++      report_ecn_(report_ecn) {}
+ 
+ QuicChromiumPacketReader::~QuicChromiumPacketReader() = default;
+ 
+@@ -107,8 +109,11 @@ bool QuicChromiumPacketReader::ProcessReadResult(int result) {
+     return visitor_->OnReadError(result, socket_.get());
+   }
+ 
+-  DscpAndEcn tos = socket_->GetLastTos();
+-  quic::QuicEcnCodepoint ecn = static_cast<quic::QuicEcnCodepoint>(tos.ecn);
++  quic::QuicEcnCodepoint ecn = quic::ECN_NOT_ECT;
++  if (report_ecn_) {
++    DscpAndEcn tos = socket_->GetLastTos();
++    ecn = static_cast<quic::QuicEcnCodepoint>(tos.ecn);
++  }
+   quic::QuicReceivedPacket packet(read_buffer_->data(), result, clock_->Now(),
+                                   /*owns_buffer=*/false, /*ttl=*/0,
+                                   /*ttl_valid=*/true,
+diff --git a/net/quic/quic_chromium_packet_reader.h b/net/quic/quic_chromium_packet_reader.h
+index 513aeca782f16..efa772c1160b3 100644
+--- a/net/quic/quic_chromium_packet_reader.h
++++ b/net/quic/quic_chromium_packet_reader.h
+@@ -40,11 +40,17 @@ class NET_EXPORT_PRIVATE QuicChromiumPacketReader {
+                           const quic::QuicSocketAddress& peer_address) = 0;
+   };
+ 
++  // If |report_ecn| is true, then the reader will call GetLastTos() on the
++  // socket after each read and report the ECN codepoint in the
++  // QuicReceivedPacket.
++  // TODO(crbug.com/332924003): When the relevant config flags are deprecated,
++  // this argument can be removed.
+   QuicChromiumPacketReader(std::unique_ptr<DatagramClientSocket> socket,
+                            const quic::QuicClock* clock,
+                            Visitor* visitor,
+                            int yield_after_packets,
+                            quic::QuicTime::Delta yield_after_duration,
++                           bool report_ecn,
+                            const NetLogWithSource& net_log);
+ 
+   QuicChromiumPacketReader(const QuicChromiumPacketReader&) = delete;
+@@ -77,6 +83,9 @@ class NET_EXPORT_PRIVATE QuicChromiumPacketReader {
+   quic::QuicTime yield_after_;
+   scoped_refptr<IOBufferWithSize> read_buffer_;
+   NetLogWithSource net_log_;
++  // Stores whether receiving ECN is in the feature list to avoid accessing
++  // the feature list for every packet.
++  bool report_ecn_;
+ 
+   base::WeakPtrFactory<QuicChromiumPacketReader> weak_factory_{this};
+ };
+diff --git a/net/quic/quic_context.h b/net/quic/quic_context.h
+index e2c1caa8299e1..24ae5a8c989d4 100644
+--- a/net/quic/quic_context.h
++++ b/net/quic/quic_context.h
+@@ -229,6 +229,10 @@ struct NET_EXPORT QuicParams {
+   // If true, ALPS uses new codepoint to negotiates application settings.
+   bool use_new_alps_codepoint = true;
+ 
++  // If true, read Explicit Congestion Notification (ECN) marks from QUIC
++  // sockets and report them to the peer.
++  bool report_ecn = false;
++
+   // If true, parse received ORIGIN frame.
+   bool enable_origin_frame = true;
+ 
+diff --git a/net/quic/quic_http_stream_test.cc b/net/quic/quic_http_stream_test.cc
+index c3333e286fd19..07ae61f08723c 100644
+--- a/net/quic/quic_http_stream_test.cc
++++ b/net/quic/quic_http_stream_test.cc
+@@ -435,7 +435,8 @@ class QuicHttpStreamTest : public ::testing::TestWithParam<TestParams>,
+         base::DefaultTickClock::GetInstance(),
+         base::SingleThreadTaskRunner::GetCurrentDefault().get(),
+         /*socket_performance_watcher=*/nullptr, ConnectionEndpointMetadata(),
+-        /*enable_origin_frame=*/true, /*allow_server_preferred_address=*/true,
++        /*report_ecn=*/true, /*enable_origin_frame=*/true,
++        /*allow_server_preferred_address=*/true,
+         MultiplexedSessionCreationInitiator::kUnknown,
+         NetLogWithSource::Make(NetLogSourceType::NONE));
+     session_->Initialize();
+diff --git a/net/quic/quic_proxy_client_socket_test_base.cc b/net/quic/quic_proxy_client_socket_test_base.cc
+index a68f258268371..074681f08eb9f 100644
+--- a/net/quic/quic_proxy_client_socket_test_base.cc
++++ b/net/quic/quic_proxy_client_socket_test_base.cc
+@@ -197,7 +197,8 @@ void QuicProxyClientSocketTestBase::InitializeSession() {
+       base::DefaultTickClock::GetInstance(),
+       base::SingleThreadTaskRunner::GetCurrentDefault().get(),
+       /*socket_performance_watcher=*/nullptr, ConnectionEndpointMetadata(),
+-      /*enable_origin_frame=*/true, /*allow_server_preferred_address=*/true,
++      /*report_ecn=*/true, /*enable_origin_frame=*/true,
++      /*allow_server_preferred_address=*/true,
+       MultiplexedSessionCreationInitiator::kUnknown,
+       NetLogWithSource::Make(NetLogSourceType::NONE));
+ 
+diff --git a/net/quic/quic_session_pool.cc b/net/quic/quic_session_pool.cc
+index f544cc83655c0..d38246331689c 100644
+--- a/net/quic/quic_session_pool.cc
++++ b/net/quic/quic_session_pool.cc
+@@ -671,6 +671,7 @@ QuicSessionPool::QuicSessionPool(
+       ssl_config_service_(ssl_config_service),
+       use_network_anonymization_key_for_crypto_configs_(
+           NetworkAnonymizationKey::IsPartitioningEnabled()),
++      report_ecn_(quic_context->params()->report_ecn),
+       skip_dns_with_origin_frame_(
+           quic_context->params()->skip_dns_with_origin_frame),
+       ignore_ip_matching_when_finding_existing_sessions_(
+@@ -1087,11 +1088,13 @@ void QuicSessionPool::FinishConnectAndConfigureSocket(
+     return;
+   }
+ 
+-  rv = socket->SetRecvTos();
+-  if (rv != OK) {
+-    OnFinishConnectAndConfigureSocketError(
+-        std::move(callback), CREATION_ERROR_SETTING_RECEIVE_ECN, rv);
+-    return;
++  if (report_ecn_) {
++    rv = socket->SetRecvTos();
++    if (rv != OK) {
++      OnFinishConnectAndConfigureSocketError(
++          std::move(callback), CREATION_ERROR_SETTING_RECEIVE_ECN, rv);
++      return;
++    }
+   }
+ 
+   // Set a buffer large enough to contain the initial CWND's worth of packet
+@@ -1201,10 +1204,12 @@ int QuicSessionPool::ConfigureSocket(DatagramClientSocket* socket,
+     return rv;
+   }
+ 
+-  rv = socket->SetRecvTos();
+-  if (rv != OK) {
+-    HistogramCreateSessionFailure(CREATION_ERROR_SETTING_RECEIVE_ECN);
+-    return rv;
++  if (report_ecn_) {
++    rv = socket->SetRecvTos();
++    if (rv != OK) {
++      HistogramCreateSessionFailure(CREATION_ERROR_SETTING_RECEIVE_ECN);
++      return rv;
++    }
+   }
+ 
+   // Set a buffer large enough to contain the initial CWND's worth of packet
+@@ -1930,7 +1935,7 @@ QuicSessionPool::CreateSessionHelper(
+       std::move(crypto_config_handle),
+       network_connection_.connection_description(), dns_resolution_start_time,
+       dns_resolution_end_time, tick_clock_, task_runner_.get(),
+-      std::move(socket_performance_watcher), metadata,
++      std::move(socket_performance_watcher), metadata, params_.report_ecn,
+       params_.enable_origin_frame, params_.allow_server_migration,
+       session_creation_initiator, net_log);
+   QuicChromiumClientSession* session = new_session.get();
+diff --git a/net/quic/quic_session_pool.h b/net/quic/quic_session_pool.h
+index 6705658e43af1..5c00be4cc1c24 100644
+--- a/net/quic/quic_session_pool.h
++++ b/net/quic/quic_session_pool.h
+@@ -511,6 +511,9 @@ class NET_EXPORT_PRIVATE QuicSessionPool
+     return params_.disable_gquic_zero_rtt;
+   }
+ 
++  // Returns true if QuicSessionPool is configured to report incoming ECN marks.
++  bool report_ecn() const { return report_ecn_; }
++
+   void set_has_quic_ever_worked_on_current_network(
+       bool has_quic_ever_worked_on_current_network);
+ 
+@@ -897,6 +900,10 @@ class NET_EXPORT_PRIVATE QuicSessionPool
+   // corresponding NAK.
+   const bool use_network_anonymization_key_for_crypto_configs_;
+ 
++  // If true, sessions created by this pool will read ECN marks from QUIC
++  // sockets and send them to the peer.
++  const bool report_ecn_;
++
+   // If true, skip DNS resolution for a hostname if the ORIGIN frame received on
+   // an active session encompasses that hostname.
+   const bool skip_dns_with_origin_frame_;
+diff --git a/net/tools/quic/quic_client_message_loop_network_helper.cc b/net/tools/quic/quic_client_message_loop_network_helper.cc
+index 8558431ebeb00..f1d1e0f6cdc89 100644
+--- a/net/tools/quic/quic_client_message_loop_network_helper.cc
++++ b/net/tools/quic/quic_client_message_loop_network_helper.cc
+@@ -91,7 +91,7 @@ bool QuicClientMessageLooplNetworkHelper::CreateUDPSocketAndBind(
+       std::move(socket_), clock_, this, kQuicYieldAfterPacketsRead,
+       quic::QuicTime::Delta::FromMilliseconds(
+           kQuicYieldAfterDurationMilliseconds),
+-      NetLogWithSource());
++      /*report_ecn=*/true, NetLogWithSource());
+ 
+   if (socket != nullptr) {
+     socket->Close();
+diff --git a/net/websockets/websocket_basic_stream_adapters_test.cc b/net/websockets/websocket_basic_stream_adapters_test.cc
+index ea0ea2fc45802..23bf8a53141ce 100644
+--- a/net/websockets/websocket_basic_stream_adapters_test.cc
++++ b/net/websockets/websocket_basic_stream_adapters_test.cc
+@@ -1308,7 +1308,8 @@ class WebSocketQuicStreamAdapterTest
+         base::DefaultTickClock::GetInstance(),
+         base::SingleThreadTaskRunner::GetCurrentDefault().get(),
+         /*socket_performance_watcher=*/nullptr, ConnectionEndpointMetadata(),
+-        /*enable_origin_frame=*/true, /*allow_server_preferred_address=*/true,
++        /*report_ecn=*/true, /*enable_origin_frame=*/true,
++        /*allow_server_preferred_address=*/true,
+         MultiplexedSessionCreationInitiator::kUnknown,
+         NetLogWithSource::Make(NetLogSourceType::NONE));
+ 
+diff --git a/net/websockets/websocket_handshake_stream_create_helper_test.cc b/net/websockets/websocket_handshake_stream_create_helper_test.cc
+index 43f119c126f6f..c47495feef59c 100644
+--- a/net/websockets/websocket_handshake_stream_create_helper_test.cc
++++ b/net/websockets/websocket_handshake_stream_create_helper_test.cc
+@@ -521,7 +521,8 @@ class WebSocketHandshakeStreamCreateHelperTest
+             base::DefaultTickClock::GetInstance(),
+             base::SingleThreadTaskRunner::GetCurrentDefault().get(),
+             /*socket_performance_watcher=*/nullptr,
+-            ConnectionEndpointMetadata(), /*enable_origin_frame=*/true,
++            ConnectionEndpointMetadata(), /*report_ecn=*/true,
++            /*enable_origin_frame=*/true,
+             /*allow_server_preferred_address=*/true,
+             MultiplexedSessionCreationInitiator::kUnknown,
+             NetLogWithSource::Make(NetLogSourceType::NONE));
+diff --git a/tools/metrics/histograms/metadata/net/histograms.xml b/tools/metrics/histograms/metadata/net/histograms.xml
+index 8a204d6b83844..ef83eb6174aac 100644
+--- a/tools/metrics/histograms/metadata/net/histograms.xml
++++ b/tools/metrics/histograms/metadata/net/histograms.xml
+@@ -4380,6 +4380,16 @@ chromium-metrics-reviews@google.com.
+   </summary>
+ </histogram>
+ 
++<histogram name="Net.QuicSession.EcnMarksObserved" enum="EcnPermutations"
++    expires_after="2025-02-23">
++  <owner>martinduke@google.com</owner>
++  <owner>rch@chromium.org</owner>
++  <summary>
++    The combination of ECN marks observed on a single QuicSession. Recorded when
++    the session is closed.
++  </summary>
++</histogram>
++
+ <histogram name="Net.QuicSession.EcnMarksSent" enum="EcnPermutations"
+     expires_after="2025-09-05">
+   <owner>martinduke@google.com</owner>
+@@ -5025,6 +5035,18 @@ chromium-metrics-reviews@google.com.
+   </summary>
+ </histogram>
+ 
++<histogram name="Net.QuicSession.PacketsBeforeEcnTransition" units="packets"
++    expires_after="2025-06-29">
++  <owner>martinduke@google.com</owner>
++  <owner>rch@chromium.org</owner>
++  <summary>
++    The number of packets received before the session observes an Explicit
++    Congestion Notification (ECN) marking different from the first one in the
++    session. Reported when the session occurs. A value of zero means no
++    transition occurred.
++  </summary>
++</histogram>
++
+ <histogram name="Net.QuicSession.PacketWriteTime{IOMode}" units="units"
+     expires_after="2024-09-06">
+   <owner>dschinazi@chromium.org</owner>
+diff --git a/net/socket/udp_socket_win.cc b/net/socket/udp_socket_win.cc
+index 8b11858cd7cfc..b2b5b7cf9a060 100644
+--- a/net/socket/udp_socket_win.cc
++++ b/net/socket/udp_socket_win.cc
+@@ -727,7 +727,7 @@ int UDPSocketWin::SetRecvTos() {
+   if (wsa_recv_msg_ == nullptr) {
+     return LogAndReturnError();
+   }
+-  report_ecn_ = true;
++//report_ecn_ = true;
+   return 0;
+ }
+ 
