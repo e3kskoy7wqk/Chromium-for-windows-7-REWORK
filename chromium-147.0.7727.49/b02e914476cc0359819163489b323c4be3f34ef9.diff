@@ -1,0 +1,630 @@
+diff --git a/device/vr/openxr/windows/openxr_graphics_binding_d3d11.cc b/device/vr/openxr/windows/openxr_graphics_binding_d3d11.cc
+index fc2fadd5433b4..3402c2aeb4bb4 100644
+--- a/device/vr/openxr/windows/openxr_graphics_binding_d3d11.cc
++++ b/device/vr/openxr/windows/openxr_graphics_binding_d3d11.cc
+@@ -143,7 +143,11 @@ void OpenXrGraphicsBindingD3D11::CreateSharedImages(
+     Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+     HRESULT hr = swap_chain_info.d3d11_texture->QueryInterface(
+         IID_PPV_ARGS(&dxgi_resource));
+-    CHECK_EQ(hr, S_OK);
++    if (FAILED(hr)) {
++      DLOG(ERROR) << "QueryInterface for IDXGIResource failed with error "
++                  << std::hex << hr;
++      return;
++    }
+ 
+     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+     hr = dxgi_resource.As(&d3d11_texture);
+@@ -195,7 +199,13 @@ void OpenXrGraphicsBindingD3D11::CreateSharedImages(
+ 
+       hr = swap_chain_info.d3d11_shared_texture->QueryInterface(
+           IID_PPV_ARGS(&dxgi_resource));
+-      CHECK_EQ(hr, S_OK);
++      if (FAILED(hr)) {
++        DLOG(ERROR) << "QueryInterface for IDXGIResource of shared texture "
++                       "failed with error 0x"
++                    << std::hex << hr;
++        swap_chain_info.d3d11_shared_texture = nullptr;
++        return;
++      }
+ 
+       hr = dxgi_resource->CreateSharedHandle(
+           nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+diff --git a/device/vr/windows/d3d11_texture_helper.cc b/device/vr/windows/d3d11_texture_helper.cc
+index 8a3d3d72ebe47..fea73857dfa05 100644
+--- a/device/vr/windows/d3d11_texture_helper.cc
++++ b/device/vr/windows/d3d11_texture_helper.cc
+@@ -189,11 +189,17 @@ bool D3D11TextureHelper::CopyToBackBuffer(
+ 
+   Microsoft::WRL::ComPtr<ID3D11Device1> d3d11_device;
+   HRESULT hr = render_state_.d3d11_device_.As(&d3d11_device);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    DLOG(ERROR) << "Failed to get ID3D11Device1.";
++    return false;
++  }
+ 
+   Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+   hr = source->QueryInterface(IID_PPV_ARGS(&dxgi_resource));
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    DLOG(ERROR) << "Failed QueryInterface.";
++    return false;
++  }
+ 
+   Microsoft::WRL::ComPtr<IDXGIKeyedMutex> keyed_mutex;
+   hr = dxgi_resource.As(&(keyed_mutex));
+diff --git a/gpu/command_buffer/service/dawn_context_provider.cc b/gpu/command_buffer/service/dawn_context_provider.cc
+index ba8194b2c35d2..444fd255a6a83 100644
+--- a/gpu/command_buffer/service/dawn_context_provider.cc
++++ b/gpu/command_buffer/service/dawn_context_provider.cc
+@@ -318,8 +318,10 @@ bool GetANGLED3D11DeviceLUID(LUID* luid) {
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  if (!SUCCEEDED(d3d11_device.As(&dxgi_device))) {
++    LOG(ERROR) << "Failed to get IDXGIDevice from ANGLE.";
++    return false;
++  }
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+   if (!SUCCEEDED(dxgi_device->GetAdapter(&dxgi_adapter))) {
+diff --git a/gpu/command_buffer/service/dxgi_shared_handle_manager.cc b/gpu/command_buffer/service/dxgi_shared_handle_manager.cc
+index ff36b495c6c13..0477c26f9bb8f 100644
+--- a/gpu/command_buffer/service/dxgi_shared_handle_manager.cc
++++ b/gpu/command_buffer/service/dxgi_shared_handle_manager.cc
+@@ -23,7 +23,11 @@ Microsoft::WRL::ComPtr<ID3D11Texture2D> OpenSharedHandleTexture(
+     HANDLE shared_handle) {
+   Microsoft::WRL::ComPtr<ID3D11Device1> d3d11_device1;
+   HRESULT hr = d3d11_device.As(&d3d11_device1);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    LOG(ERROR) << "Failed to query for ID3D11Device1. Error: "
++               << logging::SystemErrorCodeToString(hr);
++    return nullptr;
++  }
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+   hr = d3d11_device1->OpenSharedResource1(shared_handle,
+diff --git a/gpu/command_buffer/service/shared_image/d3d11_image_same_adapter_copy_strategy.cc b/gpu/command_buffer/service/shared_image/d3d11_image_same_adapter_copy_strategy.cc
+index 00da7faa3e5c8..6c39fae8dc4e7 100644
+--- a/gpu/command_buffer/service/shared_image/d3d11_image_same_adapter_copy_strategy.cc
++++ b/gpu/command_buffer/service/shared_image/d3d11_image_same_adapter_copy_strategy.cc
+@@ -49,7 +49,10 @@ bool D3D11ImageSameAdapterCopyStrategy::CopyD3D11TextureOnSameAdapter(
+   // Get a shared handle to the destination texture.
+   Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+   HRESULT hr = dest_texture->QueryInterface(IID_PPV_ARGS(&dxgi_resource));
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    LOG(ERROR) << "Failed to get DXGI resource. hr=" << std::hex << hr;
++    return false;
++  }
+   HANDLE shared_handle;
+   hr = dxgi_resource->CreateSharedHandle(
+       nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
+@@ -63,7 +66,11 @@ bool D3D11ImageSameAdapterCopyStrategy::CopyD3D11TextureOnSameAdapter(
+   // Open the shared handle on the source device.
+   Microsoft::WRL::ComPtr<ID3D11Device1> src_device1;
+   hr = src_device.As(&src_device1);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    LOG(ERROR) << "Failed to query ID3D11Device1 from source device. hr="
++               << std::hex << hr;
++    return false;
++  }
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> opened_texture_on_src;
+   hr = src_device1->OpenSharedResource1(shared_handle,
+                                         IID_PPV_ARGS(&opened_texture_on_src));
+diff --git a/gpu/command_buffer/service/shared_image/d3d_image_backing.cc b/gpu/command_buffer/service/shared_image/d3d_image_backing.cc
+index e70064203ae6b..d64ea5b9545e0 100644
+--- a/gpu/command_buffer/service/shared_image/d3d_image_backing.cc
++++ b/gpu/command_buffer/service/shared_image/d3d_image_backing.cc
+@@ -755,8 +755,7 @@ void D3DImageBacking::ReadbackToMemoryAsync(
+ 
+   base::WaitableEvent copy_complete_event;
+   Microsoft::WRL::ComPtr<IDXGIDevice2> dxgi_device;
+-  const HRESULT hr = texture_d3d11_device_.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  texture_d3d11_device_.As(&dxgi_device);
+   dxgi_device->EnqueueSetEvent(copy_complete_event.handle());
+ 
+   pending_copy_event_watcher_.emplace();
+diff --git a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+index 88804bbb2470b..93fca64b215fb 100644
+--- a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+@@ -66,7 +66,7 @@ class GpuMemoryBufferHandleSharedState {
+ 
+       Microsoft::WRL::ComPtr<IDXGIDevice> angle_dxgi_device;
+       HRESULT hr = angle_d3d11_device.As(&angle_dxgi_device);
+-      CHECK_EQ(hr, S_OK);
++      CHECK(SUCCEEDED(hr));
+ 
+       Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter = nullptr;
+       hr = FAILED(angle_dxgi_device->GetAdapter(&dxgi_adapter));
+@@ -404,8 +404,9 @@ gfx::GpuMemoryBufferHandle D3DImageBackingFactory::CreateGpuMemoryBufferHandle(
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+-  const HRESULT hr = d3d11_texture.As(&dxgi_resource);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(d3d11_texture.As(&dxgi_resource))) {
++    return handle;
++  }
+ 
+   HANDLE texture_handle;
+   if (FAILED(dxgi_resource->CreateSharedHandle(
+@@ -518,8 +519,8 @@ bool D3DImageBackingFactory::CreateSwapChainInternal(
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device_.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  d3d11_device_.As(&dxgi_device);
++  DCHECK(dxgi_device);
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+   dxgi_device->GetAdapter(&dxgi_adapter);
+   DCHECK(dxgi_adapter);
+@@ -547,8 +548,8 @@ bool D3DImageBackingFactory::CreateSwapChainInternal(
+   desc.AlphaMode = format.HasAlpha() ? DXGI_ALPHA_MODE_PREMULTIPLIED
+                                      : DXGI_ALPHA_MODE_IGNORE;
+ 
+-  hr = dxgi_factory->CreateSwapChainForComposition(d3d11_device_.Get(), &desc,
+-                                                   nullptr, &swap_chain);
++  HRESULT hr = dxgi_factory->CreateSwapChainForComposition(
++      d3d11_device_.Get(), &desc, nullptr, &swap_chain);
+   if (FAILED(hr)) {
+     LOG(ERROR) << "CreateSwapChainForComposition failed with error " << std::hex
+                << hr;
+@@ -781,7 +782,11 @@ std::unique_ptr<SharedImageBacking> D3DImageBackingFactory::CreateSharedImage(
+   if (needs_cross_device_synchronization) {
+     Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+     hr = d3d11_texture.As(&dxgi_resource);
+-    CHECK_EQ(hr, S_OK);
++    if (FAILED(hr)) {
++      LOG(ERROR) << "QueryInterface for IDXGIResource failed with error "
++                 << std::hex << hr;
++      return nullptr;
++    }
+ 
+     HANDLE shared_handle;
+     hr = dxgi_resource->CreateSharedHandle(
+diff --git a/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc b/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc
+index 8e0fd823b844e..6b6dc0c23c03d 100644
+--- a/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc
++++ b/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc
+@@ -61,8 +61,8 @@ std::unique_ptr<DXGISwapChainImageBacking> DXGISwapChainImageBacking::Create(
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  d3d11_device.As(&dxgi_device);
++  DCHECK(dxgi_device);
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+   dxgi_device->GetAdapter(&dxgi_adapter);
+   DCHECK(dxgi_adapter);
+@@ -93,8 +93,8 @@ std::unique_ptr<DXGISwapChainImageBacking> DXGISwapChainImageBacking::Create(
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGISwapChain1> dxgi_swap_chain;
+-  hr = dxgi_factory->CreateSwapChainForComposition(d3d11_device.Get(), &desc,
+-                                                   nullptr, &dxgi_swap_chain);
++  HRESULT hr = dxgi_factory->CreateSwapChainForComposition(
++      d3d11_device.Get(), &desc, nullptr, &dxgi_swap_chain);
+ 
+   // If CreateSwapChainForComposition fails, we cannot draw to the
+   // browser window. Return false after disabling Direct Composition support
+diff --git a/gpu/command_buffer/service/webgpu_decoder_impl.cc b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+index 1c6427cd64d20..172834911e75e 100644
+--- a/gpu/command_buffer/service/webgpu_decoder_impl.cc
++++ b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+@@ -1706,8 +1706,10 @@ wgpu::Adapter WebGPUDecoderImpl::CreatePreferredAdapter(
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  if (!SUCCEEDED(d3d11_device.As(&dxgi_device))) {
++    LOG(ERROR) << "Failed to get IDXGIDevice from ANGLE.";
++    return nullptr;
++  }
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+   if (!SUCCEEDED(dxgi_device->GetAdapter(&dxgi_adapter))) {
+     LOG(ERROR) << "Failed to get IDXGIAdapter from ANGLE.";
+diff --git a/gpu/config/gpu_info_collector_win.cc b/gpu/config/gpu_info_collector_win.cc
+index e08eb46f056a8..2b76eceaeb066 100644
+--- a/gpu/config/gpu_info_collector_win.cc
++++ b/gpu/config/gpu_info_collector_win.cc
+@@ -142,8 +142,8 @@ bool GetActiveAdapterLuid(LUID* luid) {
+     return false;
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(d3d11_device.As(&dxgi_device)))
++    return false;
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+   if (FAILED(dxgi_device->GetAdapter(&adapter)))
+diff --git a/gpu/ipc/common/dxgi_helpers.cc b/gpu/ipc/common/dxgi_helpers.cc
+index 0b6e0a520741c..2e12094dbab5b 100644
+--- a/gpu/ipc/common/dxgi_helpers.cc
++++ b/gpu/ipc/common/dxgi_helpers.cc
+@@ -79,7 +79,10 @@ bool CopyDXGIBufferToShMem(
+ 
+   Microsoft::WRL::ComPtr<ID3D11Device1> device1;
+   HRESULT hr = d3d11_device->QueryInterface(IID_PPV_ARGS(&device1));
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    DLOG(ERROR) << "Failed to open D3D11_1 device. hr=" << std::hex << hr;
++    return false;
++  }
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+ 
+@@ -206,7 +209,10 @@ bool CopyShMemToDXGIBuffer(base::span<uint8_t> shared_memory,
+ 
+   Microsoft::WRL::ComPtr<ID3D11Device1> device1;
+   HRESULT hr = d3d11_device->QueryInterface(IID_PPV_ARGS(&device1));
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    DLOG(ERROR) << "Failed to open D3D11_1 device. hr=" << std::hex << hr;
++    return false;
++  }
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+ 
+diff --git a/gpu/ipc/service/gpu_channel_manager.cc b/gpu/ipc/service/gpu_channel_manager.cc
+index 4f87ce1a917d9..1373a05ef832e 100644
+--- a/gpu/ipc/service/gpu_channel_manager.cc
++++ b/gpu/ipc/service/gpu_channel_manager.cc
+@@ -103,18 +103,18 @@ void TrimD3DResources(const scoped_refptr<SharedContextState>& context_state) {
+   }
+   if (d3d11_device) {
+     Microsoft::WRL::ComPtr<IDXGIDevice3> dxgi_device;
+-    HRESULT hr = d3d11_device.As(&dxgi_device);
+-    CHECK_EQ(hr, S_OK);
+-    dxgi_device->Trim();
++    if (SUCCEEDED(d3d11_device.As(&dxgi_device))) {
++      dxgi_device->Trim();
++    }
+   }
+ 
+   Microsoft::WRL::ComPtr<ID3D11Device> angle_d3d11_device =
+       gl::QueryD3D11DeviceObjectFromANGLE();
+   if (angle_d3d11_device && angle_d3d11_device != d3d11_device) {
+     Microsoft::WRL::ComPtr<IDXGIDevice3> dxgi_device;
+-    HRESULT hr = angle_d3d11_device.As(&dxgi_device);
+-    CHECK_EQ(hr, S_OK);
+-    dxgi_device->Trim();
++    if (SUCCEEDED(angle_d3d11_device.As(&dxgi_device))) {
++      dxgi_device->Trim();
++    }
+   }
+ }
+ #endif
+diff --git a/media/base/win/mf_helpers.cc b/media/base/win/mf_helpers.cc
+index 440d5adec76c2..22f4be90787ec 100644
+--- a/media/base/win/mf_helpers.cc
++++ b/media/base/win/mf_helpers.cc
+@@ -955,7 +955,7 @@ HRESULT GenerateSampleFromVideoFrame(
+ 
+     Microsoft::WRL::ComPtr<ID3D11Device1> device1;
+     hr = d3d_device.As(&device1);
+-    CHECK_EQ(hr, S_OK);
++    RETURN_ON_HR_FAILURE(hr, "Failed to query ID3D11Device1", hr);
+ 
+     Microsoft::WRL::ComPtr<ID3D11Texture2D> input_texture;
+     hr = device1->OpenSharedResource1(
+@@ -1100,7 +1100,7 @@ void GenerateResourceOnSyncTokenReleased(
+   bool input_texture_has_been_copied = false;
+   Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+   hr = input_texture.texture.As(&dxgi_resource);
+-  CHECK_EQ(hr, S_OK);
++  RETURN_ON_FAILURE_WITH_CALLBACK(hr, "Failed to get DXGI resource");
+   HANDLE shared_handle;
+ 
+   // MFVP & HMFT is not expecting texture array as input.
+@@ -1141,7 +1141,7 @@ void GenerateResourceOnSyncTokenReleased(
+                                           input_texture.array_index, &src_box);
+     Microsoft::WRL::ComPtr<IDXGIResource1> shared_dxgi_resource;
+     hr = shared_texture.As(&shared_dxgi_resource);
+-    CHECK_EQ(hr, S_OK);
++    CHECK(SUCCEEDED(hr));
+     hr = shared_dxgi_resource->CreateSharedHandle(
+         nullptr, DXGI_SHARED_RESOURCE_READ, nullptr, &shared_handle);
+     RETURN_ON_FAILURE_WITH_CALLBACK(hr, "Failed to create shared handle");
+@@ -1156,7 +1156,7 @@ void GenerateResourceOnSyncTokenReleased(
+                             base::WaitableEvent::InitialState::NOT_SIGNALED);
+   Microsoft::WRL::ComPtr<IDXGIDevice2> dxgi_device2;
+   hr = shared_d3d11_device.As(&dxgi_device2);
+-  CHECK_EQ(hr, S_OK);
++  RETURN_ON_FAILURE_WITH_CALLBACK(hr, "Failed to query dxgi device2");
+   hr = dxgi_device2->EnqueueSetEvent(event.handle());
+   if (SUCCEEDED(hr)) {
+     event.Wait();
+diff --git a/media/capture/video/win/video_capture_device_mf_win.cc b/media/capture/video/win/video_capture_device_mf_win.cc
+index 8cac331dafc56..4f801517a4fc1 100644
+--- a/media/capture/video/win/video_capture_device_mf_win.cc
++++ b/media/capture/video/win/video_capture_device_mf_win.cc
+@@ -692,7 +692,11 @@ HRESULT CopyTextureToGpuMemoryBuffer(ID3D11Texture2D* texture,
+ 
+   Microsoft::WRL::ComPtr<ID3D11Device1> device1;
+   HRESULT hr = texture_device.As(&device1);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    DLOG(ERROR) << "Failed to get ID3D11Device1: "
++                << logging::SystemErrorCodeToString(hr);
++    return hr;
++  }
+ 
+   // Open shared resource from GpuMemoryBuffer on source texture D3D11 device
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> target_texture;
+@@ -735,7 +739,11 @@ HRESULT CopyTextureToGpuMemoryBuffer(ID3D11Texture2D* texture,
+     // the same adapter.
+     Microsoft::WRL::ComPtr<IDXGIDevice2> dxgi_device2;
+     hr = texture_device.As(&dxgi_device2);
+-    CHECK_EQ(hr, S_OK);
++    if (FAILED(hr)) {
++      LOG(ERROR) << "Failed to query IDXGIDevice2: "
++                 << logging::SystemErrorCodeToString(hr);
++      return hr;
++    }
+     base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
+                               base::WaitableEvent::InitialState::NOT_SIGNALED);
+ 
+@@ -2385,7 +2393,10 @@ HRESULT VideoCaptureDeviceMFWin::DeliverExternalBufferToClient(
+     // It's failed to get valid |private_data|, create and set a new value.
+     Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+     hr = texture->QueryInterface(IID_PPV_ARGS(&dxgi_resource));
+-    CHECK_EQ(hr, S_OK);
++    if (FAILED(hr)) {
++      DLOG(ERROR) << logging::SystemErrorCodeToString(hr);
++      return hr;
++    }
+     HANDLE texture_handle;
+     hr = dxgi_resource->CreateSharedHandle(
+         nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+diff --git a/media/gpu/windows/d3d11_texture_wrapper.cc b/media/gpu/windows/d3d11_texture_wrapper.cc
+index b418b7ec8eba3..1410e572faaa4 100644
+--- a/media/gpu/windows/d3d11_texture_wrapper.cc
++++ b/media/gpu/windows/d3d11_texture_wrapper.cc
+@@ -210,7 +210,13 @@ DefaultTexture2DWrapper::GpuResources::GpuResources(
+   if (desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) {
+     ComDXGIResource1 dxgi_resource;
+     hr = texture.As(&dxgi_resource);
+-    CHECK_EQ(hr, S_OK);
++    if (FAILED(hr)) {
++      DLOG(ERROR) << "QueryInterface for IDXGIResource failed with error "
++                  << std::hex << hr;
++      std::move(on_error_cb)
++          .Run(std::move(D3D11Status::Codes::kCreateSharedHandleFailed));
++      return;
++    }
+ 
+     // WebGPU will potentially read directly from this texture.
+     usage |= gpu::SHARED_IMAGE_USAGE_WEBGPU_READ;
+diff --git a/media/gpu/windows/d3d12_video_encode_accelerator.cc b/media/gpu/windows/d3d12_video_encode_accelerator.cc
+index 0e694e8d784de..9ec71f9ae7b04 100644
+--- a/media/gpu/windows/d3d12_video_encode_accelerator.cc
++++ b/media/gpu/windows/d3d12_video_encode_accelerator.cc
+@@ -168,13 +168,15 @@ void GenerateResourceOnSynTokenReleased(
+ 
+   Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
+   HRESULT hr = input_texture.texture.As(&dxgi_resource);
+-  CHECK_EQ(hr, S_OK);
++  RETURN_ON_FAILURE_WITH_CALLBACK(
++      hr, "Failed to query IDXGIResource1 from input texture.");
+ 
+   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d11_context;
+   d3d11_device->GetImmediateContext(&d3d11_context);
+   Microsoft::WRL::ComPtr<IDXGIDevice2> dxgi_device2;
+   hr = d3d11_device.As(&dxgi_device2);
+-  CHECK_EQ(hr, S_OK);
++  RETURN_ON_FAILURE_WITH_CALLBACK(
++      hr, "Failed to query IDXGIDevice2 from D3D11 device");
+ 
+   base::win::ScopedHandle shared_handle;
+   if (!is_texture_array) {
+@@ -253,7 +255,8 @@ void GenerateResourceOnSynTokenReleased(
+                                          input_texture.array_index, nullptr);
+ 
+     hr = shared_texture.As(&dxgi_resource);
+-    CHECK_EQ(hr, S_OK);
++    RETURN_ON_FAILURE_WITH_CALLBACK(
++        hr, "Failed to query DXGI resource from shared texture");
+ 
+     HANDLE copied_handle = nullptr;
+     hr = dxgi_resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ,
+diff --git a/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc b/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+index 83d74bd35d402..06a69206fcb60 100644
+--- a/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
++++ b/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+@@ -2099,7 +2099,7 @@ HRESULT MediaFoundationVideoEncodeAccelerator::CopyInputSampleBufferFromGpu(
+ 
+     ComD3D11Device1 device1;
+     hr = d3d_device.As(&device1);
+-    CHECK_EQ(hr, S_OK);
++    RETURN_ON_HR_FAILURE(hr, "Failed to query ID3D11Device1", hr);
+     hr = device1->OpenSharedResource1(
+         buffer_handle.dxgi_handle().buffer_handle(),
+         IID_PPV_ARGS(&input_texture));
+@@ -2234,7 +2234,7 @@ HRESULT MediaFoundationVideoEncodeAccelerator::PopulateInputSampleBufferGpu(
+ 
+     ComD3D11Device1 device1;
+     hr = d3d_device.As(&device1);
+-    CHECK_EQ(hr, S_OK);
++    RETURN_ON_HR_FAILURE(hr, "Failed to query ID3D11Device1", hr);
+ 
+     hr = device1->OpenSharedResource1(
+         buffer_handle.dxgi_handle().buffer_handle(),
+diff --git a/media/renderers/win/media_foundation_renderer.cc b/media/renderers/win/media_foundation_renderer.cc
+index 2c14b09205a7f..761f1190bcd12 100644
+--- a/media/renderers/win/media_foundation_renderer.cc
++++ b/media/renderers/win/media_foundation_renderer.cc
+@@ -186,7 +186,9 @@ std::tuple<uint32_t, LUID> GetVendorIdAndLUIDFromD3D11Device(
+ 
+   ComPtr<IDXGIDevice> dxgi_device;
+   HRESULT hr = d3d11_device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    return {kGpuVendorIdNone, {}};
++  }
+ 
+   ComPtr<IDXGIAdapter> adapter;
+   hr = dxgi_device->GetAdapter(&adapter);
+diff --git a/ui/gl/direct_composition_support.cc b/ui/gl/direct_composition_support.cc
+index 5c408a2495eda..d7b85fe0fb8a1 100644
+--- a/ui/gl/direct_composition_support.cc
++++ b/ui/gl/direct_composition_support.cc
+@@ -515,8 +515,10 @@ void QueryVideoProcessorCustomExtForHDR() {
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(d3d11_device.As(&dxgi_device))) {
++    DLOG(ERROR) << "Failed to retrieve DXGI device";
++    return;
++  }
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+   if (FAILED(dxgi_device->GetAdapter(&dxgi_adapter))) {
+@@ -570,7 +572,7 @@ void QueryVideoProcessorCustomExtForHDR() {
+   desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+ 
+   Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> d3d11_video_enumerator;
+-  hr = d3d11_video_device->CreateVideoProcessorEnumerator(
++  HRESULT hr = d3d11_video_device->CreateVideoProcessorEnumerator(
+       &desc, &d3d11_video_enumerator);
+   if (FAILED(hr)) {
+     LOG(ERROR) << "CreateVideoProcessorEnumerator failed: "
+@@ -734,11 +736,10 @@ void InitializeDirectComposition(
+   }
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  d3d11_device.As(&dxgi_device);
+ 
+   Microsoft::WRL::ComPtr<IDCompositionDesktopDevice> desktop_device;
+-  hr =
++  HRESULT hr =
+       create_device3_function(dxgi_device.Get(), IID_PPV_ARGS(&desktop_device));
+   if (FAILED(hr)) {
+     LOG(ERROR) << "DCompositionCreateDevice3 failed: "
+@@ -1069,8 +1070,8 @@ bool DXGISwapChainTearingSupported() {
+       return false;
+     }
+     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-    const HRESULT hr = d3d11_device.As(&dxgi_device);
+-    CHECK_EQ(hr, S_OK);
++    d3d11_device.As(&dxgi_device);
++    DCHECK(dxgi_device);
+     Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+     dxgi_device->GetAdapter(&dxgi_adapter);
+     DCHECK(dxgi_adapter);
+diff --git a/ui/gl/hdr_metadata_helper_win.cc b/ui/gl/hdr_metadata_helper_win.cc
+index ffca7715c805f..d33700ca43f7f 100644
+--- a/ui/gl/hdr_metadata_helper_win.cc
++++ b/ui/gl/hdr_metadata_helper_win.cc
+@@ -59,8 +59,8 @@ void HDRMetadataHelperWin::UpdateDisplayMetadata() {
+     return;
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  const HRESULT hr = d3d11_device_.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(d3d11_device_.As(&dxgi_device)))
++    return;
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+   if (FAILED(dxgi_device->GetAdapter(&dxgi_adapter)))
+diff --git a/ui/gl/swap_chain_presenter.cc b/ui/gl/swap_chain_presenter.cc
+index c61a1a2ce7459..62785526b4023 100644
+--- a/ui/gl/swap_chain_presenter.cc
++++ b/ui/gl/swap_chain_presenter.cc
+@@ -1365,9 +1365,10 @@ bool SwapChainPresenter::PresentToDecodeSwapChain(
+                swap_chain_size.ToString());
+ 
+   Microsoft::WRL::ComPtr<IDXGIResource> decode_resource;
+-  HRESULT hr = texture.As(&decode_resource);
+-  CHECK_EQ(hr, S_OK);
++  texture.As(&decode_resource);
++  DCHECK(decode_resource);
+ 
++  HRESULT hr = S_OK;
+   if (!decode_swap_chain_ || decode_resource_ != decode_resource) {
+     TRACE_EVENT0(
+         "gpu",
+@@ -1379,8 +1380,8 @@ bool SwapChainPresenter::PresentToDecodeSwapChain(
+     base::win::ScopedHandle swap_chain_handle = CreateDCompSurfaceHandle();
+ 
+     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-    hr = d3d11_device_.As(&dxgi_device);
+-    CHECK_EQ(hr, S_OK);
++    d3d11_device_.As(&dxgi_device);
++    DCHECK(dxgi_device);
+     Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+     dxgi_device->GetAdapter(&dxgi_adapter);
+     DCHECK(dxgi_adapter);
+@@ -1742,8 +1743,8 @@ bool SwapChainPresenter::SetupPresentToSwapChain(
+     // there still may be a black flicker when presenting expensive content
+     // (e.g. 4k video).
+     Microsoft::WRL::ComPtr<IDXGIDevice2> dxgi_device2;
+-    hr = d3d11_device_.As(&dxgi_device2);
+-    CHECK_EQ(hr, S_OK);
++    d3d11_device_.As(&dxgi_device2);
++    DCHECK(dxgi_device2);
+     base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
+                               base::WaitableEvent::InitialState::NOT_SIGNALED);
+     hr = dxgi_device2->EnqueueSetEvent(event.handle());
+@@ -2443,8 +2444,8 @@ bool SwapChainPresenter::ReallocateSwapChain(
+   gpu_vendor_id_ = 0;
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device_.As(&dxgi_device);
+-  CHECK_EQ(hr, S_OK);
++  d3d11_device_.As(&dxgi_device);
++  DCHECK(dxgi_device);
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+   dxgi_device->GetAdapter(&dxgi_adapter);
+   DCHECK(dxgi_adapter);
+@@ -2492,7 +2493,7 @@ bool SwapChainPresenter::ReallocateSwapChain(
+   if (use_yuv_swap_chain) {
+     TRACE_EVENT1("gpu", "SwapChainPresenter::ReallocateSwapChain::YUV",
+                  "format", DxgiFormatToString(swap_chain_format));
+-    hr = media_factory->CreateSwapChainForCompositionSurfaceHandle(
++    HRESULT hr = media_factory->CreateSwapChainForCompositionSurfaceHandle(
+         d3d11_device_.Get(), swap_chain_handle.Get(), &desc, nullptr,
+         &swap_chain_);
+     failed_to_create_yuv_swapchain_ = FAILED(hr);
+@@ -2533,7 +2534,7 @@ bool SwapChainPresenter::ReallocateSwapChain(
+       desc.Flags |= DXGI_SWAP_CHAIN_FLAG_HW_PROTECTED;
+     }
+ 
+-    hr = media_factory->CreateSwapChainForCompositionSurfaceHandle(
++    HRESULT hr = media_factory->CreateSwapChainForCompositionSurfaceHandle(
+         d3d11_device_.Get(), swap_chain_handle.Get(), &desc, nullptr,
+         &swap_chain_);
+ 
+@@ -2559,7 +2560,7 @@ bool SwapChainPresenter::ReallocateSwapChain(
+   if (DXGIWaitableSwapChainEnabled()) {
+     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain3;
+     if (SUCCEEDED(swap_chain_.As(&swap_chain3))) {
+-      hr = swap_chain3->SetMaximumFrameLatency(
++      HRESULT hr = swap_chain3->SetMaximumFrameLatency(
+           GetDXGIWaitableSwapChainMaxQueuedFrames());
+       DCHECK(SUCCEEDED(hr)) << "SetMaximumFrameLatency failed: "
+                             << logging::SystemErrorCodeToString(hr);
+@@ -2575,7 +2576,7 @@ bool SwapChainPresenter::ReallocateSwapChain(
+   SetSwapChainPresentDuration();
+ 
+   DXGI_ADAPTER_DESC adapter_desc;
+-  hr = dxgi_adapter->GetDesc(&adapter_desc);
++  HRESULT hr = dxgi_adapter->GetDesc(&adapter_desc);
+   if (SUCCEEDED(hr)) {
+     gpu_vendor_id_ = adapter_desc.VendorId;
+   } else {

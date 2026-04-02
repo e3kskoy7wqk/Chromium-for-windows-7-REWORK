@@ -1,0 +1,48 @@
+diff --git a/third_party/unrar/src/unicode.cpp b/third_party/unrar/src/unicode.cpp
+index 255ce467197e6..41543fd03b9f2 100644
+--- a/third_party/unrar/src/unicode.cpp
++++ b/third_party/unrar/src/unicode.cpp
+@@ -491,8 +491,8 @@ wchar* wcslower(wchar *s)
+   // kernel32!LCMapStringEx instead of user32.dll!CharUpper due to win32k
+   // lockdown sandbox in chromium, user32.dll can't be loaded.
+   const size_t s_length = wcslen(s) + 1;
+-  (void)LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_LOWERCASE, s, s_length, s,
+-                      s_length, NULL, NULL, 0);
++  (void)LCMapString(LOCALE_USER_DEFAULT, LCMAP_LOWERCASE, s, s_length, s,
++                      s_length);
+   return s;
+ #else
+   // _wcslwr requires setlocale and we do not want to depend on setlocale
+@@ -516,8 +516,8 @@ wchar* wcsupper(wchar *s)
+   // kernel32!LCMapStringEx instead of user32.dll!CharUpper due to win32k
+   // lockdown sandbox in chromium, user32.dll can't be loaded.
+   const size_t s_length = wcslen(s) + 1;
+-  (void)LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_UPPERCASE, s, s_length, s,
+-                      s_length, NULL, NULL, 0);
++  (void)LCMapString(LOCALE_USER_DEFAULT, LCMAP_UPPERCASE, s, s_length, s,
++                      s_length);
+   return s;
+ #else
+   // _wcsupr requires setlocale and we do not want to depend on setlocale
+@@ -542,8 +542,8 @@ int toupperw(int ch)
+   wchar_t ch_as_wide_char = static_cast<wchar_t>(ch & 0xffff);
+   // kernel32!LCMapStringEx instead of user32.dll!CharUpper due to win32k
+   // lockdown sandbox in chromium, user32.dll can't be loaded.
+-  (void)LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_UPPERCASE,
+-                      &ch_as_wide_char, 1, &ch_as_wide_char, 1, NULL, NULL, 0);
++  (void)LCMapString(LOCALE_USER_DEFAULT, LCMAP_UPPERCASE,
++                      &ch_as_wide_char, 1, &ch_as_wide_char, 1);
+   return int(ch_as_wide_char);
+ #else
+   // CharUpper is more reliable than towupper in Windows, which seems to be
+@@ -565,8 +565,8 @@ int tolowerw(int ch)
+   wchar_t ch_as_wide_char = static_cast<wchar_t>(ch & 0xffff);
+   // kernel32!LCMapStringEx instead of user32.dll!CharLower due to win32k
+   // lockdown sandbox in chromium, user32.dll can't be loaded.
+-  (void)LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_LOWERCASE,
+-                      &ch_as_wide_char, 1, &ch_as_wide_char, 1, NULL, NULL, 0);
++  (void)LCMapString(LOCALE_USER_DEFAULT, LCMAP_LOWERCASE,
++                      &ch_as_wide_char, 1, &ch_as_wide_char, 1);
+   return int(ch_as_wide_char);
+ #else
+   // CharLower is more reliable than towlower in Windows.

@@ -1,0 +1,771 @@
+diff --git a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+index 2cc2254f7a6ad..5792e157cfcf3 100644
+--- a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
++++ b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+@@ -35,6 +35,9 @@
+ #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+ #include "third_party/blink/public/common/font_unique_name_lookup/font_unique_name_table.pb.h"
+ #include "third_party/blink/public/common/font_unique_name_lookup/icu_fold_case_util.h"
++#include "third_party/skia/include/core/SkFontMgr.h"
++#include "third_party/skia/include/core/SkTypeface.h"
++#include "third_party/skia/include/ports/SkTypeface_win.h"
+ #include "ui/gfx/win/direct_write.h"
+ #include "ui/gfx/win/text_analysis_source.h"
+ 
+@@ -561,6 +564,50 @@ void DWriteFontProxyImpl::MatchUniqueFont(
+   std::move(callback).Run(std::move(font_file), ttc_index);
+ }
+ 
++void DWriteFontProxyImpl::FallbackFamilyAndStyleForCodepoint(
++    const std::string& base_family_name,
++    const std::string& locale_name,
++    uint32_t codepoint,
++    FallbackFamilyAndStyleForCodepointCallback callback) {
++  InitializeDirectWrite();
++  callback = mojo::WrapCallbackWithDefaultInvokeIfNotRun(
++      std::move(callback),
++      blink::mojom::FallbackFamilyAndStyle::New("",
++                                                /* weight */ 0,
++                                                /* width */ 0,
++                                                /* slant */ 0));
++
++  if (!codepoint || !collection_ || !factory_)
++    return;
++
++  sk_sp<SkFontMgr> font_mgr(
++      SkFontMgr_New_DirectWrite(factory_.Get(), collection_.Get()));
++
++  if (!font_mgr)
++    return;
++
++  const char* bcp47_locales[] = {locale_name.c_str()};
++  int num_locales = locale_name.empty() ? 0 : 1;
++  const char** locales = locale_name.empty() ? nullptr : bcp47_locales;
++
++  sk_sp<SkTypeface> typeface(font_mgr->matchFamilyStyleCharacter(
++      base_family_name.c_str(), SkFontStyle(), locales, num_locales,
++      codepoint));
++
++  if (!typeface)
++    return;
++
++  SkString family_name;
++  typeface->getFamilyName(&family_name);
++
++  SkFontStyle font_style = typeface->fontStyle();
++
++  auto result_fallback_and_style = blink::mojom::FallbackFamilyAndStyle::New(
++      family_name.c_str(), font_style.weight(), font_style.width(),
++      font_style.slant());
++  std::move(callback).Run(std::move(result_fallback_and_style));
++}
++
+ void DWriteFontProxyImpl::InitializeDirectWrite() {
+   if (direct_write_initialized_)
+     return;
+diff --git a/content/browser/renderer_host/dwrite_font_proxy_impl_win.h b/content/browser/renderer_host/dwrite_font_proxy_impl_win.h
+index 421d471aaa6e1..126171d17a20b 100644
+--- a/content/browser/renderer_host/dwrite_font_proxy_impl_win.h
++++ b/content/browser/renderer_host/dwrite_font_proxy_impl_win.h
+@@ -63,6 +63,11 @@ class CONTENT_EXPORT DWriteFontProxyImpl
+                      MapCharactersCallback callback) override;
+   void MatchUniqueFont(const std::u16string& unique_font_name,
+                        MatchUniqueFontCallback callback) override;
++  void FallbackFamilyAndStyleForCodepoint(
++      const std::string& base_family_name,
++      const std::string& locale_name,
++      uint32_t codepoint,
++      FallbackFamilyAndStyleForCodepointCallback callback) override;
+ 
+   void InitializeDirectWrite();
+ 
+diff --git a/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc b/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc
+index a529ad9aac0b9..26026dcb033c0 100644
+--- a/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc
++++ b/content/child/dwrite_font_proxy/dwrite_font_proxy_init_impl_win.cc
+@@ -80,6 +80,7 @@ void InitializeDWriteFontProxy() {
+   skia::OverrideDefaultSkFontMgr(std::move(skia_font_manager));
+ 
+   DCHECK(g_font_fallback);
++  blink::WebFontRendering::SetUseSkiaFontFallback(true);
+ }
+ 
+ void UninitializeDWriteFontProxy() {
+diff --git a/content/test/dwrite_font_fake_sender_win.cc b/content/test/dwrite_font_fake_sender_win.cc
+index bed299f10f56f..3d1b5f57984d6 100644
+--- a/content/test/dwrite_font_fake_sender_win.cc
++++ b/content/test/dwrite_font_fake_sender_win.cc
+@@ -146,6 +146,12 @@ void FakeFontCollection::MapCharacters(
+ void FakeFontCollection::MatchUniqueFont(const std::u16string& unique_font_name,
+                                          MatchUniqueFontCallback callback) {}
+ 
++void FakeFontCollection::FallbackFamilyAndStyleForCodepoint(
++    const std::string& base_family_name,
++    const std::string& locale_name,
++    uint32_t codepoint,
++    FallbackFamilyAndStyleForCodepointCallback callback) {}
++
+ FakeFontCollection::~FakeFontCollection() = default;
+ 
+ }  // namespace content
+diff --git a/content/test/dwrite_font_fake_sender_win.h b/content/test/dwrite_font_fake_sender_win.h
+index e5c7230ffcaad..3906ff44e64a6 100644
+--- a/content/test/dwrite_font_fake_sender_win.h
++++ b/content/test/dwrite_font_fake_sender_win.h
+@@ -125,6 +125,11 @@ class FakeFontCollection : public blink::mojom::DWriteFontProxy {
+                      MapCharactersCallback callback) override;
+   void MatchUniqueFont(const std::u16string& unique_font_name,
+                        MatchUniqueFontCallback callback) override;
++  void FallbackFamilyAndStyleForCodepoint(
++      const std::string& base_family_name,
++      const std::string& locale_name,
++      uint32_t codepoint,
++      FallbackFamilyAndStyleForCodepointCallback callback) override;
+ 
+  private:
+   std::vector<FakeFont> fonts_;
+diff --git a/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom b/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom
+index a66ddcf4d9031..99db8615cad4c 100644
+--- a/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom
++++ b/third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom
+@@ -20,6 +20,13 @@ struct DWriteFontStyle {
+   uint8 font_stretch;
+ };
+ 
++struct FallbackFamilyAndStyle {
++  string fallback_family_name;
++  uint16 weight;
++  uint8 width;
++  uint8 slant;
++};
++
+ struct MapCharactersResult {
+   uint32 family_index;
+   mojo_base.mojom.String16 family_name;
+@@ -73,4 +80,18 @@ interface DWriteFontProxy {
+                 uint32 reading_direction,
+                 mojo_base.mojom.String16 base_family_name)
+       => (MapCharactersResult out);
++
++  // For a given base family name, bcp47 language tag, and codepoint to look up,
++  // return a font family name that is available on the system to display the
++  // given codepoint. This internally calls Skia's
++  // SkFontMgr_DirectWrite::matchFamilyStyleCharacter which executes
++  // IDWriteTextLayout based fallback code, which cannot be run in the renderer
++  // due triggering loading the DWrite system font collection.
++  // Use only on Windows 8.0 and earlier - otherwise better fallback API is
++  // available through using a proxies IDWriteFontFallback.
++  [Sync]
++  FallbackFamilyAndStyleForCodepoint(string base_family_name,
++                                     string bcp47_language_tag,
++                                     uint32 codepoint)
++      => (FallbackFamilyAndStyle fallback_result);
+ };
+diff --git a/third_party/blink/public/web/win/web_font_rendering.h b/third_party/blink/public/web/win/web_font_rendering.h
+index 851b6c95d0c69..3addef2393409 100644
+--- a/third_party/blink/public/web/win/web_font_rendering.h
++++ b/third_party/blink/public/web/win/web_font_rendering.h
+@@ -34,6 +34,7 @@ class BLINK_EXPORT WebFontRendering {
+                                    int32_t font_height);
+   static void SetAntialiasedTextEnabled(bool);
+   static void SetLCDTextEnabled(bool);
++  static void SetUseSkiaFontFallback(bool);
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/layout/web_font_rendering_win.cc b/third_party/blink/renderer/core/layout/web_font_rendering_win.cc
+index 178b04c75c258..7f491246d1607 100644
+--- a/third_party/blink/renderer/core/layout/web_font_rendering_win.cc
++++ b/third_party/blink/renderer/core/layout/web_font_rendering_win.cc
+@@ -59,4 +59,9 @@ void WebFontRendering::SetLCDTextEnabled(bool enabled) {
+   FontCache::SetLCDTextEnabled(enabled);
+ }
+ 
++// static
++void WebFontRendering::SetUseSkiaFontFallback(bool use_skia_font_fallback) {
++  FontCache::SetUseSkiaFontFallback(use_skia_font_fallback);
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index e9c2c65af895a..1408ea2e51f6b 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1632,6 +1632,8 @@ component("platform") {
+     sources += [
+       "fonts/win/dwrite_font_format_support.cc",
+       "fonts/win/dwrite_font_format_support.h",
++      "fonts/win/fallback_family_style_cache_win.cc",
++      "fonts/win/fallback_family_style_cache_win.h",
+       "fonts/win/font_cache_skia_win.cc",
+       "fonts/win/font_fallback_win.cc",
+       "fonts/win/font_fallback_win.h",
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+index fdcd41892fb87..f02a847c9c91a 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -79,6 +79,7 @@ float FontCache::device_scale_factor_ = 1.0;
+ #if BUILDFLAG(IS_WIN)
+ bool FontCache::antialiased_text_enabled_ = false;
+ bool FontCache::lcd_text_enabled_ = false;
++bool FontCache::use_skia_font_fallback_ = false;
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ FontCache& FontCache::Get() {
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.h b/third_party/blink/renderer/platform/fonts/font_cache.h
+index a239fe24785cf..d15195eb590ca 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.h
++++ b/third_party/blink/renderer/platform/fonts/font_cache.h
+@@ -38,6 +38,7 @@
+ 
+ #include "base/gtest_prod_util.h"
+ #include "build/build_config.h"
++#include "mojo/public/cpp/bindings/remote.h"
+ #include "third_party/blink/renderer/platform/fonts/font_cache_client.h"
+ #include "third_party/blink/renderer/platform/fonts/font_data_cache.h"
+ #include "third_party/blink/renderer/platform/fonts/font_face_creation_params.h"
+@@ -61,6 +62,11 @@
+ #include "ui/gfx/font_fallback_linux.h"
+ #endif
+ 
++#if BUILDFLAG(IS_WIN)
++#include "third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom-blink.h"
++#include "third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.h"
++#endif
++
+ #if BUILDFLAG(IS_MAC)
+ #include "third_party/blink/renderer/platform/fonts/mac/character_fallback_cache.h"
+ #endif
+@@ -235,6 +241,13 @@ class PLATFORM_EXPORT FontCache final {
+   static const AtomicString& StatusFontFamily() {
+     return *status_font_family_name_;
+   }
++  static void SetUseSkiaFontFallback(bool use_skia_font_fallback) {
++    use_skia_font_fallback_ = use_skia_font_fallback;
++  }
++
++  // On Windows pre 8.1 establish a connection to the DWriteFontProxy service in
++  // order to retrieve family names for fallback lookup.
++  void EnsureServiceConnected();
+ 
+   const SimpleFontData* GetFallbackFamilyNameFromHardcodedChoices(
+       const FontDescription&,
+@@ -376,6 +389,9 @@ class PLATFORM_EXPORT FontCache final {
+   static int32_t small_caption_font_height_;
+   static AtomicString* status_font_family_name_;
+   static int32_t status_font_height_;
++  static bool use_skia_font_fallback_;
++  mojo::Remote<mojom::blink::DWriteFontProxy> service_;
++  std::unique_ptr<FallbackFamilyStyleCache> fallback_params_cache_;
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+diff --git a/third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.cc b/third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.cc
+new file mode 100644
+index 0000000000000..2e8c855270541
+--- /dev/null
++++ b/third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.cc
+@@ -0,0 +1,90 @@
++// Copyright 2019 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.h"
++
++#include "third_party/blink/renderer/platform/fonts/font_platform_data.h"
++
++namespace blink {
++
++namespace {
++
++const wtf_size_t kMaxCacheSlots = 16;
++
++String makeCacheKey(FontDescription::GenericFamilyType generic_family,
++                    String bcp47_language_tag,
++                    FontFallbackPriority fallback_priority) {
++  StringBuilder cache_key;
++  cache_key.Append(bcp47_language_tag);
++  cache_key.AppendNumber(
++      static_cast<
++          std::underlying_type<FontDescription::GenericFamilyType>::type>(
++          generic_family));
++  cache_key.AppendNumber(
++      static_cast<std::underlying_type<FontFallbackPriority>::type>(
++          fallback_priority));
++  return cache_key.ToString();
++}
++
++void getFallbackFamilyAndStyle(SkTypeface* typeface,
++                               String* fallback_family,
++                               SkFontStyle* fallback_style) {
++  SkString family;
++  typeface->getFamilyName(&family);
++  *fallback_family = family.c_str();
++
++  *fallback_style = typeface->fontStyle();
++}
++}  // namespace
++
++FallbackFamilyStyleCache::FallbackFamilyStyleCache()
++    : recent_fallback_fonts_(kMaxCacheSlots) {}
++
++void FallbackFamilyStyleCache::Put(
++    FontDescription::GenericFamilyType generic_family,
++    String bcp47_language_tag,
++    FontFallbackPriority fallback_priority,
++    SkTypeface* typeface) {
++  String cache_key =
++      makeCacheKey(generic_family, bcp47_language_tag, fallback_priority);
++
++  auto it = recent_fallback_fonts_.Get(cache_key);
++  if (it != recent_fallback_fonts_.end()) {
++    it->second.insert(0, sk_ref_sp(typeface));
++  } else {
++    TypefaceVector typefaces;
++    typefaces.push_back(sk_ref_sp(typeface));
++    recent_fallback_fonts_.Put(std::move(cache_key), std::move(typefaces));
++  }
++}
++
++void FallbackFamilyStyleCache::Get(
++    FontDescription::GenericFamilyType generic_family,
++    String bcp47_language_tag,
++    FontFallbackPriority fallback_priority,
++    UChar32 character,
++    String* fallback_family,
++    SkFontStyle* fallback_style) {
++  auto it = recent_fallback_fonts_.Get(
++      makeCacheKey(generic_family, bcp47_language_tag, fallback_priority));
++  if (it == recent_fallback_fonts_.end())
++    return;
++  TypefaceVector& typefaces = it->second;
++  for (wtf_size_t i = 0; i < typefaces.size(); ++i) {
++    sk_sp<SkTypeface>& typeface = typefaces.at(i);
++    if (typeface->unicharToGlyph(character)) {
++      getFallbackFamilyAndStyle(typeface.get(), fallback_family,
++                                fallback_style);
++      sk_sp<SkTypeface> tmp_typeface(typeface);
++      // For the vector of typefaces for this specific language tag, since this
++      // SkTypeface had a glyph, move it to the beginning to accelerate
++      // subsequent lookups.
++      typefaces.EraseAt(i);
++      typefaces.insert(0, std::move(tmp_typeface));
++      return;
++    }
++  }
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.h b/third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.h
+new file mode 100644
+index 0000000000000..72e27fa69b27f
+--- /dev/null
++++ b/third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.h
+@@ -0,0 +1,59 @@
++// Copyright 2019 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_WIN_FALLBACK_FAMILY_STYLE_CACHE_WIN_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_WIN_FALLBACK_FAMILY_STYLE_CACHE_WIN_H_
++
++#include "base/containers/lru_cache.h"
++#include "third_party/blink/renderer/platform/fonts/font_description.h"
++#include "third_party/blink/renderer/platform/fonts/font_fallback_priority.h"
++#include "third_party/skia/include/core/SkRefCnt.h"
++#include "third_party/skia/include/core/SkTypeface.h"
++
++namespace blink {
++
++using TypefaceVector = Vector<sk_sp<SkTypeface>>;
++using FallbackLruCache = base::HashingLRUCache<String, TypefaceVector>;
++
++class FallbackFamilyStyleCache {
++  USING_FAST_MALLOC(FallbackFamilyStyleCache);
++
++ public:
++  FallbackFamilyStyleCache();
++  FallbackFamilyStyleCache(const FallbackFamilyStyleCache&) = delete;
++  FallbackFamilyStyleCache& operator=(const FallbackFamilyStyleCache&) = delete;
++
++  // Places a SkTypeface object in the cache for specified language tag and
++  // fallback priority, taking a reference on SkTypeface. Adds the |SkTypeface|
++  // to the beginning of a list of typefaces if previous |SkTypefaces| objects
++  // where added for this set of parameters. Note, the internal list of
++  // typefaces for a language tag and fallback priority is not checked for
++  // duplicates when adding a |typeface| object.
++  void Put(FontDescription::GenericFamilyType generic_family,
++           String bcp47_language_tag,
++           FontFallbackPriority fallback_priority,
++           SkTypeface* typeface);
++
++  // Fetches a |fallback_family| and |fallback_style| for a given language tag,
++  // fallback priority and codepoint. Checks the internal cache for whether a
++  // fallback font with glyph coverage for |character| is available for the
++  // given parameters, then returns its family name and style.
++  void Get(FontDescription::GenericFamilyType generic_family,
++           String bcp47_language_tag,
++           FontFallbackPriority fallback_priority,
++           UChar32 character,
++           String* fallback_family,
++           SkFontStyle* fallback_style);
++
++  // Empties the internal cache, deleting keys and unrefing the typefaces that
++  // were placed in the cache.
++  void Clear();
++
++ private:
++  FallbackLruCache recent_fallback_fonts_;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_WIN_FALLBACK_FAMILY_STYLE_CACHE_WIN_H_
+diff --git a/third_party/blink/renderer/platform/fonts/win/fallback_lru_cache_win_test.cc b/third_party/blink/renderer/platform/fonts/win/fallback_lru_cache_win_test.cc
+new file mode 100644
+index 0000000000000..0363fdca92dde
+--- /dev/null
++++ b/third_party/blink/renderer/platform/fonts/win/fallback_lru_cache_win_test.cc
+@@ -0,0 +1,100 @@
++// Copyright 2019 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/platform/fonts/win/fallback_family_style_cache_win.h"
++
++#include "skia/ext/font_utils.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/renderer/platform/wtf/text/character_names.h"
++#include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/skia/include/core/SkFontMgr.h"
++#include "third_party/skia/include/core/SkRefCnt.h"
++#include "third_party/skia/include/core/SkTypeface.h"
++
++namespace {
++
++const char kHanSimplifiedLocale[] = "zh-Hans";
++const size_t kLruCacheTestSize = 5;
++const char kFontFamilyNameArial[] = "Arial";
++const UChar32 kFirstCJKIdeograph = 0x4E00;
++const UChar32 kSecondCJKIdeograph = kFirstCJKIdeograph + 1;
++
++sk_sp<SkTypeface> fallbackForLocale(String locale, UChar32 codepoint) {
++  sk_sp<SkFontMgr> font_mgr = skia::DefaultFontMgr();
++  std::string locale_string(locale.Ascii());
++  const char* locale_char = locale_string.c_str();
++  return sk_sp<SkTypeface>(font_mgr->matchFamilyStyleCharacter(
++      kFontFamilyNameArial, SkFontStyle(), &locale_char, 1, codepoint));
++}
++
++void fillCacheWithDummies(blink::FallbackLruCache& lru_cache,
++                          const char* format_string,
++                          size_t count) {
++  for (size_t i = 0; i < count; ++i) {
++    blink::TypefaceVector dummy_typefaces;
++    dummy_typefaces.push_back(
++        SkTypeface::MakeFromName(kFontFamilyNameArial, SkFontStyle()));
++    lru_cache.Put(String::Format(format_string, i), std::move(dummy_typefaces));
++  }
++}
++
++}  // namespace
++
++namespace blink {
++
++TEST(FallbackLruCacheTest, KeepChineseWhenFetched) {
++  // Put a Chinese font in the cache, add size - 1 more dummy fallback fonts so
++  // that the cache is full. Get() and verify typeface for Chinese to move them
++  // up to the top of the cache. Then fill again with size - 1 items and verify
++  // that Chinese is still in the cache. Then fill with # size items to evict
++  // the Chinese font and ensure it's gone.
++  FallbackLruCache lru_cache(kLruCacheTestSize);
++  EXPECT_EQ(lru_cache.size(), 0u);
++  TypefaceVector fallback_typefaces_zh;
++  fallback_typefaces_zh.push_back(
++      fallbackForLocale(kHanSimplifiedLocale, kFirstCJKIdeograph));
++  lru_cache.Put(kHanSimplifiedLocale, std::move(fallback_typefaces_zh));
++
++  EXPECT_EQ(lru_cache.size(), 1u);
++
++  fillCacheWithDummies(lru_cache, "dummy_locale_%zu", kLruCacheTestSize - 1);
++  auto it = lru_cache.Get(kHanSimplifiedLocale);
++  EXPECT_TRUE(it != lru_cache.end());
++  TypefaceVector& chinese_typefaces = it->second;
++  EXPECT_TRUE(chinese_typefaces.at(0)->unicharToGlyph(0x4E01));
++  EXPECT_EQ(lru_cache.size(), kLruCacheTestSize);
++
++  fillCacheWithDummies(lru_cache, "dummy_locale_2nd_%zu",
++                       kLruCacheTestSize - 1);
++  it = lru_cache.Get(kHanSimplifiedLocale);
++  EXPECT_TRUE(it != lru_cache.end());
++  chinese_typefaces = it->second;
++  EXPECT_EQ(chinese_typefaces.size(), 1u);
++  EXPECT_TRUE(chinese_typefaces.at(0)->unicharToGlyph(kSecondCJKIdeograph));
++  EXPECT_EQ(lru_cache.size(), kLruCacheTestSize);
++
++  fillCacheWithDummies(lru_cache, "dummy_locale_3rd_%zu", kLruCacheTestSize);
++  it = lru_cache.Get(kHanSimplifiedLocale);
++  EXPECT_TRUE(it == lru_cache.end());
++  EXPECT_EQ(lru_cache.size(), kLruCacheTestSize);
++}
++
++TEST(FallbackLruCacheTest, LargeFillAndClear) {
++  FallbackLruCache lru_cache(kLruCacheTestSize);
++  EXPECT_EQ(lru_cache.size(), 0u);
++  fillCacheWithDummies(lru_cache, "dummy_locale_%zu", 1000);
++  EXPECT_EQ(lru_cache.size(), kLruCacheTestSize);
++  lru_cache.Clear();
++  EXPECT_EQ(lru_cache.size(), 0u);
++}
++
++TEST(FallbackLruCacheTest, KeyOverride) {
++  FallbackLruCache lru_cache(kLruCacheTestSize);
++  EXPECT_EQ(lru_cache.size(), 0u);
++  fillCacheWithDummies(lru_cache, "same_locale", 10);
++  EXPECT_EQ(lru_cache.size(), 1u);
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc b/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc
+index 83efc5cc57615..943d5cf9a7da9 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc
++++ b/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc
+@@ -42,6 +42,8 @@
+ #include "base/metrics/histogram_functions.h"
+ #include "base/trace_event/trace_event.h"
+ #include "skia/ext/font_utils.h"
++#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
++#include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/web_font_prewarmer.h"
+ #include "third_party/blink/renderer/platform/fonts/bitmap_glyphs_block_list.h"
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
+@@ -163,6 +165,13 @@ void FontCache::SetStatusFontMetrics(const AtomicString& family_name,
+   status_font_height_ = EnsureMinimumFontHeightIfNeeded(font_height);
+ }
+ 
++void FontCache::EnsureServiceConnected() {
++  if (service_)
++    return;
++  Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
++      service_.BindNewPipeAndPassReceiver());
++}
++
+ // TODO(https://crbug.com/976737): This function is deprecated and only intended
+ // to run in parallel with the API based OOP font fallback calls to compare the
+ // results and track them in UMA for a while until we decide to remove this
+@@ -247,30 +256,90 @@ scoped_refptr<SimpleFontData> FontCache::GetDWriteFallbackFamily(
+       font_description, fallback_priority, codepoint);
+   DCHECK(fallback_locale);
+ 
+-  const std::string family_name = font_description.Family().FamilyName().Utf8();
++  // On Pre Windows 8.1 (where use_skia_font_fallback_ is false) we cannot call
++  // the Skia version, as there is no IDWriteFontFallback (which is
++  // proxyable). If no IDWriteFontFallback API exists in the DWrite Skia
++  // SkTypeface implemnetation it will proceed to call the layoutFallback method
++  // of SkTypeface DWrite implementation. This method we must not call in the
++  // renderer as it causes stability issues due to reaching a path that will try
++  // to load the system font collection in-process and thus load DLLs that are
++  // blocked in the renderer, see comment in dwrite_font_proxy_init_impl_win.cc
++  // InitializeDWriteFontProxy(). Hence, for Windows pre 8.1 we add a
++  // DWriteFontProxy code path to retrieve a family name as string for a
++  // character + language tag and call matchFamilyStyleCharacter on the browser
++  // side, where we can do that.
++  if (!use_skia_font_fallback_) {
++    String fallback_family;
++    SkFontStyle fallback_style;
++
++    if (!fallback_params_cache_) [[unlikely]] {
++      fallback_params_cache_ = std::make_unique<FallbackFamilyStyleCache>();
++    }
+ 
+-  Bcp47Vector locales;
+-  locales.push_back(fallback_locale->LocaleForSkFontMgr());
+-  sk_sp<SkTypeface> typeface(skia::DefaultFontMgr()->matchFamilyStyleCharacter(
+-      family_name.c_str(), font_description.SkiaFontStyle(), locales.data(),
+-      locales.size(), codepoint));
++    fallback_params_cache_->Get(
++        font_description.GenericFamily(), fallback_locale->LocaleForSkFontMgr(),
++        fallback_priority, codepoint, &fallback_family, &fallback_style);
++    bool result_from_cache = !fallback_family.IsNull();
+ 
+-  if (!typeface) {
+-    return nullptr;
+-  }
++    if (!result_from_cache) {
++      EnsureServiceConnected();
++
++      // After Mojo IPC, on the browser side, this ultimately reaches
++      // Skia's matchFamilyStyleCharacter for Windows, which does not implement
++      // traversing the language tag stack but only processes the most important
++      // one, so we use FallbackLocaleForCharacter() to determine what locale to
++      // choose to achieve the best possible result.
+ 
+-  SkString skia_family;
+-  typeface->getFamilyName(&skia_family);
+-  FontDescription fallback_updated_font_description(font_description);
+-  fallback_updated_font_description.UpdateFromSkiaFontStyle(
+-      typeface->fontStyle());
+-  const FontFaceCreationParams create_by_family(ToAtomicString(skia_family));
+-  const FontPlatformData* data =
+-      GetFontPlatformData(fallback_updated_font_description, create_by_family);
+-  if (!data || !data->FontContainsCharacter(codepoint)) {
+-    return nullptr;
++      if (!GetOutOfProcessFallbackFamily(
++              codepoint, font_description.GenericFamily(),
++              fallback_locale->LocaleForSkFontMgr(), fallback_priority,
++              service_, &fallback_family, &fallback_style))
++        return nullptr;
++
++      if (fallback_family.empty())
++        return nullptr;
++    }
++
++    FontFaceCreationParams create_by_family((AtomicString(fallback_family)));
++    FontDescription fallback_updated_font_description(font_description);
++    fallback_updated_font_description.UpdateFromSkiaFontStyle(fallback_style);
++    const FontPlatformData* data = GetFontPlatformData(
++        fallback_updated_font_description, create_by_family);
++    if (!data || !data->FontContainsCharacter(codepoint))
++      return nullptr;
++
++    if (!result_from_cache) {
++      fallback_params_cache_->Put(font_description.GenericFamily(),
++                                  fallback_locale->LocaleForSkFontMgr(),
++                                  fallback_priority, data->Typeface());
++    }
++    return FontDataFromFontPlatformData(data);
++  } else {
++    std::string family_name = font_description.Family().FamilyName().Utf8();
++
++    Bcp47Vector locales;
++    locales.push_back(fallback_locale->LocaleForSkFontMgr());
++    sk_sp<SkTypeface> typeface(skia::DefaultFontMgr()->matchFamilyStyleCharacter(
++        family_name.c_str(), font_description.SkiaFontStyle(), locales.data(),
++        locales.size(), codepoint));
++
++    if (!typeface)
++      return nullptr;
++
++    SkString skia_family;
++    typeface->getFamilyName(&skia_family);
++    FontDescription fallback_updated_font_description(font_description);
++    fallback_updated_font_description.UpdateFromSkiaFontStyle(
++        typeface->fontStyle());
++    FontFaceCreationParams create_by_family(ToAtomicString(skia_family));
++    const FontPlatformData* data = GetFontPlatformData(
++        fallback_updated_font_description, create_by_family);
++    if (!data || !data->FontContainsCharacter(codepoint))
++      return nullptr;
++    return FontDataFromFontPlatformData(data);
+   }
+-  return FontDataFromFontPlatformData(data);
++  NOTREACHED();
++  return nullptr;
+ }
+ 
+ // Given the desired base font, this will create a SimpleFontData for a specific
+@@ -296,8 +365,9 @@ scoped_refptr<SimpleFontData> FontCache::PlatformFallbackFontForCharacter(
+       GetFallbackFamilyNameFromHardcodedChoices(
+           font_description, character, fallback_priority_with_emoji_text);
+ 
+-  // Fall through to running the API-based fallback.
+-  if (!hardcoded_list_fallback_font) {
++  // Fall through to running the API based fallback on Windows 8.1 and above
++  // where API fallback was previously available.
++  if ((!hardcoded_list_fallback_font && use_skia_font_fallback_)) {
+     return GetDWriteFallbackFamily(font_description, character,
+                                    fallback_priority_with_emoji_text);
+   }
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc b/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc
+index fe7c9a5c819bd..3443cc17468ed 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc
++++ b/third_party/blink/renderer/platform/fonts/win/font_fallback_win.cc
+@@ -48,6 +48,10 @@ namespace blink {
+ 
+ namespace {
+ 
++const char kArial[] = "Arial";
++const char kCourierNew[] = "Courier New";
++const char kTimesNewRoman[] = "Times New Roman";
++
+ inline bool IsFontPresent(const char* font_name_utf8,
+                           const SkFontMgr& font_manager) {
+   sk_sp<SkTypeface> tf(
+@@ -538,4 +542,38 @@ const UChar* GetFallbackFamily(UChar32 character,
+   return kLastResort;
+ }
+ 
++bool GetOutOfProcessFallbackFamily(
++    UChar32 character,
++    FontDescription::GenericFamilyType generic_family,
++    String bcp47_language_tag,
++    FontFallbackPriority,
++    const mojo::Remote<mojom::blink::DWriteFontProxy>& service,
++    String* fallback_family,
++    SkFontStyle* fallback_style) {
++  String base_family_name_approximation;
++  switch (generic_family) {
++    case FontDescription::kMonospaceFamily:
++      base_family_name_approximation = kCourierNew;
++      break;
++    case FontDescription::kSansSerifFamily:
++      base_family_name_approximation = kArial;
++      break;
++    default:
++      base_family_name_approximation = kTimesNewRoman;
++  }
++
++  mojom::blink::FallbackFamilyAndStylePtr fallback_family_and_style;
++  bool mojo_result = service->FallbackFamilyAndStyleForCodepoint(
++      base_family_name_approximation, bcp47_language_tag, character,
++      &fallback_family_and_style);
++
++  SECURITY_DCHECK(fallback_family);
++  SECURITY_DCHECK(fallback_style);
++  *fallback_family = fallback_family_and_style->fallback_family_name;
++  *fallback_style = SkFontStyle(
++      fallback_family_and_style->weight, fallback_family_and_style->width,
++      static_cast<SkFontStyle::Slant>(fallback_family_and_style->slant));
++  return mojo_result;
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_fallback_win.h b/third_party/blink/renderer/platform/fonts/win/font_fallback_win.h
+index 6a51e150dc5b9..254eba78a3639 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_fallback_win.h
++++ b/third_party/blink/renderer/platform/fonts/win/font_fallback_win.h
+@@ -34,10 +34,13 @@
+ #include <unicode/locid.h>
+ #include <unicode/uscript.h>
+ 
++#include "mojo/public/cpp/bindings/remote.h"
++#include "third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom-blink-forward.h"
+ #include "third_party/blink/renderer/platform/fonts/font_description.h"
+ #include "third_party/blink/renderer/platform/fonts/font_fallback_priority.h"
+ #include "third_party/blink/renderer/platform/platform_export.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/skia/include/core/SkFontStyle.h"
+ 
+ class SkFontMgr;
+ 
+@@ -55,6 +58,19 @@ PLATFORM_EXPORT const UChar* GetFallbackFamily(
+     const SkFontMgr& font_manager,
+     UScriptCode& script_out);
+ 
++// Return a font family that can render |character| based on what script
++// that characters belong to by performing an out of process lookup and using
++// system fallback API based on IDWriteTextLayout. This method is only to be
++// used on pre Windows 8.1, as otherwise IDWriteFontFallback API is available.
++PLATFORM_EXPORT bool GetOutOfProcessFallbackFamily(
++    UChar32 character,
++    FontDescription::GenericFamilyType,
++    String bcp47_language_tag,
++    FontFallbackPriority,
++    const mojo::Remote<mojom::blink::DWriteFontProxy>& font_proxy,
++    String* fallback_family,
++    SkFontStyle* fallback_style);
++
+ }  // namespace blink
+ 
+ #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_WIN_FONT_FALLBACK_WIN_H_

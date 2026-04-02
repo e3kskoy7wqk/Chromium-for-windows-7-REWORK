@@ -1,0 +1,1 @@
+remove CertVerifyResult has_sha1 field    2026/3/5 9:36:32    70a730f795d150a5efc59e152fe583556879f484
