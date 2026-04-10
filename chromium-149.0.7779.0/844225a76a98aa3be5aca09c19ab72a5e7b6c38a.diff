@@ -1,0 +1,45 @@
+diff --git a/third_party/libwebrtc/modules/desktop_capture/win/window_capture_utils.cc b/third_party/libwebrtc/modules/desktop_capture/win/window_capture_utils.cc
+index 040ee7da1c7b..ea0d284f6b0a 100644
+--- a/third_party/webrtc/modules/desktop_capture/win/window_capture_utils.cc
++++ b/third_party/webrtc/modules/desktop_capture/win/window_capture_utils.cc
+@@ -161,11 +161,24 @@ bool GetWindowRect(HWND window, DesktopRect* result) {
+   return true;
+ }
+ 
++typedef HRESULT(WINAPI* DwmGetWindowAttributeFunc)(HWND hwnd,
++                                                   DWORD flag,
++                                                   PVOID result_ptr,
++                                                   DWORD result_size);
+ bool GetCroppedWindowRect(HWND window,
+                           bool avoid_cropping_border,
+                           DesktopRect* cropped_rect,
+                           DesktopRect* original_rect) {
+   DesktopRect window_rect;
++  HMODULE dwmapi_library_ = nullptr;
++  DwmGetWindowAttributeFunc dwm_get_window_attribute_func_ = nullptr;
++  dwmapi_library_ = LoadLibraryW(L"dwmapi.dll");
++  if (dwmapi_library_) {
++    dwm_get_window_attribute_func_ =
++        reinterpret_cast<DwmGetWindowAttributeFunc>(
++            GetProcAddress(dwmapi_library_, "DwmGetWindowAttribute"));
++  }
++
+   if (!GetWindowRect(window, &window_rect)) {
+     return false;
+   }
+@@ -188,12 +201,14 @@ bool GetCroppedWindowRect(HWND window,
+     // Only apply this cropping to windows with a resize border (otherwise,
+     // it'd clip the edges of captured pop-up windows without this border).
+     RECT rect;
+-    DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &rect,
++    if (dwm_get_window_attribute_func_) {
++    dwm_get_window_attribute_func_(window, DWMWA_EXTENDED_FRAME_BOUNDS, &rect,
+                           sizeof(RECT));
+     // it's means that the window edge is not transparent
+     if (original_rect && rect.left == original_rect->left()) {
+       return true;
+     }
++    }
+     LONG style = GetWindowLong(window, GWL_STYLE);
+     if (style & WS_THICKFRAME || style & DS_MODALFRAME) {
+       int width = GetSystemMetrics(SM_CXSIZEFRAME);

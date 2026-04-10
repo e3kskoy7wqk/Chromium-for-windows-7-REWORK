@@ -1,0 +1,751 @@
+diff --git a/sandbox/win/BUILD.gn b/sandbox/win/BUILD.gn
+index 21828ad..327396b 100644
+--- a/sandbox/win/BUILD.gn
++++ b/sandbox/win/BUILD.gn
+@@ -141,6 +141,7 @@ static_library("sandbox") {
+ 
+   if (current_cpu == "x64" || current_cpu == "arm64") {
+     sources += [
++      "src/Wow64_64.cc",
+       "src/interceptors_64.cc",
+       "src/interceptors_64.h",
+     ]
+@@ -148,6 +149,8 @@ static_library("sandbox") {
+     ]
+   } else if (current_cpu == "x86") {
+     sources += [
++      "src/Wow64.cc",
++      "src/Wow64.h",
+       "src/resolver_32.cc",
+       "src/service_resolver_32.cc",
+     ]
+diff --git a/sandbox/win/src/Wow64.cc b/sandbox/win/src/Wow64.cc
+new file mode 100644
+index 0000000..c5984d6
+--- /dev/null
++++ b/sandbox/win/src/Wow64.cc
+@@ -0,0 +1,270 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "sandbox/win/src/Wow64.h"
++
++#include <tlhelp32.h>
++#include <stddef.h>
++
++#include <sstream>
++
++#include "base/bit_cast.h"
++#include "base/logging.h"
++#include "base/memory/free_deleter.h"
++#include "base/win/scoped_process_information.h"
++#include "base/win/windows_version.h"
++#include "sandbox/win/src/target_process.h"
++
++namespace {
++
++// Holds the information needed for the interception of NtMapViewOfSection on
++// 64 bits.
++// Warning: do not modify this definition without changing also the code on the
++// 64 bit helper process.
++struct PatchInfo32 {
++  HANDLE dll_load;  // Event to signal the broker.
++  ULONG pad1;
++  HANDLE continue_load;  // Event to wait for the broker.
++  ULONG pad2;
++  HANDLE section;  // First argument of the call.
++  ULONG pad3;
++  void* orig_MapViewOfSection;
++  ULONG original_high;
++  void* signal_and_wait;
++  ULONG pad4;
++  void* patch_location;
++  ULONG patch_high;
++};
++
++// Size of the 64 bit service entry.
++const SIZE_T kServiceEntry64Size = 0x10;
++
++// Removes the interception of ntdll64.
++bool Restore64Code(HANDLE child, PatchInfo32* patch_info) {
++  PatchInfo32 local_patch_info;
++  SIZE_T actual;
++  if (!::ReadProcessMemory(child, patch_info, &local_patch_info,
++                           sizeof(local_patch_info), &actual))
++    return false;
++  if (sizeof(local_patch_info) != actual)
++    return false;
++
++  if (local_patch_info.original_high)
++    return false;
++  if (local_patch_info.patch_high)
++    return false;
++
++  char buffer[kServiceEntry64Size];
++
++  if (!::ReadProcessMemory(child, local_patch_info.orig_MapViewOfSection,
++                           &buffer, kServiceEntry64Size, &actual))
++    return false;
++  if (kServiceEntry64Size != actual)
++    return false;
++
++  if (!::WriteProcessMemory(child, local_patch_info.patch_location, &buffer,
++                            kServiceEntry64Size, &actual))
++    return false;
++  if (kServiceEntry64Size != actual)
++    return false;
++  return true;
++}
++
++typedef BOOL (WINAPI* IsWow64ProcessFunction)(HANDLE process, BOOL* wow64);
++
++}  // namespace
++
++namespace sandbox {
++
++Wow64::Wow64(TargetProcess* child, HMODULE ntdll)
++    : child_(child), ntdll_(ntdll), dll_load_(NULL), continue_load_(NULL) {
++}
++
++Wow64::~Wow64() {
++}
++
++// The basic idea is to allocate one page of memory on the child, and initialize
++// the first part of it with our version of PatchInfo32. Then launch the helper
++// process passing it that address on the child. The helper process will patch
++// the 64 bit version of NtMapViewOfFile, and the interception will signal the
++// first event on the buffer. We'll be waiting on that event and after the 32
++// bit version of ntdll is loaded, we'll remove the interception and return to
++// our caller.
++bool Wow64::WaitForNtdll() {
++  typedef BOOL(WINAPI * IsWow64ProcessFunc)(HANDLE, PBOOL);
++  IsWow64ProcessFunc is_wow64_process = reinterpret_cast<IsWow64ProcessFunc>(
++      GetProcAddress(GetModuleHandle(L"kernel32.dll"), "IsWow64Process"));
++  BOOL is_wow64 = FALSE;
++  if (!is_wow64_process ||
++      !(*is_wow64_process)(GetCurrentProcess(), &is_wow64) ||
++      !is_wow64)
++    return true;
++
++  const size_t page_size = 4096;
++
++  // Create some default manual reset un-named events, not signaled.
++  dll_load_.Set(::CreateEvent(NULL, TRUE, FALSE, NULL));
++  continue_load_.Set(::CreateEvent(NULL, TRUE, FALSE, NULL));
++  HANDLE current_process = ::GetCurrentProcess();
++  HANDLE remote_load, remote_continue;
++  DWORD access = EVENT_MODIFY_STATE | SYNCHRONIZE;
++  if (!::DuplicateHandle(current_process, dll_load_.Get(), child_->Process(),
++                         &remote_load, access, FALSE, 0)) {
++    return false;
++  }
++  if (!::DuplicateHandle(current_process, continue_load_.Get(),
++                         child_->Process(), &remote_continue, access, FALSE,
++                         0)) {
++    return false;
++  }
++
++  void* buffer = ::VirtualAllocEx(child_->Process(), NULL, page_size,
++                                  MEM_COMMIT, PAGE_EXECUTE_READWRITE);
++  DCHECK(buffer);
++  if (!buffer)
++    return false;
++
++  PatchInfo32* patch_info = reinterpret_cast<PatchInfo32*>(buffer);
++  PatchInfo32 local_patch_info = {0};
++  local_patch_info.dll_load = remote_load;
++  local_patch_info.continue_load = remote_continue;
++  SIZE_T written;
++  if (!::WriteProcessMemory(child_->Process(), patch_info, &local_patch_info,
++                            offsetof(PatchInfo32, section), &written))
++    return false;
++  if (offsetof(PatchInfo32, section) != written)
++    return false;
++
++  if (!RunWowHelper(buffer))
++    return false;
++
++  // The child is intercepted on 64 bit, go on and wait for our event.
++  if (!DllMapped())
++    return false;
++
++  // The 32 bit version is available, cleanup the child.
++  return Restore64Code(child_->Process(), patch_info);
++}
++
++bool Wow64::RunWowHelper(void* buffer) {
++  static_assert(sizeof(buffer) <= sizeof(DWORD), "unsupported 64 bits");
++
++  // Get the path to the helper (beside the exe).
++  wchar_t prog_name[MAX_PATH];
++  GetModuleFileNameW(NULL, prog_name, MAX_PATH);
++  std::wstring path(prog_name);
++  size_t name_pos = path.find_last_of(L"\\");
++  if (std::wstring::npos == name_pos)
++    return false;
++  path.resize(name_pos + 1);
++
++  std::basic_stringstream<wchar_t> command;
++  command << std::hex << std::showbase << L"\"" << path <<
++               L"wow_helper.exe\" " << child_->ProcessId() << " " <<
++               reinterpret_cast<ULONG>(buffer);
++
++  std::unique_ptr<wchar_t, base::FreeDeleter>
++      writable_command(_wcsdup(command.str().c_str()));
++
++  STARTUPINFO startup_info = {0};
++  startup_info.cb = sizeof(startup_info);
++  PROCESS_INFORMATION temp_process_info = {};
++  if (!::CreateProcess(NULL, writable_command.get(), NULL, NULL, FALSE, 0, NULL,
++                       NULL, &startup_info, &temp_process_info))
++    return false;
++  base::win::ScopedProcessInformation process_info(temp_process_info);
++
++  DWORD reason = ::WaitForSingleObject(process_info.process_handle(), INFINITE);
++
++  DWORD code;
++  bool ok =
++      ::GetExitCodeProcess(process_info.process_handle(), &code) ? true : false;
++
++  if (WAIT_TIMEOUT == reason)
++    return false;
++
++  return ok && (0 == code);
++}
++
++DWORD ListProcessThreads( DWORD dwOwnerPID ) 
++{ 
++  HANDLE hThreadSnap = INVALID_HANDLE_VALUE; 
++  THREADENTRY32 te32; 
++ 
++  // Take a snapshot of all running threads  
++  hThreadSnap = CreateToolhelp32Snapshot( TH32CS_SNAPTHREAD, 0 ); 
++  if( hThreadSnap == INVALID_HANDLE_VALUE ) 
++    return( FALSE ); 
++ 
++  // Fill in the size of the structure before using it. 
++  te32.dwSize = sizeof(THREADENTRY32 ); 
++ 
++  // Retrieve information about the first thread,
++  // and exit if unsuccessful
++  if( !Thread32First( hThreadSnap, &te32 ) ) 
++  {
++    CloseHandle( hThreadSnap );     // Must clean up the snapshot object!
++    return( FALSE );
++  }
++
++  // Now walk the thread list of the system,
++  // and display information about each thread
++  // associated with the specified process
++  do 
++  { 
++    if( te32.th32OwnerProcessID == dwOwnerPID )
++    {
++        break;
++    }
++  } while( Thread32Next(hThreadSnap, &te32 ) );
++
++//  Don't forget to clean up the snapshot object.
++  CloseHandle( hThreadSnap );
++  return( te32.th32ThreadID );
++}
++
++// First we must wake up the child, then wait for dll loads on the child until
++// the one we care is loaded; at that point we must suspend the child again.
++bool Wow64::DllMapped() {
++   HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, ListProcessThreads(child_->ProcessId()));
++
++  if (1 != ::ResumeThread(hThread)) {
++    return false;
++  }
++
++  for (;;) {
++    DWORD reason = ::WaitForSingleObject(dll_load_.Get(), INFINITE);
++    if (WAIT_TIMEOUT == reason || WAIT_ABANDONED == reason)
++      return false;
++
++    if (!::ResetEvent(dll_load_.Get()))
++      return false;
++
++    bool found = NtdllPresent();
++    if (found) {
++      if (::SuspendThread(hThread))
++        return false;
++    }
++
++    if (!::SetEvent(continue_load_.Get()))
++      return false;
++
++    if (found)
++      return true;
++  }
++}
++
++bool Wow64::NtdllPresent() {
++  const size_t kBufferSize = 512;
++  char buffer[kBufferSize];
++  SIZE_T read;
++  if (!::ReadProcessMemory(child_->Process(), ntdll_, &buffer, kBufferSize,
++                           &read))
++    return false;
++  if (kBufferSize != read)
++    return false;
++  return true;
++}
++
++}  // namespace sandbox
+diff --git a/sandbox/win/src/Wow64.h b/sandbox/win/src/Wow64.h
+new file mode 100644
+index 0000000..acabc35
+--- /dev/null
++++ b/sandbox/win/src/Wow64.h
+@@ -0,0 +1,54 @@
++// Copyright (c) 2011 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef SANDBOX_SRC_WOW64_H__
++#define SANDBOX_SRC_WOW64_H__
++
++#include <windows.h>
++
++#include "base/win/scoped_handle.h"
++#include "sandbox/win/src/sandbox_types.h"
++
++namespace sandbox {
++
++class TargetProcess;
++
++// This class wraps the code needed to interact with the Windows On Windows
++// subsystem on 64 bit OSes, from the point of view of interceptions.
++class Wow64 {
++ public:
++  Wow64() = delete;
++  Wow64(const Wow64&) = delete;
++  Wow64& operator=(const Wow64&) = delete;
++
++  Wow64(TargetProcess* child, HMODULE ntdll);
++  ~Wow64();
++
++  // Waits for the 32 bit DLL to get loaded on the child process. This function
++  // will return immediately if not running under WOW, or launch the helper
++  // process and wait until ntdll is ready.
++  bool WaitForNtdll();
++
++ private:
++  // Runs the WOW helper process, passing the address of a buffer allocated on
++  // the child (one page).
++  bool RunWowHelper(void* buffer);
++
++  // This method receives "notifications" whenever a DLL is mapped on the child.
++  bool DllMapped();
++
++  // Returns true if ntdll.dll is mapped on the child.
++  bool NtdllPresent();
++
++  TargetProcess* child_;  // Child process.
++  HMODULE ntdll_;         // ntdll on the parent.
++  // Event that is signaled on dll load.
++  base::win::ScopedHandle dll_load_;
++  // Event to signal to continue execution on the child.
++  base::win::ScopedHandle continue_load_;
++};
++
++}  // namespace sandbox
++
++#endif  // SANDBOX_SRC_WOW64_H__
+diff --git a/sandbox/win/src/Wow64_64.cc b/sandbox/win/src/Wow64_64.cc
+new file mode 100644
+index 0000000..357deb8
+--- /dev/null
++++ b/sandbox/win/src/Wow64_64.cc
+@@ -0,0 +1,22 @@
++// Copyright (c) 2011 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Wow64 implementation for native 64-bit Windows (in other words, never WOW).
++
++#include "sandbox/win/src/wow64.h"
++
++namespace sandbox {
++
++Wow64::Wow64(TargetProcess* child, HMODULE ntdll)
++    : child_(child), ntdll_(ntdll), dll_load_(NULL), continue_load_(NULL) {
++}
++
++Wow64::~Wow64() {
++}
++
++bool Wow64::WaitForNtdll() {
++  return true;
++}
++
++}  // namespace sandbox
+diff --git a/sandbox/win/src/startup_information_helper.cc b/sandbox/win/src/startup_information_helper.cc
+index f60c30b..c3b4909 100644
+--- a/sandbox/win/src/startup_information_helper.cc
++++ b/sandbox/win/src/startup_information_helper.cc
+@@ -347,6 +347,9 @@ ResultCode BrokerServicesBase::SpawnTarget(const wchar_t* exe_path,
+ bool StartupInformationHelper::BuildStartupInformation() {
+   // When adding new attributes, any memory referenced needs to have the
+   // same lifetime as startup_info_. This is why we use members below.
++  inherit_handles_ = true;
++  if (base::win::GetVersion() < base::win::Version::VISTA)
++  return true;
+ 
+   auto expected_attributes = CountAttributes();
+   if (!startup_info_.InitializeProcThreadAttributeList(expected_attributes))
+diff --git a/sandbox/win/src/handle_inheritance_test.cc b/sandbox/win/src/handle_inheritance_test.cc
+index 939ace6..d8c2808d 100644
+--- a/sandbox/win/src/handle_inheritance_test.cc
++++ b/sandbox/win/src/handle_inheritance_test.cc
+@@ -42,7 +42,11 @@ TEST(HandleInheritanceTests, TestStdoutInheritance) {
+   std::string data;
+   ASSERT_TRUE(base::ReadFileToString(base::FilePath(temp_file_name), &data));
+   // Redirection uses a feature that was added in Windows Vista.
+-  ASSERT_EQ("Example output to stdout\r\n", data);
++  if (base::win::GetVersion() >= base::win::Version::VISTA) {
++    ASSERT_EQ("Example output to stdout\r\n", data);
++  } else {
++    ASSERT_EQ("", data);
++  }
+ }
+ 
+ }  // namespace sandbox
+diff --git a/sandbox/win/src/interception.cc b/sandbox/win/src/interception.cc
+index 0243c24..f0a2a61 100644
+--- a/sandbox/win/src/interception.cc
++++ b/sandbox/win/src/interception.cc
+@@ -23,6 +23,7 @@
+ #include "sandbox/win/src/target_interceptions.h"
+ #include "sandbox/win/src/target_process.h"
+ #include "sandbox/win/src/win_utils.h"
++#include "sandbox/win/src/wow64.h"
+ 
+ namespace sandbox {
+ 
+@@ -468,6 +469,12 @@ bool InterceptionManager::PatchClientFunctions(DllInterceptionData* thunks,
+   if (!ntdll_base)
+     return base::unexpected(SBOX_ERROR_NO_HANDLE);
+ 
++  if (base::win::GetVersion() <= base::win::Version::VISTA) {
++    Wow64 WowHelper(&child_.get(), ntdll_base);
++    if (!WowHelper.WaitForNtdll())
++      return base::unexpected(SBOX_ERROR_NO_HANDLE);
++  }
++
+   PatchClientResultData patch;
+   patch.dll_data.data_bytes = thunk_bytes;
+   patch.dll_data.num_thunks = 0;
+diff --git a/sandbox/win/src/policy_broker.cc b/sandbox/win/src/policy_broker.cc
+index f6ff13c..74a93f0 100644
+--- a/sandbox/win/src/policy_broker.cc
++++ b/sandbox/win/src/policy_broker.cc
+@@ -110,13 +110,17 @@ bool SetupBasicInterceptions(InterceptionManager* manager,
+       !INTERCEPT_NT(manager, NtOpenThreadToken, OPEN_THREAD_TOKEN_ID, 20))
+     return false;
+ 
+-  // This one is also provided by process_thread_policy.
+-  if (!INTERCEPT_NT(manager, NtOpenProcessTokenEx, OPEN_PROCESS_TOKEN_EX_ID,
+-                    20))
+-    return false;
++  if (base::win::GetVersion() >= base::win::Version::XP) {
++    // Bug 27218: We don't have dispatch for some x64 syscalls.
++    // This one is also provided by process_thread_policy.
++    if (!INTERCEPT_NT(manager, NtOpenProcessTokenEx, OPEN_PROCESS_TOKEN_EX_ID,
++                      20))
++      return false;
+ 
+-  if (!INTERCEPT_NT(manager, NtOpenThreadTokenEx, OPEN_THREAD_TOKEN_EX_ID, 24))
+-    return false;
++    if (!INTERCEPT_NT(manager, NtOpenThreadTokenEx, OPEN_THREAD_TOKEN_EX_ID,
++                      24))
++      return false;
++  }
+ 
+   if (!is_csrss_connected) {
+     if (!INTERCEPT_EAT(manager, kKerneldllName, CreateThread, CREATE_THREAD_ID,
+diff --git a/sandbox/win/src/process_mitigations.cc b/sandbox/win/src/process_mitigations.cc
+index adcc17c..ba191d6 100644
+--- a/sandbox/win/src/process_mitigations.cc
++++ b/sandbox/win/src/process_mitigations.cc
+@@ -38,7 +38,8 @@ bool ApplyProcessMitigationsToCurrentProcess(MitigationFlags flags) {
+ 
+   base::win::Version version = base::win::GetVersion();
+ 
+-  if (flags & MITIGATION_DLL_SEARCH_ORDER) {
++  if (version >= base::win::Version::VISTA &&
++      (flags & MITIGATION_DLL_SEARCH_ORDER)) {
+     HMODULE module = ::GetModuleHandleA("kernel32.dll");
+     SetDefaultDllDirectoriesFunction set_default_dll_directories =
+         reinterpret_cast<SetDefaultDllDirectoriesFunction>(
+@@ -53,7 +54,8 @@ bool ApplyProcessMitigationsToCurrentProcess(MitigationFlags flags) {
+   }
+ 
+   // Set the heap to terminate on corruption
+-  if (flags & MITIGATION_HEAP_TERMINATE) {
++  if (version >= base::win::Version::VISTA &&
++      (flags & MITIGATION_HEAP_TERMINATE)) {
+     if (!::HeapSetInformation(nullptr, HeapEnableTerminationOnCorruption,
+                               nullptr, 0)) {
+       return false;
+@@ -61,7 +63,8 @@ bool ApplyProcessMitigationsToCurrentProcess(MitigationFlags flags) {
+     applied_flags |= MITIGATION_HEAP_TERMINATE;
+   }
+ 
+-  if (flags & MITIGATION_HARDEN_TOKEN_IL_POLICY) {
++  if (version >= base::win::Version::WIN7 &&
++      (flags & MITIGATION_HARDEN_TOKEN_IL_POLICY)) {
+     std::optional<base::win::AccessToken> token =
+         base::win::AccessToken::FromCurrentProcess(/*impersonation=*/false,
+                                                    READ_CONTROL | WRITE_OWNER);
+@@ -70,6 +73,8 @@ bool ApplyProcessMitigationsToCurrentProcess(MitigationFlags flags) {
+ #if !defined(_WIN64)  // DEP is always enabled on 64-bit.
+   if (flags & MITIGATION_DEP) {
+     DWORD dep_flags = PROCESS_DEP_ENABLE;
++    // DEP support is quirky on XP, so don't force a failure in that case.
++    const bool return_on_fail = version >= base::win::Version::VISTA;
+ 
+     if (combined_flags & MITIGATION_DEP_NO_ATL_THUNK)
+       dep_flags |= PROCESS_DEP_DISABLE_ATL_THUNK_EMULATION;
+@@ -79,11 +84,37 @@ bool ApplyProcessMitigationsToCurrentProcess(MitigationFlags flags) {
+         reinterpret_cast<SetProcessDEPPolicyFunction>(
+             ::GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessDEPPolicy"));
+     if (set_process_dep_policy) {
+-      if (!set_process_dep_policy(dep_flags)) {
++      if (!set_process_dep_policy(dep_flags) && return_on_fail) {
+         return false;
+       }
+-    } else
+-      return false;
++    } else {
++      // We're on XP sp2, so use the less standard approach.
++      // For reference: http://www.uninformed.org/?v=2&a=4
++      static const int MEM_EXECUTE_OPTION_DISABLE = 2;
++      static const int MEM_EXECUTE_OPTION_ATL7_THUNK_EMULATION = 4;
++      static const int MEM_EXECUTE_OPTION_PERMANENT = 8;
++
++typedef NTSTATUS(WINAPI* NtSetInformationProcessFunction)(
++    HANDLE ProcessHandle,
++    IN PROCESSINFOCLASS ProcessInformationClass,
++    IN PVOID ProcessInformation,
++    IN ULONG ProcessInformationLength);
++
++      NtSetInformationProcessFunction set_information_process = NULL;
++      ResolveNTFunctionPtr("NtSetInformationProcess",
++                           &set_information_process);
++      if (!set_information_process)
++        return false;
++      ULONG dep = MEM_EXECUTE_OPTION_DISABLE | MEM_EXECUTE_OPTION_PERMANENT;
++      if (!(dep_flags & PROCESS_DEP_DISABLE_ATL_THUNK_EMULATION))
++        dep |= MEM_EXECUTE_OPTION_ATL7_THUNK_EMULATION;
++      if (!SUCCEEDED(set_information_process(GetCurrentProcess(),
++                                             (PROCESSINFOCLASS)0x22,
++                                             &dep, sizeof(dep))) &&
++          ERROR_ACCESS_DENIED != ::GetLastError() && return_on_fail) {
++        return false;
++      }
++    }
+ 
+     applied_flags |=
+         combined_flags & (MITIGATION_DEP | MITIGATION_DEP_NO_ATL_THUNK);
+@@ -204,6 +229,10 @@ void ConvertProcessMitigationsToPolicy(MitigationFlags flags,
+ #error This platform is not supported.
+ #endif
+ 
++  // Nothing for Win XP or Vista.
++  if (version <= base::win::Version::VISTA)
++    return;
++
+ // DEP and SEHOP are not valid for 64-bit Windows
+ #if !defined(_WIN64)
+   if (flags & MITIGATION_DEP) {
+@@ -283,6 +312,19 @@ void ConvertProcessMitigationsToPolicy(MitigationFlags flags,
+ MitigationFlags FilterPostStartupProcessMitigations(MitigationFlags flags) {
+   base::win::Version version = base::win::GetVersion();
+ 
++  // Windows XP SP2+.
++  if (version < base::win::Version::VISTA) {
++    return flags & (MITIGATION_DEP |
++                    MITIGATION_DEP_NO_ATL_THUNK);
++  }
++
++  // Windows Vista
++  if (version < base::win::Version::WIN7) {
++    return flags & (MITIGATION_BOTTOM_UP_ASLR |
++                    MITIGATION_DLL_SEARCH_ORDER |
++                    MITIGATION_HEAP_TERMINATE);
++  }
++
+   // Windows 7.
+   if (version < base::win::Version::WIN8) {
+     return flags & (MITIGATION_BOTTOM_UP_ASLR | MITIGATION_DLL_SEARCH_ORDER |
+diff --git a/sandbox/win/src/restricted_token_utils.cc b/sandbox/win/src/restricted_token_utils.cc
+index 9a062233..4a3d05c 100644
+--- a/sandbox/win/src/restricted_token_utils.cc
++++ b/sandbox/win/src/restricted_token_utils.cc
+@@ -78,7 +78,8 @@ DWORD CreateRestrictedToken(TokenLevel security_level,
+       // current logon sid in the token to achieve this. You should also set the
+       // process to be low integrity level so it can't access object created by
+       // other processes.
+-      restricted_token.AddRestrictingSidLogonSession();
++      if (base::win::GetVersion() >= base::win::Version::VISTA)
++        restricted_token.AddRestrictingSidLogonSession();
+       break;
+     case USER_LOCKDOWN:
+       remove_traverse_privilege = true;
+@@ -241,6 +246,8 @@ DWORD SetProcessIntegrityLevel(IntegrityLevel integrity_level) {
+ }
+ 
+ DWORD HardenTokenIntegrityLevelPolicy(const base::win::AccessToken& token) {
++  if (base::win::GetVersion() < base::win::Version::WIN7)
++    return ERROR_SUCCESS;
+   std::optional<base::win::SecurityDescriptor> sd =
+       base::win::SecurityDescriptor::FromHandle(
+           token.get(), base::win::SecurityObjectType::kKernel,
+diff --git a/sandbox/win/src/broker_services.cc b/sandbox/win/src/broker_services.cc
+index 35440e5..99e5b74 100644
+--- a/sandbox/win/src/broker_services.cc
++++ b/sandbox/win/src/broker_services.cc
+@@ -475,7 +475,8 @@ ResultCode PolicyBase::MakeTokens(base::win::ScopedHandle* initial,
+   // integrity label on the object is no higher than the sandboxed process's
+   // integrity level. So, we lower the label on the desktop handle if it's
+   // not already low enough for our process.
+-  if (integrity == INTEGRITY_LEVEL_LAST)
++  if (integrity == INTEGRITY_LEVEL_LAST ||
++      base::win::OSInfo::GetInstance()->version() < base::win::Version::VISTA)
+     return SBOX_ALL_OK;
+   switch (desktop) {
+     case Desktop::kDefault:
+diff --git a/sandbox/win/src/target_services.cc b/sandbox/win/src/target_services.cc
+index 2c037b9f..7537245 100644
+--- a/sandbox/win/src/target_services.cc
++++ b/sandbox/win/src/target_services.cc
+@@ -76,26 +76,31 @@ bool WarmupWindowsLocales() {
+   // warmup all of these functions, but let's not assume that.
+   ::GetUserDefaultLangID();
+   ::GetUserDefaultLCID();
+-  static GetUserDefaultLocaleNameFunction GetUserDefaultLocaleName_func =
+-      nullptr;
+-  if (!GetUserDefaultLocaleName_func) {
+-    HMODULE kernel32_dll = ::GetModuleHandle(kKernel32DllName);
+-    if (!kernel32_dll) {
+-      return false;
+-    }
+-    GetUserDefaultLocaleName_func =
+-        reinterpret_cast<GetUserDefaultLocaleNameFunction>(
+-            GetProcAddress(kernel32_dll, "GetUserDefaultLocaleName"));
++  if (base::win::GetVersion() >= base::win::Version::VISTA) {
++    static GetUserDefaultLocaleNameFunction GetUserDefaultLocaleName_func =
++        nullptr;
+     if (!GetUserDefaultLocaleName_func) {
+-      return false;
++      HMODULE kernel32_dll = ::GetModuleHandle(kKernel32DllName);
++      if (!kernel32_dll) {
++        return false;
++      }
++      GetUserDefaultLocaleName_func =
++          reinterpret_cast<GetUserDefaultLocaleNameFunction>(
++              GetProcAddress(kernel32_dll, "GetUserDefaultLocaleName"));
++      if (!GetUserDefaultLocaleName_func) {
++        return false;
++      }
+     }
++    wchar_t localeName[LOCALE_NAME_MAX_LENGTH] = {};
++    return (0 != GetUserDefaultLocaleName_func(
++                     localeName, LOCALE_NAME_MAX_LENGTH * sizeof(wchar_t)));
+   }
+-  wchar_t localeName[LOCALE_NAME_MAX_LENGTH] = {};
+-  return (0 != GetUserDefaultLocaleName_func(
+-                    localeName, LOCALE_NAME_MAX_LENGTH * sizeof(wchar_t)));
++  return true;
+ }
+ 
+ bool SetProcessIntegrityLevel(IntegrityLevel integrity_level) {
++  if (base::win::GetVersion() < base::win::Version::VISTA)
++    return true;
+   std::optional<DWORD> rid = GetIntegrityLevelRid(integrity_level);
+   if (!rid) {
+     // No mandatory level specified, we don't change it.
+diff --git a/sandbox/win/src/restricted_token.cc b/sandbox/win/src/restricted_token.cc
+index 2b2b5c1753b3f..af23699904f28 100644
+--- a/sandbox/win/src/restricted_token.cc
++++ b/sandbox/win/src/restricted_token.cc
+@@ -16,6 +16,7 @@
+ #include "base/logging.h"
+ #include "base/win/access_token.h"
+ #include "base/win/security_util.h"
++#include "base/win/windows_version.h"
+ #include "sandbox/win/src/acl.h"
+ 
+ namespace sandbox {
+@@ -184,7 +185,8 @@ absl::optional<base::win::AccessToken> RestrictedToken::CreateRestricted(
+     return std::nullopt;
+   }
+ 
+-  if (lockdown_default_dacl_) {
++  if (base::win::GetVersion() >= base::win::Version::VISTA &&
++      lockdown_default_dacl_) {
+     // Don't add Restricted sid and also remove logon sid access.
+     std::optional<base::win::Sid> logon_sid = new_token->LogonId();
+     if (logon_sid.has_value()) {
+@@ -217,7 +219,8 @@ absl::optional<base::win::AccessToken> RestrictedToken::CreateRestricted(
+     return std::nullopt;
+   }
+ 
+-  if (integrity_rid_.has_value()) {
++  if (base::win::GetVersion() >= base::win::Version::VISTA &&
++      integrity_rid_.has_value()) {
+     if (!new_token->SetIntegrityLevel(*integrity_rid_)) {
+       return std::nullopt;
+     }
+diff --git a/sandbox/win/src/win_utils.cc b/sandbox/win/src/win_utils.cc
+index 9594726f1e3ad..27054caa6719d 100644
+--- a/sandbox/win/src/win_utils.cc
++++ b/sandbox/win/src/win_utils.cc
+@@ -19,6 +19,7 @@
+ #include "base/containers/span.h"
+ #include "base/numerics/safe_math.h"
+ #include "base/strings/string_util.h"
++#include "base/win/pe_image.h"
+ #include "base/win/scoped_handle.h"
+ #include "base/win/win_util.h"
+ #include "sandbox/win/src/internal_types.h"
+@@ -210,3 +403,22 @@ bool ContainsNulCharacter(std::wstring_view str) {
+ }
+ 
+ }  // namespace sandbox
++
++void ResolveNTFunctionPtr(const char* name, void* ptr) {
++  static volatile HMODULE ntdll = nullptr;
++
++  if (!ntdll) {
++    HMODULE ntdll_local = ::GetModuleHandle(sandbox::kNtdllName);
++    // Use PEImage to sanity-check that we have a valid ntdll handle.
++    base::win::PEImage ntdll_peimage(ntdll_local);
++    CHECK_NT(ntdll_peimage.VerifyMagic());
++    // Race-safe way to set static ntdll.
++    ::InterlockedCompareExchangePointer(
++        reinterpret_cast<PVOID volatile*>(&ntdll), ntdll_local, nullptr);
++  }
++
++  CHECK_NT(ntdll);
++  FARPROC* function_ptr = reinterpret_cast<FARPROC*>(ptr);
++  *function_ptr = ::GetProcAddress(ntdll, name);
++  CHECK_NT(*function_ptr);
++}
+diff --git a/sandbox/win/src/win_utils.h b/sandbox/win/src/win_utils.h
+index 4a6036f4829d8..71c6e020a99b6 100644
+--- a/sandbox/win/src/win_utils.h
++++ b/sandbox/win/src/win_utils.h
+@@ -97,4 +105,8 @@ bool ContainsNulCharacter(std::wstring_view str);
+ 
+ }  // namespace sandbox
+ 
++// Resolves a function name in NTDLL to a function pointer. The second parameter
++// is a pointer to the function pointer.
++void ResolveNTFunctionPtr(const char* name, void* ptr);
++
+ #endif  // SANDBOX_WIN_SRC_WIN_UTILS_H_

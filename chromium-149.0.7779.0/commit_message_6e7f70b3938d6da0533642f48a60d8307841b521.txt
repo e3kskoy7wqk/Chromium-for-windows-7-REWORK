@@ -1,0 +1,1 @@
+Updated GDI compatibility patch for M123+    2023/11/22 22:42:30    6e7f70b3938d6da0533642f48a60d8307841b521
