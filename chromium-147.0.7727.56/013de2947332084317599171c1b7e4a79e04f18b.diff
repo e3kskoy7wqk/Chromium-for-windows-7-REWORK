@@ -1,0 +1,30 @@
+diff --git a/net/cert/cert_verify_proc.cc b/net/cert/cert_verify_proc.cc
+index c1c3a60b009e4..c49c82226481b 100644
+--- a/net/cert/cert_verify_proc.cc
++++ b/net/cert/cert_verify_proc.cc
+@@ -67,6 +67,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "base/threading/scoped_blocking_call.h"
+ #include "base/time/time.h"
++#include "base/win/windows_version.h"
+ #include "build/build_config.h"
+ #include "crypto/crypto_buildflags.h"
+ #include "crypto/sha2.h"
+@@ -352,6 +353,17 @@ void RecordEkuHistogram(const CertVerifyResult& verify_result) {
+   }
+ }
+ 
++bool AreSHA1IntermediatesAllowed() {
++#if BUILDFLAG(IS_WIN)
++  // TODO(rsleevi): Remove this once https://crbug.com/588789 is resolved
++  // for Windows 7/2008 users.
++  // Note: This must be kept in sync with cert_verify_proc_unittest.cc
++  return base::win::GetVersion() < base::win::Version::WIN8;
++#else
++  return false;
++#endif
++}
++
+ // Inspects the signature algorithms in a single certificate |cert|.
+ //
+ //   * Sets |verify_result->has_sha1| to true if the certificate uses SHA1.

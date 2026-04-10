@@ -1,0 +1,18 @@
+diff --git a/base/win/elevation_util.cc b/base/win/elevation_util.cc
+index 384f90a02dfc7..3816af0e40301 100644
+--- a/base/win/elevation_util.cc
++++ b/base/win/elevation_util.cc
+@@ -88,7 +88,12 @@ Process RunDeElevated(const CommandLine& command_line) {
+ 
+   StartupInformation startupinfo;
+   PROCESS_INFORMATION pi = {};
+-  if (!::CreateProcessWithTokenW(duplicated_shell_token->get(), 0,
++  typedef BOOL (WINAPI *FNCreateProcessWithTokenW)(HANDLE hToken, DWORD dwLogonFlags, LPCWSTR lpApplicationName, LPWSTR lpCommandLine, DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInfo);
++  FNCreateProcessWithTokenW pfnCreateProcessWithTokenW = (FNCreateProcessWithTokenW) GetProcAddress (GetModuleHandle (L"advapi32.dll"), "CreateProcessWithTokenW");
++  if (!pfnCreateProcessWithTokenW)
++    if (!CreateProcessAsUserW(duplicated_shell_token->get(), command_line.GetProgram().value().c_str(), command_line.GetCommandLineString().data(), 0, 0, TRUE, 0, 0, 0, startupinfo.startup_info(), &pi))
++    return Process();
++  if (pfnCreateProcessWithTokenW && !pfnCreateProcessWithTokenW(duplicated_shell_token->get(), 0,
+                                  command_line.GetProgram().value().c_str(),
+                                  command_line.GetCommandLineString().data(), 0,
+                                  nullptr, nullptr, startupinfo.startup_info(),

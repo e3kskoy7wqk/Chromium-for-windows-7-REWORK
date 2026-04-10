@@ -1,0 +1,31 @@
+diff --git a/third_party/crashpad/crashpad/client/crashpad_client_win.cc b/third_party/crashpad/crashpad/client/crashpad_client_win.cc
+index 77faa692f3992..5592c4e265258 100644
+--- a/third_party/crashpad/crashpad/client/crashpad_client_win.cc
++++ b/third_party/crashpad/crashpad/client/crashpad_client_win.cc
+@@ -774,8 +774,25 @@ bool CrashpadClient::RegisterWerModule(const std::wstring& path) {
+   g_wer_registration.pointers.ExceptionRecord = &g_wer_registration.exception;
+   g_wer_registration.pointers.ContextRecord = &g_wer_registration.context;
+ 
++    HMODULE hWerModule=GetModuleHandleW(L"kernel32.dll");
++
++    if (hWerModule == NULL)
++    {
++        return true;
++    }
++
++    typedef HRESULT (WINAPI * WerRegisterRuntimeExceptionModuleFnPtr)(PCWSTR, PVOID);
++    WerRegisterRuntimeExceptionModuleFnPtr pFnWerRegisterRuntimeExceptionModule;
++
++    pFnWerRegisterRuntimeExceptionModule = (WerRegisterRuntimeExceptionModuleFnPtr)
++                                        GetProcAddress(hWerModule, "WerUnregisterRuntimeExceptionModule");
++
++    if (pFnWerRegisterRuntimeExceptionModule == NULL)
++    {
++       return true;
++    }
+   HRESULT res =
+-      WerRegisterRuntimeExceptionModule(path.c_str(), &g_wer_registration);
++      pFnWerRegisterRuntimeExceptionModule(path.c_str(), &g_wer_registration);
+   return res == S_OK;
+ }
+ 
