@@ -1,0 +1,15 @@
+diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
+index 29b9f115f5c74..78b4a09f4f7ab 100644
+--- a/build/config/win/BUILD.gn
++++ b/build/config/win/BUILD.gn
+@@ -214,6 +214,10 @@ config("runtime_library") {
+     "_SECURE_ATL",
+   ]
+ 
++  # This is required for ATL to use XP-safe versions of its functions.
++  # TODO(thakis): We no longer support XP; try removing this.
++  defines += [ "_USING_V110_SDK71_" ]
++
+   if (current_os == "winuwp") {
+     # When targeting Windows Runtime, certain compiler/linker flags are
+     # necessary.

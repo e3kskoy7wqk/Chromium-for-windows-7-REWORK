@@ -1,0 +1,110 @@
+diff --git a/components/metrics/system_session_analyzer/system_session_analyzer_win.cc b/components/metrics/system_session_analyzer/system_session_analyzer_win.cc
+index e64501f8b55f2..1410417c78944 100644
+--- a/components/metrics/system_session_analyzer/system_session_analyzer_win.cc
++++ b/components/metrics/system_session_analyzer/system_session_analyzer_win.cc
+@@ -65,7 +65,18 @@ bool GetEventInfo(EVT_HANDLE context,
+   DWORD buffer_size = kAttributeCnt * sizeof(EVT_VARIANT);
+   DWORD buffer_used = 0U;
+   DWORD retrieved_attribute_cnt = 0U;
+-  if (!::EvtRender(context, event, EvtRenderEventValues, buffer_size,
++	HMODULE hWEvtApi = NULL;
++	BOOL(WINAPI* pEvtRender)(EVT_HANDLE Context, EVT_HANDLE Fragment, DWORD Flags, DWORD BufferSize, PVOID Buffer, PDWORD BufferUsed, PDWORD PropertyCount) = NULL;
++
++        hWEvtApi = LoadLibraryW(L"wevtapi.dll");
++        if (!hWEvtApi)
++            return false;
++
++        *(PVOID*)&pEvtRender = (PVOID)GetProcAddress(hWEvtApi, "EvtRender");
++        if (!pEvtRender)
++            return false;
++
++  if (!pEvtRender(context, event, EvtRenderEventValues, buffer_size,
+                    buffer.data(), &buffer_used, &retrieved_attribute_cnt)) {
+     DPLOG(ERROR) << "Failed to render the event.";
+     SetExtendedFailureStatus(ExtendedStatus::RENDER_EVENT_FAILURE);
+@@ -136,7 +147,17 @@ bool SystemSessionAnalyzer::FetchEvents(size_t requested_events,
+   DWORD desired_event_cnt = requested_events;
+   std::vector<EVT_HANDLE> events_raw(desired_event_cnt, nullptr);
+   DWORD event_cnt = 0U;
+-  BOOL success = ::EvtNext(query_handle_.get(), desired_event_cnt,
++	HMODULE hWEvtApi = NULL;
++	BOOL (WINAPI* pEvtNext)(EVT_HANDLE ResultSet, DWORD EventsSize, PEVT_HANDLE Events, DWORD Timeout, DWORD Flags, PDWORD Returned);
++
++        hWEvtApi = LoadLibraryW(L"wevtapi.dll");
++        if (!hWEvtApi)
++            return false;
++
++        *(PVOID*)&pEvtNext = (PVOID)GetProcAddress(hWEvtApi, "EvtNext");
++        if (!pEvtNext)
++            return false;
++  BOOL success = pEvtNext(query_handle_.get(), desired_event_cnt,
+                            events_raw.data(), kTimeoutMs, 0, &event_cnt);
+ 
+   // Ensure handles get closed. The MSDN sample seems to imply handles may need
+@@ -175,11 +196,21 @@ bool SystemSessionAnalyzer::EnsureInitialized() {
+ }
+ 
+ bool SystemSessionAnalyzer::EnsureHandlesOpened() {
++	HMODULE hWEvtApi = NULL;
++    EVT_HANDLE (WINAPI* pEvtQuery)(EVT_HANDLE Session, LPCWSTR Path, LPCWSTR Query, DWORD Flags);
++
++        hWEvtApi = LoadLibraryW(L"wevtapi.dll");
++        if (!hWEvtApi)
++            return false;
++
++        *(PVOID*)&pEvtQuery = (PVOID)GetProcAddress(hWEvtApi, "EvtQuery");
++        if (!pEvtQuery)
++            return false;
+   // Create the event query.
+   // Note: requesting events from newest to oldest.
+   if (!query_handle_.get()) {
+     query_handle_.reset(
+-        ::EvtQuery(nullptr, kChannelName, kSessionEventsQuery,
++        pEvtQuery(nullptr, kChannelName, kSessionEventsQuery,
+                    EvtQueryChannelPath | EvtQueryReverseDirection));
+     if (!query_handle_.get()) {
+       DPLOG(ERROR) << "Event query failed.";
+@@ -252,8 +283,18 @@ SystemSessionAnalyzer::EvtHandle SystemSessionAnalyzer::CreateRenderContext() {
+   const DWORD kValueCnt = std::size(value_paths);
+ 
+   EVT_HANDLE context = nullptr;
++	HMODULE hWEvtApi = NULL;
++	EVT_HANDLE(WINAPI* pEvtCreateRenderContext)(DWORD ValuePathsCount, LPCWSTR* ValuePaths, DWORD Flags) = NULL;
++
++        hWEvtApi = LoadLibraryW(L"wevtapi.dll");
++        if (!hWEvtApi)
++            return EvtHandle(context);
++
++        *(PVOID*)&pEvtCreateRenderContext = (PVOID)GetProcAddress(hWEvtApi, "EvtCreateRenderContext");
++        if (!pEvtCreateRenderContext)
++            return EvtHandle(context);
+   context =
+-      ::EvtCreateRenderContext(kValueCnt, value_paths, EvtRenderContextValues);
++      pEvtCreateRenderContext(kValueCnt, value_paths, EvtRenderContextValues);
+   if (!context)
+     DPLOG(ERROR) << "Failed to create render context.";
+ 
+diff --git a/components/metrics/system_session_analyzer/system_session_analyzer_win.h b/components/metrics/system_session_analyzer/system_session_analyzer_win.h
+index 2bd83e10e71cb..77ef901215989 100644
+--- a/components/metrics/system_session_analyzer/system_session_analyzer_win.h
++++ b/components/metrics/system_session_analyzer/system_session_analyzer_win.h
+@@ -58,8 +58,18 @@ class SystemSessionAnalyzer {
+   struct EvtHandleCloser {
+     using pointer = EVT_HANDLE;
+     void operator()(EVT_HANDLE handle) const {
++	HMODULE hWEvtApi = NULL;
++	BOOL(WINAPI* pEvtClose)(EVT_HANDLE Object) = NULL;
++
++        hWEvtApi = LoadLibraryW(L"wevtapi.dll");
++        if (!hWEvtApi)
++            return;
++
++        *(PVOID*)&pEvtClose = (PVOID)GetProcAddress(hWEvtApi, "EvtClose");
++        if (!pEvtClose)
++            return;
+       if (handle)
+-        ::EvtClose(handle);
++        pEvtClose(handle);
+     }
+   };
+   using EvtHandle = std::unique_ptr<EVT_HANDLE, EvtHandleCloser>;

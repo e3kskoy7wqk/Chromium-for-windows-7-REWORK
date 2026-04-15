@@ -1,0 +1,816 @@
+diff --git a/chrome/browser/ssl/ssl_browsertest.cc b/chrome/browser/ssl/ssl_browsertest.cc
+index 4998ee335abcc..79f820af18e30 100644
+--- a/chrome/browser/ssl/ssl_browsertest.cc
++++ b/chrome/browser/ssl/ssl_browsertest.cc
+@@ -1522,7 +1522,8 @@ IN_PROC_BROWSER_TEST_F(SSLUITest, SHA1IsNotAllowed) {
+ 
+   ssl_test_util::CheckAuthenticationBrokenState(
+       browser()->tab_strip_model()->GetActiveWebContents(),
+-      net::CERT_STATUS_INVALID, AuthState::SHOWING_INTERSTITIAL);
++      net::CERT_STATUS_INVALID | net::CERT_STATUS_WEAK_SIGNATURE_ALGORITHM,
++      AuthState::SHOWING_INTERSTITIAL);
+ }
+ 
+ // Visit a HTTP page which request WSS connection to a server providing invalid
+diff --git a/net/cert/cert_status_flags_list.h b/net/cert/cert_status_flags_list.h
+index c82593d835e03..bad9f78170644 100644
+--- a/net/cert/cert_status_flags_list.h
++++ b/net/cert/cert_status_flags_list.h
+@@ -23,8 +23,6 @@ CERT_STATUS_FLAG(NO_REVOCATION_MECHANISM, 1 << 4)
+ CERT_STATUS_FLAG(UNABLE_TO_CHECK_REVOCATION, 1 << 5)
+ CERT_STATUS_FLAG(REVOKED, 1 << 6)
+ CERT_STATUS_FLAG(INVALID, 1 << 7)
+-// TODO(crbug.com/487349971): should CERT_STATUS_WEAK_SIGNATURE_ALGORITHM be
+-// deprecated?  It's mostly unused now, but maybe we'll want to use it again?
+ CERT_STATUS_FLAG(WEAK_SIGNATURE_ALGORITHM, 1 << 8)
+ // 1 << 9 was used for CERT_STATUS_NOT_IN_DNS
+ CERT_STATUS_FLAG(NON_UNIQUE_NAME, 1 << 10)
+@@ -38,14 +36,6 @@ CERT_STATUS_FLAG(VALIDITY_TOO_LONG, 1 << 15)
+ CERT_STATUS_FLAG(IS_EV, 1 << 16)
+ CERT_STATUS_FLAG(REV_CHECKING_ENABLED, 1 << 17)
+ // Bit 18 was CERT_STATUS_IS_DNSSEC
+-// TODO(crbug.com/487349971): deprecate CERT_STATUS_SHA1_SIGNATURE_PRESENT.
+-// This was a non-error status to indicate the cases when a verification
+-// with a SHA-1 certificate could succeed when
+-// VERIFY_ENABLE_SHA1_LOCAL_ANCHORS was set. It no longer has a purpose now
+-// that SHA-1 is never allowed, and this status is no longer set, but still has
+-// references in UI layer code. (Or we could re-purpose this bit for a more
+-// general "weak signature present" non-error status if we need that in the
+-// future.)
+ CERT_STATUS_FLAG(SHA1_SIGNATURE_PRESENT, 1 << 19)
+ // Bit 20 was CERT_STATUS_CT_COMPLIANCE_FAILED
+ CERT_STATUS_FLAG(KNOWN_INTERCEPTION_DETECTED, 1 << 21)
+diff --git a/net/cert/cert_verify_proc.cc b/net/cert/cert_verify_proc.cc
+index d12efbc9a3705..29fb1c2a8e532 100644
+--- a/net/cert/cert_verify_proc.cc
++++ b/net/cert/cert_verify_proc.cc
+@@ -261,8 +261,9 @@ void RecordTrustAnchorHistogram(const std::vector<SHA256HashValue>& spki_hashes,
+ 
+ // Inspects the signature algorithms in a single certificate |cert|.
+ //
+-// Returns false if the signature algorithm was unknown, mismatched, or
+-// not allowed.
++//   * Sets |verify_result->has_sha1| to true if the certificate uses SHA1.
++//
++// Returns false if the signature algorithm was unknown or mismatched.
+ [[nodiscard]] bool InspectSignatureAlgorithmForCert(
+     const CRYPTO_BUFFER* cert,
+     CertVerifyResult* verify_result) {
+@@ -284,15 +285,10 @@ void RecordTrustAnchorHistogram(const std::vector<SHA256HashValue>& spki_hashes,
+     return false;
+   }
+ 
+-  if (*cert_algorithm == bssl::SignatureAlgorithm::kRsaPkcs1Sha1 ||
+-      *cert_algorithm == bssl::SignatureAlgorithm::kEcdsaSha1) {
+-    // The underlying verifier has likely already failed due to the SHA-1
+-    // signature, double-checking here is mostly unnecessary. (The only case
+-    // this is check is expected to be load-bearing is when cronet is running
+-    // on an old Android (before Android 10) that allows SHA-1 signatures.)
+-    return false;
+-  }
+-
++  verify_result->has_sha1 =
++      verify_result->has_sha1 ||
++      *cert_algorithm == bssl::SignatureAlgorithm::kRsaPkcs1Sha1 ||
++      *cert_algorithm == bssl::SignatureAlgorithm::kEcdsaSha1;
+   return true;
+ }
+ 
+@@ -328,6 +324,8 @@ void RecordTrustAnchorHistogram(const std::vector<SHA256HashValue>& spki_hashes,
+     return true;
+   }
+ 
++  DCHECK(!verify_result->has_sha1);
++
+   // Fill in hash algorithms for the certificates, excluding the
+   // final one (which is presumably the trust anchor; may be incorrect for
+   // partial chains).
+@@ -527,6 +525,33 @@ int CertVerifyProc::Verify(X509Certificate* cert,
+       rv = MapCertStatusToNetError(verify_result->cert_status);
+   }
+ 
++  // Flag certificates using weak signature algorithms.
++  if (verify_result->has_sha1) {
++    // TODO(crbug.com/487349971): remove CERT_STATUS_SHA1_SIGNATURE_PRESENT.
++    // This is a non-error status to indicate the cases when a verification
++    // with a SHA-1 certificate could succeed when
++    // VERIFY_ENABLE_SHA1_LOCAL_ANCHORS was set. It no longer has a purpose
++    // now that SHA-1 is never allowed.
++    // TODO(crbug.com/487349971): remove the CertVerifyResult has_sha1 field
++    // and the CERT_STATUS_WEAK_SIGNATURE_ALGORITHM status. has_sha1 is only
++    // used to smuggle some state from InspectSignatureAlgorithmForCert up to
++    // here so that we can set a different status. We could just make
++    // InspectSignatureAlgorithmForCert fail on a SHA-1 sigalg instead of
++    // having a dedicated cert status code / error code for weak signature. In
++    // general, the underlying verifier has likely already failed due to the
++    // SHA-1 signature with a CERT_STATUS_INVALID error, so all we are doing
++    // here is adding an additional, lower priority error status. (The only
++    // case this is check should be load-bearing is when cronet is running on
++    // an ancient android version that wouldn't fail on SHA-1 itself.)
++    verify_result->cert_status |= CERT_STATUS_WEAK_SIGNATURE_ALGORITHM |
++                                  CERT_STATUS_SHA1_SIGNATURE_PRESENT;
++    // Avoid replacing a more serious error, such as an OS/library failure,
++    // by ensuring that if verification failed, it failed with a certificate
++    // error.
++    if (rv == OK || IsCertificateError(rv))
++      rv = MapCertStatusToNetError(verify_result->cert_status);
++  }
++
+   // Flag certificates using too long validity periods.
+   if (verify_result->is_issued_by_known_root && HasTooLongValidity(*cert)) {
+     verify_result->cert_status |= CERT_STATUS_VALIDITY_TOO_LONG;
+diff --git a/net/cert/cert_verify_proc.h b/net/cert/cert_verify_proc.h
+index 23000c3c9a8a7..bf3b6708bef82 100644
+--- a/net/cert/cert_verify_proc.h
++++ b/net/cert/cert_verify_proc.h
+@@ -304,6 +304,7 @@ class NET_EXPORT CertVerifyProc
+   // Implementations are expected to fill in all applicable fields, excluding:
+   //
+   // * ocsp_result
++  // * has_sha1
+   //
+   // which will be filled in by |Verify()|. If an error code is returned,
+   // |verify_result->cert_status| should be non-zero, indicating an
+diff --git a/net/cert/cert_verify_result.cc b/net/cert/cert_verify_result.cc
+index 0b550e40ad748..3e489fd138842 100644
+--- a/net/cert/cert_verify_result.cc
++++ b/net/cert/cert_verify_result.cc
+@@ -28,6 +28,7 @@ CertVerifyResult::~CertVerifyResult() = default;
+ void CertVerifyResult::Reset() {
+   verified_cert = nullptr;
+   cert_status = 0;
++  has_sha1 = false;
+   is_issued_by_known_root = false;
+ 
+   public_key_hashes.clear();
+diff --git a/net/cert/cert_verify_result.h b/net/cert/cert_verify_result.h
+index 245443bcaafb2..7d721d3870be9 100644
+--- a/net/cert/cert_verify_result.h
++++ b/net/cert/cert_verify_result.h
+@@ -61,6 +61,10 @@ class NET_EXPORT CertVerifyResult {
+   // chain.
+   CertStatus cert_status;
+ 
++  // Hash algorithms used by the certificate chain, excluding the trust
++  // anchor.
++  bool has_sha1;
++
+   // If the certificate was successfully verified then this contains the
+   // hashes for all of the SubjectPublicKeyInfos of the chain (target,
+   // intermediates, and trust anchor)
+diff --git a/net/data/ssl/certificates/weak_digest_md2_ee.pem b/net/data/ssl/certificates/weak_digest_md2_ee.pem
+new file mode 100644
+index 0000000000000..6475ccc80b4e1
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md2_ee.pem
+@@ -0,0 +1,61 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 4 (0x4)
++        Signature Algorithm: md2WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Intermediate CA
++        Validity
++            Not Before: Oct 26 03:46:49 2011 GMT
++            Not After : Oct 23 03:46:49 2021 GMT
++        Subject: C=US, ST=California, L=Mountain View, O=Test CA, CN=127.0.0.1
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:c7:48:eb:5c:00:17:94:01:09:d3:bd:47:41:38:
++                    74:b8:4f:cb:ea:f1:15:eb:cb:e7:b5:6c:bd:fe:d9:
++                    97:6d:1e:1b:ee:75:9e:c1:6f:4a:5c:8c:d7:19:cf:
++                    51:89:48:e8:7d:79:41:ab:e3:a7:77:d1:de:f2:13:
++                    be:36:e7:44:c2:10:dd:56:83:03:f1:cd:e1:13:8d:
++                    fe:45:d6:1a:98:d8:8d:08:b9:32:10:36:0d:ec:ee:
++                    2d:66:22:eb:6a:0d:0e:f4:15:91:dd:9d:3e:92:db:
++                    9e:26:c8:af:4b:b7:fb:93:f8:68:07:c3:53:02:57:
++                    dc:d0:de:df:29:72:45:6f:e3
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:FALSE
++            X509v3 Subject Key Identifier: 
++                35:5C:C8:0F:21:D0:A2:F5:69:44:5C:9E:B0:DC:0F:75:74:24:7A:FD
++            X509v3 Authority Key Identifier: 
++                keyid:A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++
++            X509v3 Extended Key Usage: 
++                TLS Web Server Authentication, TLS Web Client Authentication
++            X509v3 Subject Alternative Name: 
++                IP Address:127.0.0.1
++    Signature Algorithm: md2WithRSAEncryption
++        87:d2:29:b3:6b:ba:36:99:ac:56:47:d8:7d:63:9e:74:a2:b5:
++        42:5e:2b:96:08:f8:ab:e2:ce:ea:99:21:47:25:2c:55:f2:db:
++        9d:d7:ed:d9:68:ba:09:90:b1:43:64:be:af:ef:9a:b4:10:86:
++        99:85:7f:68:fe:aa:fd:d4:6a:f1:68:e9:8f:61:d8:46:21:e4:
++        17:4c:89:db:82:37:36:8d:7f:93:4a:63:b1:da:ba:6b:19:ad:
++        34:8b:f8:11:c3:25:14:2a:4e:7b:75:6b:03:79:c1:e5:1a:5b:
++        ff:b4:91:47:4f:48:91:68:33:c7:3e:a5:95:45:81:2b:0d:35:
++        42:c4
++-----BEGIN CERTIFICATE-----
++MIICiDCCAfGgAwIBAgIBBDANBgkqhkiG9w0BAQIFADAxMS8wLQYDVQQDDCZUZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IEludGVybWVkaWF0ZSBDQTAeFw0xMTEwMjYwMzQ2
++NDlaFw0yMTEwMjMwMzQ2NDlaMGAxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxp
++Zm9ybmlhMRYwFAYDVQQHDA1Nb3VudGFpbiBWaWV3MRAwDgYDVQQKDAdUZXN0IENB
++MRIwEAYDVQQDDAkxMjcuMC4wLjEwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGB
++AMdI61wAF5QBCdO9R0E4dLhPy+rxFevL57Vsvf7Zl20eG+51nsFvSlyM1xnPUYlI
++6H15Qavjp3fR3vITvjbnRMIQ3VaDA/HN4RON/kXWGpjYjQi5MhA2DezuLWYi62oN
++DvQVkd2dPpLbnibIr0u3+5P4aAfDUwJX3NDe3ylyRW/jAgMBAAGjgYAwfjAMBgNV
++HRMBAf8EAjAAMB0GA1UdDgQWBBQ1XMgPIdCi9WlEXJ6w3A91dCR6/TAfBgNVHSME
++GDAWgBSoHQaNrT8lUQDwO+k1xmV0ElEgGTAdBgNVHSUEFjAUBggrBgEFBQcDAQYI
++KwYBBQUHAwIwDwYDVR0RBAgwBocEfwAAATANBgkqhkiG9w0BAQIFAAOBgQCH0imz
++a7o2maxWR9h9Y550orVCXiuWCPir4s7qmSFHJSxV8tud1+3ZaLoJkLFDZL6v75q0
++EIaZhX9o/qr91GrxaOmPYdhGIeQXTInbgjc2jX+TSmOx2rprGa00i/gRwyUUKk57
++dWsDecHlGlv/tJFHT0iRaDPHPqWVRYErDTVCxA==
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md2_intermediate.pem b/net/data/ssl/certificates/weak_digest_md2_intermediate.pem
+new file mode 100644
+index 0000000000000..2f2765d02c0a6
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md2_intermediate.pem
+@@ -0,0 +1,57 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 4 (0x4)
++        Signature Algorithm: md2WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Root CA
++        Validity
++            Not Before: Oct 26 03:46:49 2011 GMT
++            Not After : Oct 23 03:46:49 2021 GMT
++        Subject: CN=Test Deprecated Digest Intermediate CA
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:ac:9b:c0:4b:fc:59:45:7a:d6:3f:a3:89:23:30:
++                    5b:70:ad:ab:78:62:4b:53:85:9f:f9:7d:7f:c1:26:
++                    08:23:80:61:0c:ba:6d:36:06:14:df:29:d4:9c:63:
++                    94:04:ee:14:b6:b9:81:06:2f:33:d8:35:9a:1a:89:
++                    17:ad:21:61:fa:24:75:b9:0c:ef:c1:15:6a:02:bd:
++                    b2:a5:29:df:d8:5f:80:7c:4e:c9:c1:b4:bb:fd:78:
++                    44:63:34:b5:a5:51:aa:e9:23:77:44:53:f9:fa:58:
++                    f6:46:6e:9d:d2:cd:00:a3:28:fe:51:e4:30:7e:49:
++                    62:d4:53:b0:d8:9c:34:47:07
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:TRUE
++            X509v3 Subject Key Identifier: 
++                A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++            X509v3 Authority Key Identifier: 
++                keyid:79:82:C5:B4:EB:60:12:4B:B5:87:79:1B:E2:3A:9C:17:76:81:CB:43
++
++            X509v3 Key Usage: critical
++                Certificate Sign, CRL Sign
++    Signature Algorithm: md2WithRSAEncryption
++        95:17:b3:5f:81:5b:9e:d6:e9:de:67:0e:a7:01:2f:b7:f8:db:
++        13:25:6b:a3:15:2d:53:08:c6:20:65:9d:8f:e9:9e:e4:bc:87:
++        78:59:f6:1f:f4:0e:85:c7:a8:c6:c8:6d:65:7e:b9:f4:73:9b:
++        9f:70:2b:b2:0d:03:06:c5:52:5f:59:87:b5:2b:d0:5c:0d:ee:
++        8f:40:cd:eb:95:f2:0e:f4:51:a8:e8:76:17:82:71:1a:d1:ea:
++        99:54:e4:b7:75:27:54:76:36:6f:c0:4d:5d:fa:bb:98:08:1e:
++        d4:95:d1:9a:c7:35:83:d5:a1:79:2a:1f:78:b4:2b:de:17:93:
++        0c:1b
++-----BEGIN CERTIFICATE-----
++MIICMzCCAZygAwIBAgIBBDANBgkqhkiG9w0BAQIFADApMScwJQYDVQQDDB5UZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IFJvb3QgQ0EwHhcNMTExMDI2MDM0NjQ5WhcNMjEx
++MDIzMDM0NjQ5WjAxMS8wLQYDVQQDDCZUZXN0IERlcHJlY2F0ZWQgRGlnZXN0IElu
++dGVybWVkaWF0ZSBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEArJvAS/xZ
++RXrWP6OJIzBbcK2reGJLU4Wf+X1/wSYII4BhDLptNgYU3ynUnGOUBO4UtrmBBi8z
++2DWaGokXrSFh+iR1uQzvwRVqAr2ypSnf2F+AfE7JwbS7/XhEYzS1pVGq6SN3RFP5
+++lj2Rm6d0s0Aoyj+UeQwfkli1FOw2Jw0RwcCAwEAAaNjMGEwDwYDVR0TAQH/BAUw
++AwEB/zAdBgNVHQ4EFgQUqB0Gja0/JVEA8DvpNcZldBJRIBkwHwYDVR0jBBgwFoAU
++eYLFtOtgEku1h3kb4jqcF3aBy0MwDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEB
++AgUAA4GBAJUXs1+BW57W6d5nDqcBL7f42xMla6MVLVMIxiBlnY/pnuS8h3hZ9h/0
++DoXHqMbIbWV+ufRzm59wK7INAwbFUl9Zh7Ur0FwN7o9AzeuV8g70UajodheCcRrR
++6plU5Ld1J1R2Nm/ATV36u5gIHtSV0ZrHNYPVoXkqH3i0K94Xkwwb
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md2_root.pem b/net/data/ssl/certificates/weak_digest_md2_root.pem
+new file mode 100644
+index 0000000000000..140174d032655
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md2_root.pem
+@@ -0,0 +1,14 @@
++-----BEGIN CERTIFICATE-----
++MIICEjCCAXugAwIBAgIJAMq0TW/f2gFbMA0GCSqGSIb3DQEBAgUAMCkxJzAlBgNV
++BAMMHlRlc3QgRGVwcmVjYXRlZCBEaWdlc3QgUm9vdCBDQTAeFw0xMTEwMjYwMzQ2
++NDlaFw0yMTEwMjMwMzQ2NDlaMCkxJzAlBgNVBAMMHlRlc3QgRGVwcmVjYXRlZCBE
++aWdlc3QgUm9vdCBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAwFtzW+hj
++BwMylx+rrgeKjltrzYabuJDdTDTYr1lViwO39m6CtHYdcFvZ1nU9oDjW4Lb1NQYv
++HoR8+SD0X1R2Y0yF6AyS9NX5E9TQ8TJUSQEehfznbBovMkRaQQMRD6ksRIQr+s00
++P6n0lAYJyN32lmTCbJ+k1aGHPFtKhTNQF/cCAwEAAaNCMEAwDwYDVR0TAQH/BAUw
++AwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFHmCxbTrYBJLtYd5G+I6nBd2
++gctDMA0GCSqGSIb3DQEBAgUAA4GBABnPJVnXJXtImcjcBj31JelbPkLgt8HHjxa+
++LOMNZKIc9d6KWdjMoTNz7Y9dAKiLAJmPp9QAKU4cu0voWRK27O8CjR9Ng7SpfuZ7
++bQ4P22TlcVViAq56+bz/DFRabwBAZtndoawyn04r4Lo/3n/nEONeVTIqsixjN5Au
++0snKiMJj
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md4_ee.pem b/net/data/ssl/certificates/weak_digest_md4_ee.pem
+new file mode 100644
+index 0000000000000..6ea4b257d5c12
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md4_ee.pem
+@@ -0,0 +1,61 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 3 (0x3)
++        Signature Algorithm: md4WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Intermediate CA
++        Validity
++            Not Before: Oct 26 03:46:49 2011 GMT
++            Not After : Oct 23 03:46:49 2021 GMT
++        Subject: C=US, ST=California, L=Mountain View, O=Test CA, CN=127.0.0.1
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:c7:48:eb:5c:00:17:94:01:09:d3:bd:47:41:38:
++                    74:b8:4f:cb:ea:f1:15:eb:cb:e7:b5:6c:bd:fe:d9:
++                    97:6d:1e:1b:ee:75:9e:c1:6f:4a:5c:8c:d7:19:cf:
++                    51:89:48:e8:7d:79:41:ab:e3:a7:77:d1:de:f2:13:
++                    be:36:e7:44:c2:10:dd:56:83:03:f1:cd:e1:13:8d:
++                    fe:45:d6:1a:98:d8:8d:08:b9:32:10:36:0d:ec:ee:
++                    2d:66:22:eb:6a:0d:0e:f4:15:91:dd:9d:3e:92:db:
++                    9e:26:c8:af:4b:b7:fb:93:f8:68:07:c3:53:02:57:
++                    dc:d0:de:df:29:72:45:6f:e3
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:FALSE
++            X509v3 Subject Key Identifier: 
++                35:5C:C8:0F:21:D0:A2:F5:69:44:5C:9E:B0:DC:0F:75:74:24:7A:FD
++            X509v3 Authority Key Identifier: 
++                keyid:A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++
++            X509v3 Extended Key Usage: 
++                TLS Web Server Authentication, TLS Web Client Authentication
++            X509v3 Subject Alternative Name: 
++                IP Address:127.0.0.1
++    Signature Algorithm: md4WithRSAEncryption
++        a5:f6:ae:83:a1:44:5a:dd:c4:91:a2:d6:88:d8:c6:d1:e5:6d:
++        c8:71:7a:43:3e:e2:ce:42:a4:7d:94:16:5d:0a:df:33:e3:ea:
++        c9:22:e3:52:9d:f7:72:3e:24:d5:78:38:67:9f:2d:46:cb:73:
++        c5:1f:eb:4b:02:5c:25:41:e0:c5:07:03:4c:4c:55:87:db:32:
++        d0:2e:3e:aa:d4:a6:69:75:12:75:2e:b6:98:24:0e:18:c4:1c:
++        60:aa:c5:19:c1:1c:ad:ba:f4:c8:c0:55:2b:61:7d:a4:f4:c6:
++        73:0d:61:7e:04:42:e2:69:8d:9c:9d:83:22:e4:cc:cc:3f:b5:
++        2a:6d
++-----BEGIN CERTIFICATE-----
++MIICiDCCAfGgAwIBAgIBAzANBgkqhkiG9w0BAQMFADAxMS8wLQYDVQQDDCZUZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IEludGVybWVkaWF0ZSBDQTAeFw0xMTEwMjYwMzQ2
++NDlaFw0yMTEwMjMwMzQ2NDlaMGAxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxp
++Zm9ybmlhMRYwFAYDVQQHDA1Nb3VudGFpbiBWaWV3MRAwDgYDVQQKDAdUZXN0IENB
++MRIwEAYDVQQDDAkxMjcuMC4wLjEwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGB
++AMdI61wAF5QBCdO9R0E4dLhPy+rxFevL57Vsvf7Zl20eG+51nsFvSlyM1xnPUYlI
++6H15Qavjp3fR3vITvjbnRMIQ3VaDA/HN4RON/kXWGpjYjQi5MhA2DezuLWYi62oN
++DvQVkd2dPpLbnibIr0u3+5P4aAfDUwJX3NDe3ylyRW/jAgMBAAGjgYAwfjAMBgNV
++HRMBAf8EAjAAMB0GA1UdDgQWBBQ1XMgPIdCi9WlEXJ6w3A91dCR6/TAfBgNVHSME
++GDAWgBSoHQaNrT8lUQDwO+k1xmV0ElEgGTAdBgNVHSUEFjAUBggrBgEFBQcDAQYI
++KwYBBQUHAwIwDwYDVR0RBAgwBocEfwAAATANBgkqhkiG9w0BAQMFAAOBgQCl9q6D
++oURa3cSRotaI2MbR5W3IcXpDPuLOQqR9lBZdCt8z4+rJIuNSnfdyPiTVeDhnny1G
++y3PFH+tLAlwlQeDFBwNMTFWH2zLQLj6q1KZpdRJ1LraYJA4YxBxgqsUZwRytuvTI
++wFUrYX2k9MZzDWF+BELiaY2cnYMi5MzMP7UqbQ==
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md4_intermediate.pem b/net/data/ssl/certificates/weak_digest_md4_intermediate.pem
+new file mode 100644
+index 0000000000000..2ba01dd82cff3
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md4_intermediate.pem
+@@ -0,0 +1,57 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 3 (0x3)
++        Signature Algorithm: md4WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Root CA
++        Validity
++            Not Before: Oct 26 03:46:49 2011 GMT
++            Not After : Oct 23 03:46:49 2021 GMT
++        Subject: CN=Test Deprecated Digest Intermediate CA
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:ac:9b:c0:4b:fc:59:45:7a:d6:3f:a3:89:23:30:
++                    5b:70:ad:ab:78:62:4b:53:85:9f:f9:7d:7f:c1:26:
++                    08:23:80:61:0c:ba:6d:36:06:14:df:29:d4:9c:63:
++                    94:04:ee:14:b6:b9:81:06:2f:33:d8:35:9a:1a:89:
++                    17:ad:21:61:fa:24:75:b9:0c:ef:c1:15:6a:02:bd:
++                    b2:a5:29:df:d8:5f:80:7c:4e:c9:c1:b4:bb:fd:78:
++                    44:63:34:b5:a5:51:aa:e9:23:77:44:53:f9:fa:58:
++                    f6:46:6e:9d:d2:cd:00:a3:28:fe:51:e4:30:7e:49:
++                    62:d4:53:b0:d8:9c:34:47:07
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:TRUE
++            X509v3 Subject Key Identifier: 
++                A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++            X509v3 Authority Key Identifier: 
++                keyid:79:82:C5:B4:EB:60:12:4B:B5:87:79:1B:E2:3A:9C:17:76:81:CB:43
++
++            X509v3 Key Usage: critical
++                Certificate Sign, CRL Sign
++    Signature Algorithm: md4WithRSAEncryption
++        7e:ca:14:3d:14:04:f4:a4:1a:cf:b5:c6:c7:c2:d3:e7:68:08:
++        55:1f:fa:93:28:fa:34:aa:97:29:f7:31:6f:30:a4:25:bd:c5:
++        fe:28:3d:a9:92:b0:4f:ca:24:3f:7b:1a:16:2e:0d:08:73:8e:
++        ca:9f:50:da:e9:64:4f:bd:31:c4:72:89:98:8d:55:55:57:96:
++        6a:e0:5e:00:12:07:8b:3a:30:06:9a:47:a5:94:39:74:a0:f7:
++        e1:00:48:2a:90:08:84:80:e3:6b:83:91:c6:74:d8:d9:c2:72:
++        c7:b9:6e:33:7f:38:46:c1:26:14:5c:1b:85:a3:aa:bb:72:a0:
++        84:b2
++-----BEGIN CERTIFICATE-----
++MIICMzCCAZygAwIBAgIBAzANBgkqhkiG9w0BAQMFADApMScwJQYDVQQDDB5UZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IFJvb3QgQ0EwHhcNMTExMDI2MDM0NjQ5WhcNMjEx
++MDIzMDM0NjQ5WjAxMS8wLQYDVQQDDCZUZXN0IERlcHJlY2F0ZWQgRGlnZXN0IElu
++dGVybWVkaWF0ZSBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEArJvAS/xZ
++RXrWP6OJIzBbcK2reGJLU4Wf+X1/wSYII4BhDLptNgYU3ynUnGOUBO4UtrmBBi8z
++2DWaGokXrSFh+iR1uQzvwRVqAr2ypSnf2F+AfE7JwbS7/XhEYzS1pVGq6SN3RFP5
+++lj2Rm6d0s0Aoyj+UeQwfkli1FOw2Jw0RwcCAwEAAaNjMGEwDwYDVR0TAQH/BAUw
++AwEB/zAdBgNVHQ4EFgQUqB0Gja0/JVEA8DvpNcZldBJRIBkwHwYDVR0jBBgwFoAU
++eYLFtOtgEku1h3kb4jqcF3aBy0MwDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEB
++AwUAA4GBAH7KFD0UBPSkGs+1xsfC0+doCFUf+pMo+jSqlyn3MW8wpCW9xf4oPamS
++sE/KJD97GhYuDQhzjsqfUNrpZE+9McRyiZiNVVVXlmrgXgASB4s6MAaaR6WUOXSg
++9+EASCqQCISA42uDkcZ02NnCcse5bjN/OEbBJhRcG4WjqrtyoISy
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md4_root.pem b/net/data/ssl/certificates/weak_digest_md4_root.pem
+new file mode 100644
+index 0000000000000..4d5fc291aa0d7
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md4_root.pem
+@@ -0,0 +1,14 @@
++-----BEGIN CERTIFICATE-----
++MIICEjCCAXugAwIBAgIJAPqB3U0Vl/N1MA0GCSqGSIb3DQEBAwUAMCkxJzAlBgNV
++BAMMHlRlc3QgRGVwcmVjYXRlZCBEaWdlc3QgUm9vdCBDQTAeFw0xMTEwMjYwMzQ2
++NDlaFw0yMTEwMjMwMzQ2NDlaMCkxJzAlBgNVBAMMHlRlc3QgRGVwcmVjYXRlZCBE
++aWdlc3QgUm9vdCBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAwFtzW+hj
++BwMylx+rrgeKjltrzYabuJDdTDTYr1lViwO39m6CtHYdcFvZ1nU9oDjW4Lb1NQYv
++HoR8+SD0X1R2Y0yF6AyS9NX5E9TQ8TJUSQEehfznbBovMkRaQQMRD6ksRIQr+s00
++P6n0lAYJyN32lmTCbJ+k1aGHPFtKhTNQF/cCAwEAAaNCMEAwDwYDVR0TAQH/BAUw
++AwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFHmCxbTrYBJLtYd5G+I6nBd2
++gctDMA0GCSqGSIb3DQEBAwUAA4GBAEvEn5YHixuMeYW3TpCVpyvNocToAlHiy5xt
++iXVN9V31w8X7I7vcUAgqWQYtB0qngQ28akmiY+yyfYkWB3H8B0DCr0STFCbMq0c6
++Ydt5pV3lBQpHUKZFvv5moVVWPXr0f0smZI26KGalHgxdrFJnnP4bp6VhYt8G3KFA
++h+nxg1RW
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md5_ee.pem b/net/data/ssl/certificates/weak_digest_md5_ee.pem
+new file mode 100644
+index 0000000000000..c5a1eb4c5af8b
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md5_ee.pem
+@@ -0,0 +1,61 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 2 (0x2)
++        Signature Algorithm: md5WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Intermediate CA
++        Validity
++            Not Before: Oct 26 03:46:48 2011 GMT
++            Not After : Oct 23 03:46:48 2021 GMT
++        Subject: C=US, ST=California, L=Mountain View, O=Test CA, CN=127.0.0.1
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:c7:48:eb:5c:00:17:94:01:09:d3:bd:47:41:38:
++                    74:b8:4f:cb:ea:f1:15:eb:cb:e7:b5:6c:bd:fe:d9:
++                    97:6d:1e:1b:ee:75:9e:c1:6f:4a:5c:8c:d7:19:cf:
++                    51:89:48:e8:7d:79:41:ab:e3:a7:77:d1:de:f2:13:
++                    be:36:e7:44:c2:10:dd:56:83:03:f1:cd:e1:13:8d:
++                    fe:45:d6:1a:98:d8:8d:08:b9:32:10:36:0d:ec:ee:
++                    2d:66:22:eb:6a:0d:0e:f4:15:91:dd:9d:3e:92:db:
++                    9e:26:c8:af:4b:b7:fb:93:f8:68:07:c3:53:02:57:
++                    dc:d0:de:df:29:72:45:6f:e3
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:FALSE
++            X509v3 Subject Key Identifier: 
++                35:5C:C8:0F:21:D0:A2:F5:69:44:5C:9E:B0:DC:0F:75:74:24:7A:FD
++            X509v3 Authority Key Identifier: 
++                keyid:A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++
++            X509v3 Extended Key Usage: 
++                TLS Web Server Authentication, TLS Web Client Authentication
++            X509v3 Subject Alternative Name: 
++                IP Address:127.0.0.1
++    Signature Algorithm: md5WithRSAEncryption
++        5c:36:ba:dd:8c:ae:4c:2d:00:32:d9:ed:4d:1d:4b:07:52:28:
++        9c:16:18:3f:38:02:9d:d7:8e:16:e6:4b:2d:8c:84:cc:b1:90:
++        6c:b4:42:55:56:7c:e6:ec:15:2b:90:0b:7e:89:08:15:5a:11:
++        0e:5d:1b:a3:cc:81:79:1e:ea:96:82:75:d8:14:96:0f:17:a5:
++        cd:50:fd:50:f0:5b:7f:03:54:b3:e3:b5:66:03:c8:00:1d:61:
++        36:f3:78:2d:07:82:61:0a:fd:d9:7c:8a:fe:cb:e1:09:df:fb:
++        b6:2f:09:7b:0b:62:d8:27:18:4e:6e:fe:92:1b:1a:2b:7d:56:
++        e0:87
++-----BEGIN CERTIFICATE-----
++MIICiDCCAfGgAwIBAgIBAjANBgkqhkiG9w0BAQQFADAxMS8wLQYDVQQDDCZUZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IEludGVybWVkaWF0ZSBDQTAeFw0xMTEwMjYwMzQ2
++NDhaFw0yMTEwMjMwMzQ2NDhaMGAxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxp
++Zm9ybmlhMRYwFAYDVQQHDA1Nb3VudGFpbiBWaWV3MRAwDgYDVQQKDAdUZXN0IENB
++MRIwEAYDVQQDDAkxMjcuMC4wLjEwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGB
++AMdI61wAF5QBCdO9R0E4dLhPy+rxFevL57Vsvf7Zl20eG+51nsFvSlyM1xnPUYlI
++6H15Qavjp3fR3vITvjbnRMIQ3VaDA/HN4RON/kXWGpjYjQi5MhA2DezuLWYi62oN
++DvQVkd2dPpLbnibIr0u3+5P4aAfDUwJX3NDe3ylyRW/jAgMBAAGjgYAwfjAMBgNV
++HRMBAf8EAjAAMB0GA1UdDgQWBBQ1XMgPIdCi9WlEXJ6w3A91dCR6/TAfBgNVHSME
++GDAWgBSoHQaNrT8lUQDwO+k1xmV0ElEgGTAdBgNVHSUEFjAUBggrBgEFBQcDAQYI
++KwYBBQUHAwIwDwYDVR0RBAgwBocEfwAAATANBgkqhkiG9w0BAQQFAAOBgQBcNrrd
++jK5MLQAy2e1NHUsHUiicFhg/OAKd144W5kstjITMsZBstEJVVnzm7BUrkAt+iQgV
++WhEOXRujzIF5HuqWgnXYFJYPF6XNUP1Q8Ft/A1Sz47VmA8gAHWE283gtB4JhCv3Z
++fIr+y+EJ3/u2Lwl7C2LYJxhObv6SGxorfVbghw==
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md5_intermediate.pem b/net/data/ssl/certificates/weak_digest_md5_intermediate.pem
+new file mode 100644
+index 0000000000000..6192ffe97a48c
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md5_intermediate.pem
+@@ -0,0 +1,57 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 2 (0x2)
++        Signature Algorithm: md5WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Root CA
++        Validity
++            Not Before: Oct 26 03:46:48 2011 GMT
++            Not After : Oct 23 03:46:48 2021 GMT
++        Subject: CN=Test Deprecated Digest Intermediate CA
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:ac:9b:c0:4b:fc:59:45:7a:d6:3f:a3:89:23:30:
++                    5b:70:ad:ab:78:62:4b:53:85:9f:f9:7d:7f:c1:26:
++                    08:23:80:61:0c:ba:6d:36:06:14:df:29:d4:9c:63:
++                    94:04:ee:14:b6:b9:81:06:2f:33:d8:35:9a:1a:89:
++                    17:ad:21:61:fa:24:75:b9:0c:ef:c1:15:6a:02:bd:
++                    b2:a5:29:df:d8:5f:80:7c:4e:c9:c1:b4:bb:fd:78:
++                    44:63:34:b5:a5:51:aa:e9:23:77:44:53:f9:fa:58:
++                    f6:46:6e:9d:d2:cd:00:a3:28:fe:51:e4:30:7e:49:
++                    62:d4:53:b0:d8:9c:34:47:07
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:TRUE
++            X509v3 Subject Key Identifier: 
++                A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++            X509v3 Authority Key Identifier: 
++                keyid:79:82:C5:B4:EB:60:12:4B:B5:87:79:1B:E2:3A:9C:17:76:81:CB:43
++
++            X509v3 Key Usage: critical
++                Certificate Sign, CRL Sign
++    Signature Algorithm: md5WithRSAEncryption
++        a3:9d:4e:8b:42:7b:c2:3a:71:5c:7a:a9:ec:9b:da:04:a4:7d:
++        f2:53:ba:b5:97:97:21:ae:94:03:23:7e:75:0e:c7:cc:1f:57:
++        f2:76:ec:aa:bf:4f:2f:d1:2d:d2:3d:10:55:ce:a0:1c:93:b6:
++        8a:b6:65:9b:67:7a:a6:2f:04:62:e9:31:69:f4:26:08:a3:41:
++        d0:11:3a:21:31:b6:32:5e:a0:4c:32:2d:ca:f8:a0:76:be:f2:
++        a1:bf:15:98:73:26:41:2d:d5:8e:63:e7:5e:ef:61:08:f0:9d:
++        fb:af:55:1e:37:9c:2a:13:f7:7e:ab:5c:f4:d5:f8:7c:a7:fb:
++        c0:42
++-----BEGIN CERTIFICATE-----
++MIICMzCCAZygAwIBAgIBAjANBgkqhkiG9w0BAQQFADApMScwJQYDVQQDDB5UZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IFJvb3QgQ0EwHhcNMTExMDI2MDM0NjQ4WhcNMjEx
++MDIzMDM0NjQ4WjAxMS8wLQYDVQQDDCZUZXN0IERlcHJlY2F0ZWQgRGlnZXN0IElu
++dGVybWVkaWF0ZSBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEArJvAS/xZ
++RXrWP6OJIzBbcK2reGJLU4Wf+X1/wSYII4BhDLptNgYU3ynUnGOUBO4UtrmBBi8z
++2DWaGokXrSFh+iR1uQzvwRVqAr2ypSnf2F+AfE7JwbS7/XhEYzS1pVGq6SN3RFP5
+++lj2Rm6d0s0Aoyj+UeQwfkli1FOw2Jw0RwcCAwEAAaNjMGEwDwYDVR0TAQH/BAUw
++AwEB/zAdBgNVHQ4EFgQUqB0Gja0/JVEA8DvpNcZldBJRIBkwHwYDVR0jBBgwFoAU
++eYLFtOtgEku1h3kb4jqcF3aBy0MwDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEB
++BAUAA4GBAKOdTotCe8I6cVx6qeyb2gSkffJTurWXlyGulAMjfnUOx8wfV/J27Kq/
++Ty/RLdI9EFXOoByTtoq2ZZtneqYvBGLpMWn0JgijQdAROiExtjJeoEwyLcr4oHa+
++8qG/FZhzJkEt1Y5j517vYQjwnfuvVR43nCoT936rXPTV+Hyn+8BC
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_md5_root.pem b/net/data/ssl/certificates/weak_digest_md5_root.pem
+new file mode 100644
+index 0000000000000..cea1d70046610
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_md5_root.pem
+@@ -0,0 +1,14 @@
++-----BEGIN CERTIFICATE-----
++MIICEjCCAXugAwIBAgIJANhsW8HvYIVtMA0GCSqGSIb3DQEBBAUAMCkxJzAlBgNV
++BAMMHlRlc3QgRGVwcmVjYXRlZCBEaWdlc3QgUm9vdCBDQTAeFw0xMTEwMjYwMzQ2
++NDhaFw0yMTEwMjMwMzQ2NDhaMCkxJzAlBgNVBAMMHlRlc3QgRGVwcmVjYXRlZCBE
++aWdlc3QgUm9vdCBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAwFtzW+hj
++BwMylx+rrgeKjltrzYabuJDdTDTYr1lViwO39m6CtHYdcFvZ1nU9oDjW4Lb1NQYv
++HoR8+SD0X1R2Y0yF6AyS9NX5E9TQ8TJUSQEehfznbBovMkRaQQMRD6ksRIQr+s00
++P6n0lAYJyN32lmTCbJ+k1aGHPFtKhTNQF/cCAwEAAaNCMEAwDwYDVR0TAQH/BAUw
++AwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFHmCxbTrYBJLtYd5G+I6nBd2
++gctDMA0GCSqGSIb3DQEBBAUAA4GBAC1qyqlaaPzmY78GXsw1MY2VbSNmGyRxWw3W
++dJVSkdKv8jeeZnVT6JaiHzmM0zQ9E8x0szILJlJ3r9CNKiuXgpCvbaWqiWwytFny
++8Mea/xS8FwIfPoxiOt/MdjvnfUWi1ukZaOy88rg5V7/mVdObTzu4VouD4qxhpdTa
++QRn7eFqR
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_sha1_ee.pem b/net/data/ssl/certificates/weak_digest_sha1_ee.pem
+new file mode 100644
+index 0000000000000..5368e62c9c104
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_sha1_ee.pem
+@@ -0,0 +1,61 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 1 (0x1)
++        Signature Algorithm: sha1WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Intermediate CA
++        Validity
++            Not Before: Oct 26 03:46:48 2011 GMT
++            Not After : Oct 23 03:46:48 2021 GMT
++        Subject: C=US, ST=California, L=Mountain View, O=Test CA, CN=127.0.0.1
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:c7:48:eb:5c:00:17:94:01:09:d3:bd:47:41:38:
++                    74:b8:4f:cb:ea:f1:15:eb:cb:e7:b5:6c:bd:fe:d9:
++                    97:6d:1e:1b:ee:75:9e:c1:6f:4a:5c:8c:d7:19:cf:
++                    51:89:48:e8:7d:79:41:ab:e3:a7:77:d1:de:f2:13:
++                    be:36:e7:44:c2:10:dd:56:83:03:f1:cd:e1:13:8d:
++                    fe:45:d6:1a:98:d8:8d:08:b9:32:10:36:0d:ec:ee:
++                    2d:66:22:eb:6a:0d:0e:f4:15:91:dd:9d:3e:92:db:
++                    9e:26:c8:af:4b:b7:fb:93:f8:68:07:c3:53:02:57:
++                    dc:d0:de:df:29:72:45:6f:e3
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:FALSE
++            X509v3 Subject Key Identifier: 
++                35:5C:C8:0F:21:D0:A2:F5:69:44:5C:9E:B0:DC:0F:75:74:24:7A:FD
++            X509v3 Authority Key Identifier: 
++                keyid:A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++
++            X509v3 Extended Key Usage: 
++                TLS Web Server Authentication, TLS Web Client Authentication
++            X509v3 Subject Alternative Name: 
++                IP Address:127.0.0.1
++    Signature Algorithm: sha1WithRSAEncryption
++        ab:a4:58:6a:d8:f4:87:00:11:45:23:ea:75:a9:0d:cd:87:73:
++        0e:73:f2:97:d3:74:b0:cd:90:c9:45:83:03:c3:82:ee:2f:79:
++        51:31:12:1c:39:a0:e2:45:f2:c2:4e:70:8c:e4:f3:af:15:4c:
++        be:5d:e7:c3:96:79:c8:a4:98:6d:37:8d:3f:9f:9e:89:32:ca:
++        a6:a7:e2:c8:f3:84:64:08:34:57:bd:10:22:96:78:39:b4:33:
++        dc:f2:db:83:ec:0c:20:58:ce:ba:98:44:dc:ca:a2:10:6c:5a:
++        d5:57:85:b9:3c:f0:48:99:98:e1:80:88:08:4c:cc:83:0d:40:
++        ff:8d
++-----BEGIN CERTIFICATE-----
++MIICiDCCAfGgAwIBAgIBATANBgkqhkiG9w0BAQUFADAxMS8wLQYDVQQDDCZUZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IEludGVybWVkaWF0ZSBDQTAeFw0xMTEwMjYwMzQ2
++NDhaFw0yMTEwMjMwMzQ2NDhaMGAxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxp
++Zm9ybmlhMRYwFAYDVQQHDA1Nb3VudGFpbiBWaWV3MRAwDgYDVQQKDAdUZXN0IENB
++MRIwEAYDVQQDDAkxMjcuMC4wLjEwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGB
++AMdI61wAF5QBCdO9R0E4dLhPy+rxFevL57Vsvf7Zl20eG+51nsFvSlyM1xnPUYlI
++6H15Qavjp3fR3vITvjbnRMIQ3VaDA/HN4RON/kXWGpjYjQi5MhA2DezuLWYi62oN
++DvQVkd2dPpLbnibIr0u3+5P4aAfDUwJX3NDe3ylyRW/jAgMBAAGjgYAwfjAMBgNV
++HRMBAf8EAjAAMB0GA1UdDgQWBBQ1XMgPIdCi9WlEXJ6w3A91dCR6/TAfBgNVHSME
++GDAWgBSoHQaNrT8lUQDwO+k1xmV0ElEgGTAdBgNVHSUEFjAUBggrBgEFBQcDAQYI
++KwYBBQUHAwIwDwYDVR0RBAgwBocEfwAAATANBgkqhkiG9w0BAQUFAAOBgQCrpFhq
++2PSHABFFI+p1qQ3Nh3MOc/KX03SwzZDJRYMDw4LuL3lRMRIcOaDiRfLCTnCM5POv
++FUy+XefDlnnIpJhtN40/n56JMsqmp+LI84RkCDRXvRAilng5tDPc8tuD7AwgWM66
++mETcyqIQbFrVV4W5PPBImZjhgIgITMyDDUD/jQ==
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_sha1_intermediate.pem b/net/data/ssl/certificates/weak_digest_sha1_intermediate.pem
+new file mode 100644
+index 0000000000000..478d116d4ce46
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_sha1_intermediate.pem
+@@ -0,0 +1,57 @@
++Certificate:
++    Data:
++        Version: 3 (0x2)
++        Serial Number: 1 (0x1)
++        Signature Algorithm: sha1WithRSAEncryption
++        Issuer: CN=Test Deprecated Digest Root CA
++        Validity
++            Not Before: Oct 26 03:46:48 2011 GMT
++            Not After : Oct 23 03:46:48 2021 GMT
++        Subject: CN=Test Deprecated Digest Intermediate CA
++        Subject Public Key Info:
++            Public Key Algorithm: rsaEncryption
++            RSA Public Key: (1024 bit)
++                Modulus (1024 bit):
++                    00:ac:9b:c0:4b:fc:59:45:7a:d6:3f:a3:89:23:30:
++                    5b:70:ad:ab:78:62:4b:53:85:9f:f9:7d:7f:c1:26:
++                    08:23:80:61:0c:ba:6d:36:06:14:df:29:d4:9c:63:
++                    94:04:ee:14:b6:b9:81:06:2f:33:d8:35:9a:1a:89:
++                    17:ad:21:61:fa:24:75:b9:0c:ef:c1:15:6a:02:bd:
++                    b2:a5:29:df:d8:5f:80:7c:4e:c9:c1:b4:bb:fd:78:
++                    44:63:34:b5:a5:51:aa:e9:23:77:44:53:f9:fa:58:
++                    f6:46:6e:9d:d2:cd:00:a3:28:fe:51:e4:30:7e:49:
++                    62:d4:53:b0:d8:9c:34:47:07
++                Exponent: 65537 (0x10001)
++        X509v3 extensions:
++            X509v3 Basic Constraints: critical
++                CA:TRUE
++            X509v3 Subject Key Identifier: 
++                A8:1D:06:8D:AD:3F:25:51:00:F0:3B:E9:35:C6:65:74:12:51:20:19
++            X509v3 Authority Key Identifier: 
++                keyid:79:82:C5:B4:EB:60:12:4B:B5:87:79:1B:E2:3A:9C:17:76:81:CB:43
++
++            X509v3 Key Usage: critical
++                Certificate Sign, CRL Sign
++    Signature Algorithm: sha1WithRSAEncryption
++        4e:30:a8:25:da:ac:90:a9:5e:6c:23:7f:76:1e:2d:64:79:78:
++        61:84:dc:06:12:43:72:a6:18:f1:f2:23:fa:e9:1f:de:3a:52:
++        1c:ce:cd:f7:7e:3c:92:ce:7f:f3:1f:f5:bc:18:17:95:cb:57:
++        34:f1:88:b1:c8:1f:51:e1:d3:3d:dd:17:c6:d4:af:f1:42:ec:
++        85:d7:bf:16:22:e0:88:82:92:cc:94:89:e5:eb:9d:cc:fe:31:
++        50:6f:ea:d8:70:f9:ef:6b:ca:3e:af:bd:61:42:33:ce:23:bf:
++        50:5f:55:14:64:2b:f7:fd:a6:29:41:a8:65:c3:fa:c4:f0:c7:
++        71:a5
++-----BEGIN CERTIFICATE-----
++MIICMzCCAZygAwIBAgIBATANBgkqhkiG9w0BAQUFADApMScwJQYDVQQDDB5UZXN0
++IERlcHJlY2F0ZWQgRGlnZXN0IFJvb3QgQ0EwHhcNMTExMDI2MDM0NjQ4WhcNMjEx
++MDIzMDM0NjQ4WjAxMS8wLQYDVQQDDCZUZXN0IERlcHJlY2F0ZWQgRGlnZXN0IElu
++dGVybWVkaWF0ZSBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEArJvAS/xZ
++RXrWP6OJIzBbcK2reGJLU4Wf+X1/wSYII4BhDLptNgYU3ynUnGOUBO4UtrmBBi8z
++2DWaGokXrSFh+iR1uQzvwRVqAr2ypSnf2F+AfE7JwbS7/XhEYzS1pVGq6SN3RFP5
+++lj2Rm6d0s0Aoyj+UeQwfkli1FOw2Jw0RwcCAwEAAaNjMGEwDwYDVR0TAQH/BAUw
++AwEB/zAdBgNVHQ4EFgQUqB0Gja0/JVEA8DvpNcZldBJRIBkwHwYDVR0jBBgwFoAU
++eYLFtOtgEku1h3kb4jqcF3aBy0MwDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEB
++BQUAA4GBAE4wqCXarJCpXmwjf3YeLWR5eGGE3AYSQ3KmGPHyI/rpH946UhzOzfd+
++PJLOf/Mf9bwYF5XLVzTxiLHIH1Hh0z3dF8bUr/FC7IXXvxYi4IiCksyUieXrncz+
++MVBv6thw+e9ryj6vvWFCM84jv1BfVRRkK/f9pilBqGXD+sTwx3Gl
++-----END CERTIFICATE-----
+diff --git a/net/data/ssl/certificates/weak_digest_sha1_root.pem b/net/data/ssl/certificates/weak_digest_sha1_root.pem
+new file mode 100644
+index 0000000000000..a10f00911fae8
+--- /dev/null
++++ b/net/data/ssl/certificates/weak_digest_sha1_root.pem
+@@ -0,0 +1,14 @@
++-----BEGIN CERTIFICATE-----
++MIICEjCCAXugAwIBAgIJAOojr7l1i8pcMA0GCSqGSIb3DQEBBQUAMCkxJzAlBgNV
++BAMMHlRlc3QgRGVwcmVjYXRlZCBEaWdlc3QgUm9vdCBDQTAeFw0xMTEwMjYwMzQ2
++NDhaFw0yMTEwMjMwMzQ2NDhaMCkxJzAlBgNVBAMMHlRlc3QgRGVwcmVjYXRlZCBE
++aWdlc3QgUm9vdCBDQTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAwFtzW+hj
++BwMylx+rrgeKjltrzYabuJDdTDTYr1lViwO39m6CtHYdcFvZ1nU9oDjW4Lb1NQYv
++HoR8+SD0X1R2Y0yF6AyS9NX5E9TQ8TJUSQEehfznbBovMkRaQQMRD6ksRIQr+s00
++P6n0lAYJyN32lmTCbJ+k1aGHPFtKhTNQF/cCAwEAAaNCMEAwDwYDVR0TAQH/BAUw
++AwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFHmCxbTrYBJLtYd5G+I6nBd2
++gctDMA0GCSqGSIb3DQEBBQUAA4GBAFfvM72mFeBd4HfP/U0HTmeQsPTorL01BRGe
++kIbHSBfliYF5fTXbHHjXqvnmNvCwfjO1+HyCxg3opwmDS5DiwkT2XtqYeF80h8/X
++J+hsdo+wJJiD0G8V3wOkBjlS5N3WaH3vhPikLkvmr2UzeeO3ORaaDUlRpzzOS2Pn
++28TAE0Wq
++-----END CERTIFICATE-----
+diff --git a/net/data/test_support_bundle_data.filelist b/net/data/test_support_bundle_data.filelist
+index c172c2cc327d5..5f39a92b5b028 100644
+--- a/net/data/test_support_bundle_data.filelist
++++ b/net/data/test_support_bundle_data.filelist
+@@ -180,6 +180,18 @@ data/ssl/certificates/unittest.key.bin
+ data/ssl/certificates/unittest.selfsigned.der
+ data/ssl/certificates/verisign_intermediate_ca_2011.pem
+ data/ssl/certificates/verisign_intermediate_ca_2016.pem
++data/ssl/certificates/weak_digest_md2_ee.pem
++data/ssl/certificates/weak_digest_md2_intermediate.pem
++data/ssl/certificates/weak_digest_md2_root.pem
++data/ssl/certificates/weak_digest_md4_ee.pem
++data/ssl/certificates/weak_digest_md4_intermediate.pem
++data/ssl/certificates/weak_digest_md4_root.pem
++data/ssl/certificates/weak_digest_md5_ee.pem
++data/ssl/certificates/weak_digest_md5_intermediate.pem
++data/ssl/certificates/weak_digest_md5_root.pem
++data/ssl/certificates/weak_digest_sha1_ee.pem
++data/ssl/certificates/weak_digest_sha1_intermediate.pem
++data/ssl/certificates/weak_digest_sha1_root.pem
+ data/ssl/certificates/websocket_cacert.pem
+ data/ssl/certificates/websocket_client_cert.p12
+ data/ssl/certificates/wildcard.pem
+diff --git a/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc b/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc
+index ebd0cd1dddc56..c7e109bd52d0d 100644
+--- a/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc
++++ b/net/tools/cert_verify_tool/verify_using_cert_verify_proc.cc
+@@ -61,6 +61,8 @@ void PrintCertStatus(int cert_status) {
+ 
+ void PrintCertVerifyResult(const net::CertVerifyResult& result) {
+   PrintCertStatus(result.cert_status);
++  if (result.has_sha1)
++    std::cout << "has_sha1\n";
+   if (result.is_issued_by_known_root)
+     std::cout << "is_issued_by_known_root\n";
+ 
+diff --git a/services/network/public/cpp/net_ipc_param_traits.cc b/services/network/public/cpp/net_ipc_param_traits.cc
+index 13e4d9ea6f759..15dfb09fe53e5 100644
+--- a/services/network/public/cpp/net_ipc_param_traits.cc
++++ b/services/network/public/cpp/net_ipc_param_traits.cc
+@@ -42,6 +42,7 @@ void ParamTraits<net::CertVerifyResult>::Write(base::Pickle* m,
+                                                const param_type& p) {
+   WriteParam(m, p.verified_cert);
+   WriteParam(m, p.cert_status);
++  WriteParam(m, p.has_sha1);
+   WriteParam(m, p.public_key_hashes);
+   WriteParam(m, p.is_issued_by_known_root);
+   WriteParam(m, p.ocsp_result);
+@@ -55,6 +56,7 @@ bool ParamTraits<net::CertVerifyResult>::Read(const base::Pickle* m,
+                                               param_type* r) {
+   return ReadParam(m, iter, &r->verified_cert) &&
+          ReadParam(m, iter, &r->cert_status) &&
++         ReadParam(m, iter, &r->has_sha1) &&
+          ReadParam(m, iter, &r->public_key_hashes) &&
+          ReadParam(m, iter, &r->is_issued_by_known_root) &&
+          ReadParam(m, iter, &r->ocsp_result) && ReadParam(m, iter, &r->scts) &&
