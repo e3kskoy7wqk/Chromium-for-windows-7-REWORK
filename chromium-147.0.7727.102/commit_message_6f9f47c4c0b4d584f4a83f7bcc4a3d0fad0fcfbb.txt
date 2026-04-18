@@ -1,0 +1,1 @@
+win7dep: remove hstring_compare, link with OneCore.lib    2023/2/22 7:26:56    6f9f47c4c0b4d584f4a83f7bcc4a3d0fad0fcfbb

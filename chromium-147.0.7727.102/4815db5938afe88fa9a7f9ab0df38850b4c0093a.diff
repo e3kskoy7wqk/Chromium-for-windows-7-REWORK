@@ -1,0 +1,185 @@
+diff --git a/third_party/skia/include/core/SkFontMgr.h b/third_party/skia/include/core/SkFontMgr.h
+index 866af45949..08e406a97d 100644
+--- a/third_party/skia/include/core/SkFontMgr.h
++++ b/third_party/skia/include/core/SkFontMgr.h
+@@ -8,6 +8,10 @@
+ #ifndef SkFontMgr_DEFINED
+ #define SkFontMgr_DEFINED
+ 
++#define SK_SUPPORT_LEGACY_FONTMGR_API
++
++#include "include/core/SkFontArguments.h"
++#include "include/core/SkFontStyle.h"
+ #include "include/core/SkRefCnt.h"
+ #include "include/core/SkTypes.h"
+ 
+@@ -18,6 +18,7 @@
+ class SkString;
+ class SkTypeface;
+ struct SkFontArguments;
++class SkFontData;
+ 
+ class SK_API SkFontStyleSet : public SkRefCnt {
+ public:
+@@ -104,6 +104,17 @@ public:
+      */
+     sk_sp<SkTypeface> makeFromStream(std::unique_ptr<SkStreamAsset>, int ttcIndex = 0) const;
+ 
++#ifdef SK_SUPPORT_LEGACY_FONTMGR_API
++    using FontParameters = SkFontArguments;
++#endif
++
++    /**
++     *  Create a typeface from the specified font data.
++     *  Will return NULL if the typeface could not be created.
++     *  The caller must call unref() on the returned object if it is not null.
++     */
++    sk_sp<SkTypeface> makeFromFontData(std::unique_ptr<SkFontData>) const;
++
+     /* Experimental, API subject to change. */
+     sk_sp<SkTypeface> makeFromStream(std::unique_ptr<SkStreamAsset>, const SkFontArguments&) const;
+ 
+@@ -124,6 +128,15 @@ public:
+ 
+     sk_sp<SkTypeface> legacyMakeTypeface(const char familyName[], SkFontStyle style) const;
+ 
++#ifdef SK_SUPPORT_LEGACY_FONTMGR_API
++    SkTypeface* createFromData(SkData* data, int ttcIndex = 0) const;
++    SkTypeface* createFromStream(SkStreamAsset* strm, int ttcIndex = 0) const;
++    SkTypeface* createFromStream(SkStreamAsset* strm, const SkFontArguments& args) const;
++    SkTypeface* createFromFontData(std::unique_ptr<SkFontData> fd) const;
++    SkTypeface* createFromFile(const char path[], int ttcIndex = 0) const;
++    SkTypeface* legacyCreateTypeface(const char familyName[], SkFontStyle style) const;
++#endif
++
+ #if !defined(SK_DISABLE_LEGACY_FONTMGR_REFDEFAULT)
+     /** Return the default fontmgr. */
+     static sk_sp<SkFontMgr> RefDefault();
+@@ -143,6 +156,28 @@ protected:
+                                                     const char* bcp47[], int bcp47Count,
+                                                     SkUnichar character) const = 0;
+ 
++#ifdef SK_SUPPORT_LEGACY_FONTMGR_API
++    // legacy virtuals
++    virtual SkTypeface* onCreateFromData(SkData*, int) const { return nullptr; }
++    virtual SkTypeface* onCreateFromStream(SkStreamAsset*, int) const { return nullptr; }
++    virtual SkTypeface* onCreateFromStream(SkStreamAsset*, const SkFontArguments&) const;
++    virtual SkTypeface* onCreateFromFontData(std::unique_ptr<SkFontData>) const;
++    virtual SkTypeface* onCreateFromFile(const char[], int) const { return nullptr; }
++    virtual SkTypeface* onLegacyCreateTypeface(const char[], SkFontStyle) const {
++        return nullptr;
++    }
++
++    // new virtuals express as calling legacy versions
++
++    virtual sk_sp<SkTypeface> onMakeFromData(sk_sp<SkData> data, int ttcIndex) const;
++    virtual sk_sp<SkTypeface> onMakeFromStreamIndex(std::unique_ptr<SkStreamAsset> strm,
++                                                    int ttcIndex) const;
++    virtual sk_sp<SkTypeface> onMakeFromStreamArgs(std::unique_ptr<SkStreamAsset> strm,
++                                               const SkFontArguments& args) const;
++    virtual sk_sp<SkTypeface> onMakeFromFontData(std::unique_ptr<SkFontData> fd) const;
++    virtual sk_sp<SkTypeface> onMakeFromFile(const char path[], int ttcIndex) const;
++    virtual sk_sp<SkTypeface> onLegacyMakeTypeface(const char familyName[], SkFontStyle style) const;
++#else
+     virtual sk_sp<SkTypeface> onMakeFromData(sk_sp<SkData>, int ttcIndex) const = 0;
+     virtual sk_sp<SkTypeface> onMakeFromStreamIndex(std::unique_ptr<SkStreamAsset>,
+                                                     int ttcIndex) const = 0;
+@@ -152,6 +187,8 @@ protected:
+     virtual sk_sp<SkTypeface> onMakeFromFile(const char path[], int ttcIndex) const = 0;
+ 
+     virtual sk_sp<SkTypeface> onLegacyMakeTypeface(const char familyName[], SkFontStyle) const = 0;
++    virtual sk_sp<SkTypeface> onMakeFromFontData(std::unique_ptr<SkFontData>) const;
++#endif
+ 
+ private:
+     /** Implemented by porting layer to return the default factory. */
+diff --git a/third_party/skia/src/core/SkFontMgr.cpp b/third_party/skia/src/core/SkFontMgr.cpp
+index 33eb2301bd..4f18dd25f4 100644
+--- a/third_party/skia/src/core/SkFontMgr.cpp
++++ b/third_party/skia/src/core/SkFontMgr.cpp
+@@ -13,6 +13,7 @@
+ #include "include/core/SkTypeface.h"
+ #include "include/core/SkTypes.h"
+ #include "include/private/base/SkOnce.h"
++#include "src/core/SkFontDescriptor.h"
+ 
+ #include <utility>
+ 
+@@ -70,6 +70,9 @@ protected:
+                                            const SkFontArguments&) const override {
+         return nullptr;
+     }
++    sk_sp<SkTypeface> onMakeFromFontData(std::unique_ptr<SkFontData>) const override {
++        return nullptr;
++    }
+     sk_sp<SkTypeface> onMakeFromFile(const char[], int) const override {
+         return nullptr;
+     }
+@@ -164,6 +164,67 @@ sk_sp<SkTypeface> SkFontMgr::legacyMakeTypeface(const char familyName[], SkFontS
+     return sk_ref_sp(singleton);
+ }
+ 
++sk_sp<SkTypeface> SkFontMgr::makeFromFontData(std::unique_ptr<SkFontData> data) const {
++    if (nullptr == data) {
++        return nullptr;
++    }
++    return this->onMakeFromFontData(std::move(data));
++}
++
++#ifdef SK_SUPPORT_LEGACY_FONTMGR_API
++SkTypeface* SkFontMgr::createFromData(SkData* data, int ttcIndex) const {
++    return this->makeFromData(sk_ref_sp(data), ttcIndex).release();
++}
++SkTypeface* SkFontMgr::createFromStream(SkStreamAsset* strm, int ttcIndex) const {
++    return this->makeFromStream(std::unique_ptr<SkStreamAsset>(strm), ttcIndex).release();
++}
++SkTypeface* SkFontMgr::createFromStream(SkStreamAsset* strm, const SkFontArguments& args) const {
++    return this->makeFromStream(std::unique_ptr<SkStreamAsset>(strm), args).release();
++}
++SkTypeface* SkFontMgr::createFromFontData(std::unique_ptr<SkFontData> fd) const {
++    return this->makeFromFontData(std::move(fd)).release();
++}
++SkTypeface* SkFontMgr::createFromFile(const char path[], int ttcIndex) const {
++    return this->makeFromFile(path, ttcIndex).release();
++}
++SkTypeface* SkFontMgr::legacyCreateTypeface(const char familyName[], SkFontStyle style) const {
++    return this->legacyMakeTypeface(familyName, style).release();
++}
++
++// These implementations are temporary until they can be made pure virtual.
++SkTypeface* SkFontMgr::onCreateFromStream(SkStreamAsset* stream, const SkFontArguments& args) const {
++    return this->makeFromStream(std::unique_ptr<SkStreamAsset>(stream),
++                                args.getCollectionIndex()).release();
++}
++SkTypeface* SkFontMgr::onCreateFromFontData(std::unique_ptr<SkFontData> data) const {
++    return this->makeFromStream(data->detachStream(), data->getIndex()).release();
++}
++
++sk_sp<SkTypeface> SkFontMgr::onMakeFromData(sk_sp<SkData> data, int ttcIndex) const {
++    return sk_sp<SkTypeface>(this->onCreateFromData(data.get(), ttcIndex));
++}
++sk_sp<SkTypeface> SkFontMgr::onMakeFromStreamIndex(std::unique_ptr<SkStreamAsset> strm,
++                                                   int ttcIndex) const {
++    return sk_sp<SkTypeface>(this->onCreateFromStream(strm.release(), ttcIndex));
++}
++sk_sp<SkTypeface> SkFontMgr::onMakeFromStreamArgs(std::unique_ptr<SkStreamAsset> strm,
++                                                 const SkFontArguments& args) const {
++    return sk_sp<SkTypeface>(onCreateFromStream(strm.release(), args));
++}
++sk_sp<SkTypeface> SkFontMgr::onMakeFromFontData(std::unique_ptr<SkFontData> fd) const {
++    return sk_sp<SkTypeface>(this->onCreateFromFontData(std::move(fd)));
++}
++sk_sp<SkTypeface> SkFontMgr::onMakeFromFile(const char path[], int ttcIndex) const {
++    return sk_sp<SkTypeface>(this->onCreateFromFile(path, ttcIndex));
++}
++sk_sp<SkTypeface> SkFontMgr::onLegacyMakeTypeface(const char familyName[], SkFontStyle style) const {
++    return sk_sp<SkTypeface>(this->onLegacyCreateTypeface(familyName, style));
++}
++#else
++sk_sp<SkTypeface> SkFontMgr::onMakeFromFontData(std::unique_ptr<SkFontData> data) const {
++    return this->makeFromStream(data->detachStream(), data->getIndex());
++}
++#endif
+ #if !defined(SK_DISABLE_LEGACY_FONTMGR_REFDEFAULT)
+ // A global function pointer that's not declared, but can be overriden at startup by test tools.
+ sk_sp<SkFontMgr> (*gSkFontMgr_DefaultFactory)() = nullptr;

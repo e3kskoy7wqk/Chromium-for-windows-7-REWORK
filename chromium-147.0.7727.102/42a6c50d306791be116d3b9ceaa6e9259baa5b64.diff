@@ -1,0 +1,53 @@
+diff --git a/content/browser/renderer_host/direct_manipulation_helper_win.cc b/content/browser/renderer_host/direct_manipulation_helper_win.cc
+index b04194c32a4d1..8a50a633084e7 100644
+--- a/content/browser/renderer_host/direct_manipulation_helper_win.cc
++++ b/content/browser/renderer_host/direct_manipulation_helper_win.cc
+@@ -173,9 +173,12 @@ void DirectManipulationHelper::OnPointerHitTest(WPARAM w_param) {
+   // For WM_POINTER, the pointer type will show the event from mouse.
+   // For WM_POINTERACTIVATE, the pointer id will be different with the following
+   // message.
++  using GetPointerTypeFn = BOOL(WINAPI*)(UINT32, POINTER_INPUT_TYPE*);
+   UINT32 pointer_id = GET_POINTERID_WPARAM(w_param);
+   POINTER_INPUT_TYPE pointer_type;
+-  if (::GetPointerType(pointer_id, &pointer_type) &&
++  static const auto get_pointer_type = reinterpret_cast<GetPointerTypeFn>(
++      base::win::GetUser32FunctionPointer("GetPointerType"));
++  if (get_pointer_type && get_pointer_type(pointer_id, &pointer_type) &&
+       pointer_type == PT_TOUCHPAD) {
+     viewport_->SetContact(pointer_id);
+   }
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index d92d33c2a40ba..f25b11da07537 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -2104,8 +2104,12 @@ LRESULT HWNDMessageHandler::OnMouseRange(UINT message,
+ LRESULT HWNDMessageHandler::OnPointerActivate(UINT message,
+                                               WPARAM w_param,
+                                               LPARAM l_param) {
++  using GetPointerTypeFn = BOOL(WINAPI*)(UINT32, POINTER_INPUT_TYPE*);
++  UINT32 pointer_id = GET_POINTERID_WPARAM(w_param);
+   POINTER_INPUT_TYPE pointer_type;
+-  if (::GetPointerType(GET_POINTERID_WPARAM(w_param), &pointer_type) &&
++  static const auto get_pointer_type = reinterpret_cast<GetPointerTypeFn>(
++      base::win::GetUser32FunctionPointer("GetPointerType"));
++  if (get_pointer_type && get_pointer_type(pointer_id, &pointer_type) &&
+       pointer_type == PT_TOUCHPAD) {
+     return PA_NOACTIVATE;
+   }
+@@ -2116,11 +2120,15 @@ LRESULT HWNDMessageHandler::OnPointerActivate(UINT message,
+ LRESULT HWNDMessageHandler::OnPointerEvent(UINT message,
+                                            WPARAM w_param,
+                                            LPARAM l_param) {
++  UINT32 pointer_id = GET_POINTERID_WPARAM(w_param);
++  using GetPointerTypeFn = BOOL(WINAPI*)(UINT32, POINTER_INPUT_TYPE*);
+   POINTER_INPUT_TYPE pointer_type;
++  static const auto get_pointer_type = reinterpret_cast<GetPointerTypeFn>(
++      base::win::GetUser32FunctionPointer("GetPointerType"));
+   // If the WM_POINTER messages are not sent from a stylus device, then we do
+   // not handle them to make sure we do not change the current behavior of
+   // touch and mouse inputs.
+-  if (!::GetPointerType(GET_POINTERID_WPARAM(w_param), &pointer_type)) {
++  if (!get_pointer_type || !get_pointer_type(pointer_id, &pointer_type)) {
+     SetMsgHandled(FALSE);
+     return -1;
+   }

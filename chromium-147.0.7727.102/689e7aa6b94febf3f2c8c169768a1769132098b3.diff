@@ -1,0 +1,210 @@
+diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
+index f153a59f724d9..67b4cb6eaad40 100644
+--- a/chrome/browser/about_flags.cc
++++ b/chrome/browser/about_flags.cc
+@@ -5568,6 +5568,12 @@ const FeatureEntry kFeatureEntries[] = {
+ #endif  // BUILDFLAG(USE_LINUX_VIDEO_ACCELERATION)
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
++#if BUILDFLAG(IS_WIN)
++    {"d3d11-video-decoder", flag_descriptions::kD3D11VideoDecoderName,
++     flag_descriptions::kD3D11VideoDecoderDescription, kOsWin,
++     FEATURE_VALUE_TYPE(media::kD3D11VideoDecoder)},
++#endif
++
+ #if BUILDFLAG(IS_ANDROID)
+     {"force-startup-signin-promo",
+      flag_descriptions::kForceStartupSigninPromoName,
+diff --git a/chrome/browser/flag-metadata.json b/chrome/browser/flag-metadata.json
+index 60a5a9ecda013..27dcb5d5f1b08 100644
+--- a/chrome/browser/flag-metadata.json
++++ b/chrome/browser/flag-metadata.json
+@@ -980,6 +980,11 @@
+     "owners": [ "thestig@chromium.org", "//printing/OWNERS" ],
+     "expiry_milestone": 150
+   },
++  {
++    "name": "d3d11-video-decoder",
++    "owners": [ "liberato", "tmathmeyer", "//media/OWNERS" ],
++    "expiry_milestone": -1
++  },
+   {
+     "name": "customize-chrome-side-panel-extensions-card",
+     "owners": [ "chrome-desktop-ntp@google.com" ],
+diff --git a/chrome/browser/flag_descriptions.h b/chrome/browser/flag_descriptions.h
+index 51b0b49fd073f..d8936244cc228 100644
+--- a/chrome/browser/flag_descriptions.h
++++ b/chrome/browser/flag_descriptions.h
+@@ -2199,6 +2199,10 @@ extern const char kSCTAuditingDescription[];
+     "Enable/Disable Arabic-Indic digit input while holding right alt or "
+     "ctrl+alt on Arabic 101 keyboard layout.";
+ 
++inline constexpr char kD3D11VideoDecoderName[] = "D3D11 Video Decoder";
++inline constexpr char kD3D11VideoDecoderDescription[] =
++    "Enables D3D11VideoDecoder for hardware accelerated video decoding.";
++
+ inline constexpr char kEnableMediaFoundationVideoCaptureName[] =
+     "MediaFoundation Video Capture";
+ inline constexpr char kEnableMediaFoundationVideoCaptureDescription[] =
+diff --git a/media/base/media_switches.cc b/media/base/media_switches.cc
+index 3b20f9ef4f66a..f83c6134d086d 100644
+--- a/media/base/media_switches.cc
++++ b/media/base/media_switches.cc
+@@ -378,6 +378,23 @@ const base::Feature kMultiPlaneVideoCaptureSharedImages {
+ // Has no effect if ENABLE_CDM_HOST_VERIFICATION buildflag is false.
+ BASE_FEATURE(kCdmHostVerification, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
++// Enable saving playback information in a crash trace, to see if some codecs
++// are crashier than others.
++BASE_FEATURE(kD3D11PrintCodecOnCrash, base::FEATURE_DISABLED_BY_DEFAULT);
++
++// Enable The D3D11 Video decoder.
++BASE_FEATURE(kD3D11VideoDecoder, base::FEATURE_ENABLED_BY_DEFAULT);
++
++// Tell D3D11VideoDecoder to ignore workarounds for zero copy.  Requires that
++// kD3D11VideoDecoder is enabled.
++BASE_FEATURE(kD3D11VideoDecoderIgnoreWorkarounds, base::FEATURE_DISABLED_BY_DEFAULT);
++
++// Enable D3D11VideoDecoder to decode VP9 profile 2 (10 bit) video.
++BASE_FEATURE(kD3D11VideoDecoderVP9Profile2, base::FEATURE_ENABLED_BY_DEFAULT);
++
++// Enable D3D11VideoDecoder to decode AV1 video.
++BASE_FEATURE(kD3D11VideoDecoderAV1, base::FEATURE_ENABLED_BY_DEFAULT);
++
+ // Enables the "Copy Video Frame" context menu item.
+ BASE_FEATURE(kContextMenuCopyVideoFrame,
+ #if BUILDFLAG(IS_ANDROID)
+diff --git a/media/base/media_switches.h b/media/base/media_switches.h
+index 00d2fd7521c8b..84fce5cef6105 100644
+--- a/media/base/media_switches.h
++++ b/media/base/media_switches.h
+@@ -125,6 +125,11 @@ MEDIA_EXPORT extern const base::Feature kBackgroundVideoPauseOptimization;
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kCastStreamingWinHardwareH264);
+ #endif
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kCdmHostVerification);
++MEDIA_EXPORT BASE_DECLARE_FEATURE(kD3D11PrintCodecOnCrash);
++MEDIA_EXPORT BASE_DECLARE_FEATURE(kD3D11VideoDecoder);
++MEDIA_EXPORT BASE_DECLARE_FEATURE(kD3D11VideoDecoderIgnoreWorkarounds);
++MEDIA_EXPORT BASE_DECLARE_FEATURE(kD3D11VideoDecoderVP9Profile2);
++MEDIA_EXPORT BASE_DECLARE_FEATURE(kD3D11VideoDecoderAV1);
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kContextMenuCopyVideoFrame);
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kContextMenuSaveVideoFrameAs);
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kContextMenuSearchForVideoFrame);
+diff --git a/media/gpu/windows/d3d11_video_decoder.cc b/media/gpu/windows/d3d11_video_decoder.cc
+index 0f83984ebe5fa..9c5b50cada3c9 100644
+--- a/media/gpu/windows/d3d11_video_decoder.cc
++++ b/media/gpu/windows/d3d11_video_decoder.cc
+@@ -211,6 +211,9 @@ D3D11Status::Or<ComD3D11VideoDecoder> D3D11VideoDecoder::CreateD3D11Decoder() {
+           base::FeatureList::IsEnabled(kD3D11VideoDecoderUseSharedHandle)) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   DCHECK(media_log_);
++  // OS prevent read any content from encrypted video frame. No need to support
++  // shared handle and keyed_mutex system for the encrypted frame.
++  use_shared_handle_ =use_shared_handle_ && !config_.is_encrypted();
+ }
+ 
+ D3D11VideoDecoder::~D3D11VideoDecoder() {
+@@ -437,6 +440,14 @@ void D3D11VideoDecoder::Initialize(const VideoDecoderConfig& config,
+   // us figure that out.
+   MEDIA_LOG(INFO, media_log_) << "Video is supported by D3D11VideoDecoder";
+ 
++  if (base::FeatureList::IsEnabled(kD3D11PrintCodecOnCrash)) {
++    static base::debug::CrashKeyString* codec_name =
++        base::debug::AllocateCrashKeyString("d3d11_playback_video_codec",
++                                            base::debug::CrashKeySize::Size32);
++    base::debug::SetCrashKeyString(codec_name,
++                                   config.GetHumanReadableCodecName());
++  }
++
+   // Initialize `mailbox_release_helper_` so we have a ReleaseMailboxCB which
+   // knows how to wait for SyncToken resolution. No need to reinitialize if
+   // we've done it once.
+@@ -944,8 +955,11 @@ bool D3D11VideoDecoder::GetD3D11FeatureLevel(
+   if (*feature_level < D3D_FEATURE_LEVEL_11_0)
+     return false;
+ 
+-  if (gpu_workarounds.limit_d3d11_video_decoder_to_11_0)
++  // TODO(tmathmeyer) should we log this to UMA?
++  if (gpu_workarounds.limit_d3d11_video_decoder_to_11_0 &&
++      !base::FeatureList::IsEnabled(kD3D11VideoDecoderIgnoreWorkarounds)) {
+     *feature_level = D3D_FEATURE_LEVEL_11_0;
++  }
+ 
+   return true;
+ }
+@@ -958,9 +972,11 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+     const gpu::GpuPreferences& gpu_preferences,
+     const gpu::GpuDriverBugWorkarounds& gpu_workarounds,
+     GetD3DDeviceCB get_d3d_device_cb) {
+-  // Allow all of d3d11 to be turned off by workaround.
+-  if (gpu_workarounds.disable_d3d11_video_decoder)
+-    return {};
++  if (!base::FeatureList::IsEnabled(kD3D11VideoDecoderIgnoreWorkarounds)) {
++    // Allow all of d3d11 to be turned off by workaround.
++    if (gpu_workarounds.disable_d3d11_video_decoder)
++      return {};
++  }
+ 
+   SupportedResolutionRangeMap supported_resolutions;
+   if (base::FeatureList::IsEnabled(kD3D12VideoDecoder)) {
+@@ -989,6 +1005,11 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+   std::vector<SupportedVideoDecoderConfig> configs;
+   for (const auto& kv : supported_resolutions) {
+     const auto profile = kv.first;
++    if (profile == VP9PROFILE_PROFILE2 &&
++        !base::FeatureList::IsEnabled(kD3D11VideoDecoderVP9Profile2)) {
++      continue;
++    }
++
+     const auto& resolution_range = kv.second;
+ 
+     DCHECK(!resolution_range.min_resolution.IsEmpty());
+diff --git a/media/gpu/windows/d3d11_video_decoder_unittest.cc b/media/gpu/windows/d3d11_video_decoder_unittest.cc
+index c037da9f27c73..7629848401876 100644
+--- a/media/gpu/windows/d3d11_video_decoder_unittest.cc
++++ b/media/gpu/windows/d3d11_video_decoder_unittest.cc
+@@ -346,6 +346,17 @@ TEST_F(D3D11VideoDecoderTest, DoesNotSupportEncryptedConfig) {
+   InitializeDecoder(encrypted_config, false);
+ }
+ 
++TEST_F(D3D11VideoDecoderTest, IgnoreWorkaroundsIgnoresWorkaround) {
++  // k...IgnoreWorkarounds should enable the decoder even if it's turned off
++  // for gpu workarounds.
++  EnableFeature(kD3D11VideoDecoderIgnoreWorkarounds);
++  gpu_workarounds_.disable_d3d11_video_decoder = true;
++  CreateDecoder();
++  InitializeDecoder(
++      TestVideoConfig::NormalCodecProfile(VideoCodec::kH264, H264PROFILE_MAIN),
++      true);
++}
++
+ TEST_F(D3D11VideoDecoderTest, WorkaroundTurnsOffDecoder) {
+   //  We shouldn't be able to decode if the decoder is off via gpu workaround.
+   gpu_workarounds_.disable_d3d11_video_decoder = true;
+diff --git a/media/gpu/windows/supported_profile_helpers.cc b/media/gpu/windows/supported_profile_helpers.cc
+index 105ba58eceb28..f271b29c680b3 100644
+--- a/media/gpu/windows/supported_profile_helpers.cc
++++ b/media/gpu/windows/supported_profile_helpers.cc
+@@ -245,7 +245,8 @@ SupportedResolutionRangeMap GetSupportedD3D11VideoDecoderResolutions(
+
+    // Note: Each bit depth of AV1 uses a different DXGI_FORMAT, here we only
+    // test for the 8-bit one (NV12).
+-    if (!workarounds.disable_accelerated_av1_decode) {
++    if (base::FeatureList::IsEnabled(kD3D11VideoDecoderAV1) &&
++    !workarounds.disable_accelerated_av1_decode) {
+      static const gfx::Size kAv1MinResolution = GetMinResolutionForVendor(
+          GetDecoderDeviceVendorId(video_device_wrapper),
+          AV1PROFILE_PROFILE_MAIN);
+diff --git a/media/mojo/services/gpu_mojo_media_client_win.cc b/media/mojo/services/gpu_mojo_media_client_win.cc
+index 601b4b33f544a..dfd098b2cadb6 100644
+--- a/media/mojo/services/gpu_mojo_media_client_win.cc
++++ b/media/mojo/services/gpu_mojo_media_client_win.cc
+@@ -23,6 +23,8 @@ D3D11VideoDecoder::GetD3D11DeviceCB GetD3D11DeviceCallback() {
+ namespace {
+ bool ShouldUseD3D11VideoDecoder(
+     const gpu::GpuDriverBugWorkarounds& gpu_workarounds) {
++  if (!base::FeatureList::IsEnabled(media::kD3D11VideoDecoder))
++    return false;
+   return !gpu_workarounds.disable_d3d11_video_decoder &&
+          base::win::GetVersion() > base::win::Version::WIN7;
+ }
