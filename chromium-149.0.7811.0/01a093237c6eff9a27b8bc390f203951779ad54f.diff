@@ -1,0 +1,230 @@
+diff --git a/content/child/runtime_features.cc b/content/child/runtime_features.cc
+index 47d9180a5e054..d920f13942972 100644
+--- a/content/child/runtime_features.cc
++++ b/content/child/runtime_features.cc
+@@ -353,6 +353,10 @@ void SetRuntimeFeaturesFromChromiumFeatures() {
+            kSetOnlyIfOverridden},
+           {"FledgeBiddingAndAuctionServerAPI",
+            raw_ref(blink::features::kFledgeBiddingAndAuctionServer), kDefault},
++#if BUILDFLAG(IS_WIN)
++          {"FontDataService",
++           raw_ref(features::kFontDataServiceAllWebContents)},
++#endif
+           {"HstsTopLevelNavigationsOnly",
+            raw_ref(net::features::kHstsTopLevelNavigationsOnly)},
+           {"MachineLearningNeuralNetwork",
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index b98b5459691c9..4919801dba6bb 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1925,6 +1925,10 @@ component("platform") {
+       "/wd4334",  # Result of 32-bit shift implicitly converted to 64 bits.
+       "/wd4724",  # Modulo by 0.
+     ]
++    deps += [
++      # For FontDataService mojom used by FontUniqueNameLookupWin.
++      "//components/services/font_data/public/mojom:mojom_blink",
++    ]
+ 
+     # TODO(crbug.com/40915226): Remove the need to ignore this warning.
+     if (is_component_build) {
+diff --git a/third_party/blink/renderer/platform/fonts/DEPS b/third_party/blink/renderer/platform/fonts/DEPS
+index 5085f591a7c9d..da395a15cc18d 100644
+--- a/third_party/blink/renderer/platform/fonts/DEPS
++++ b/third_party/blink/renderer/platform/fonts/DEPS
+@@ -32,6 +32,9 @@ include_rules = [
+ ]
+ 
+ specific_include_rules = {
++    "font_unique_name_lookup_win.h" : [
++        "+components/services/font_data/public/mojom/font_data_service.mojom-blink.h",
++    ],
+     "font_cache.cc" : [
+         "+base/strings/escape.h",
+         "+third_party/blink/renderer/platform/json/json_parser.h",
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
+index e09a9f4bc3326..8e17b92ec7c58 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
++++ b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
+@@ -9,12 +9,17 @@
+ 
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
++#include "base/files/memory_mapped_file.h"
++#include "base/memory/read_only_shared_memory_region.h"
+ #include "base/metrics/histogram_macros.h"
++#include "base/trace_event/trace_event.h"
+ #include "skia/ext/font_utils.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom-blink.h"
+ #include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/skia/include/core/SkData.h"
+ #include "third_party/skia/include/core/SkFontMgr.h"
+ #include "third_party/skia/include/core/SkStream.h"
+ #include "third_party/skia/include/ports/SkTypeface_win.h"
+@@ -27,6 +32,9 @@ FontUniqueNameLookupWin::~FontUniqueNameLookupWin() = default;
+ 
+ sk_sp<SkTypeface> FontUniqueNameLookupWin::MatchUniqueName(
+     const String& font_unique_name) {
++  if (RuntimeEnabledFeatures::FontDataServiceEnabled()) {
++    return MatchUniqueNameViaFontDataService(font_unique_name);
++  }
+   return MatchUniqueNameSingleLookup(font_unique_name);
+ }
+ 
+@@ -62,7 +70,12 @@ sk_sp<SkTypeface> FontUniqueNameLookupWin::InstantiateFromFileAndTtcIndex(
+ }
+ 
+ bool FontUniqueNameLookupWin::IsFontUniqueNameLookupReadyForSyncLookup() {
+-  EnsureServiceConnected();
++  if (RuntimeEnabledFeatures::FontDataServiceEnabled()) {
++    EnsureFontDataServiceConnected();
++  } else {
++    EnsureServiceConnected();
++  }
++
+   return true;
+ }
+ 
+@@ -73,7 +86,89 @@ void FontUniqueNameLookupWin::EnsureServiceConnected() {
+       service_.BindNewPipeAndPassReceiver());
+ }
+ 
++void FontUniqueNameLookupWin::EnsureFontDataServiceConnected() {
++  if (font_data_service_) {
++    return;
++  }
++  Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
++      font_data_service_.BindNewPipeAndPassReceiver());
++}
++
++sk_sp<SkTypeface> FontUniqueNameLookupWin::MatchUniqueNameViaFontDataService(
++    const String& font_unique_name) {
++  EnsureFontDataServiceConnected();
++
++  font_data_service::mojom::blink::MatchFamilyNameResultPtr match_result;
++  bool success =
++      font_data_service_->MatchLocalFont(font_unique_name, &match_result);
++
++  if (!success || !match_result) {
++    return nullptr;
++  }
++
++  return InstantiateFromMatchResult(std::move(match_result));
++}
++
++sk_sp<SkTypeface> FontUniqueNameLookupWin::InstantiateFromMatchResult(
++    font_data_service::mojom::blink::MatchFamilyNameResultPtr match_result) {
++  if (!match_result->typeface_data) {
++    return nullptr;
++  }
++
++  SkFontArguments args;
++  args.setCollectionIndex(match_result->ttc_index);
++
++  sk_sp<SkData> data;
++
++  if (match_result->typeface_data->is_font_file()) {
++    TRACE_EVENT("fonts", "FontUniqueNameLookupWin - using mapped file");
++    // Memory-map the font file for zero-copy access. Ownership is
++    // transferred to SkData via the release proc.
++    auto mapped_file = std::make_unique<base::MemoryMappedFile>();
++    if (mapped_file->Initialize(std::move(
++            match_result->typeface_data->get_font_file()->file_handle))) {
++      data = SkData::MakeWithProc(
++          mapped_file->data(), mapped_file->length(),
++          [](const void*, void* ctx) {
++            delete static_cast<base::MemoryMappedFile*>(ctx);
++          },
++          mapped_file.get());
++      if (data) {
++        mapped_file.release();
++      }
++    }
++  } else if (match_result->typeface_data->is_region() &&
++             match_result->typeface_data->get_region().IsValid()) {
++    TRACE_EVENT("fonts", "FontUniqueNameLookupWin - using shared memory");
++    auto mapping = std::make_unique<base::ReadOnlySharedMemoryMapping>(
++        match_result->typeface_data->get_region().Map());
++    if (mapping->IsValid()) {
++      data = SkData::MakeWithProc(
++          mapping->memory(), mapping->size(),
++          [](const void*, void* ctx) {
++            delete static_cast<base::ReadOnlySharedMemoryMapping*>(ctx);
++          },
++          mapping.get());
++      if (data) {
++        mapping.release();
++      }
++    }
++  }
++
++  if (!data) {
++    return nullptr;
++  }
++
++  sk_sp<SkFontMgr> mgr = skia::DefaultFontMgr();
++  return mgr->makeFromStream(std::make_unique<SkMemoryStream>(std::move(data)),
++                             args);
++}
++
+ void FontUniqueNameLookupWin::Init() {
++  if (RuntimeEnabledFeatures::FontDataServiceEnabled()) {
++    EnsureFontDataServiceConnected();
++    return;
++  }
+   if (!base::FeatureList::IsEnabled(features::kPrefetchFontLookupTables))
+     return;
+ 
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h
+index 7b31b5af1cabc..d11e0e19c58bd 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h
++++ b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.h
+@@ -5,6 +5,7 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_WIN_FONT_UNIQUE_NAME_LOOKUP_WIN_H_
+ #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_WIN_FONT_UNIQUE_NAME_LOOKUP_WIN_H_
+ 
++#include "components/services/font_data/public/mojom/font_data_service.mojom-blink.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "third_party/blink/public/common/font_unique_name_lookup/font_table_matcher.h"
+ #include "third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom-blink.h"
+@@ -30,13 +31,20 @@ class FontUniqueNameLookupWin : public FontUniqueNameLookup {
+ 
+  private:
+   void EnsureServiceConnected();
++  void EnsureFontDataServiceConnected();
+ 
+   sk_sp<SkTypeface> MatchUniqueNameSingleLookup(const String& font_unique_name);
++  sk_sp<SkTypeface> MatchUniqueNameViaFontDataService(
++      const String& font_unique_name);
+ 
+   sk_sp<SkTypeface> InstantiateFromFileAndTtcIndex(base::File file_handle,
+                                                    uint32_t ttc_index);
++  sk_sp<SkTypeface> InstantiateFromMatchResult(
++      font_data_service::mojom::blink::MatchFamilyNameResultPtr match_result);
+ 
+   mojo::Remote<mojom::blink::DWriteFontProxy> service_;
++  mojo::Remote<font_data_service::mojom::blink::FontDataService>
++      font_data_service_;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/platform/runtime_enabled_features.json5 b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+index 4112cd5508122..ed3d113f62505 100644
+--- a/third_party/blink/renderer/platform/runtime_enabled_features.json5
++++ b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+@@ -2985,6 +2985,12 @@
+       name: "FontAccess",
+       status: {"Android": "", "default": "stable"},
+     },
++    {
++      name: "FontDataService",
++      base_feature: "none",
++      // No status, as the web platform runtime enabled feature is controlled by
++      // a Chromium level feature (kFontDataServiceAllWebContents).
++    },
+     {
+       name: "FontFallbackForTabSize",
+       status: "stable",

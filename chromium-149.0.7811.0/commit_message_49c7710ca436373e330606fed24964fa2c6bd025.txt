@@ -1,0 +1,1 @@
+Remove late binding code for CompareObjectHandles API    2023/9/6 4:04:29    49c7710ca436373e330606fed24964fa2c6bd025

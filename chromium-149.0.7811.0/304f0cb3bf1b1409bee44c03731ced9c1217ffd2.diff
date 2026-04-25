@@ -1,0 +1,451 @@
+diff --git a/content/browser/browser_main_loop.cc b/content/browser/browser_main_loop.cc
+index 13fdad8479b84..59ce303377887 100644
+--- a/content/browser/browser_main_loop.cc
++++ b/content/browser/browser_main_loop.cc
+@@ -1465,7 +1465,9 @@ void BrowserMainLoop::PostCreateThreadsImpl() {
+   // all CDMs are part of the OS, so no file checks are involved.
+   CdmRegistry::GetInstance()->Init();
+ 
+-  FontUniqueNameLookup::GetInstance();
++  if (base::FeatureList::IsEnabled(features::kFontSrcLocalMatching)) {
++    FontUniqueNameLookup::GetInstance();
++  }
+ #endif
+ 
+ #if defined(ENABLE_IPC_FUZZER)
+diff --git a/content/browser/font_unique_name_lookup/font_unique_name_browsertest.cc b/content/browser/font_unique_name_lookup/font_unique_name_browsertest.cc
+index 7aa4b08c05139..0463a92a98fef 100644
+--- a/content/browser/font_unique_name_lookup/font_unique_name_browsertest.cc
++++ b/content/browser/font_unique_name_lookup/font_unique_name_browsertest.cc
+@@ -10,6 +10,7 @@
+ #include "build/build_config.h"
+ #include "content/browser/devtools/protocol/devtools_protocol_test_support.h"
+ #include "content/browser/web_contents/web_contents_impl.h"
++#include "content/common/features.h"
+ #include "content/public/test/browser_test.h"
+ #include "content/public/test/browser_test_utils.h"
+ #include "content/public/test/content_browser_test_utils.h"
+@@ -93,6 +94,7 @@ class FontUniqueNameBrowserTest : public DevToolsProtocolTest {
+  public:
+   void SetUpCommandLine(base::CommandLine* command_line) override {
+     DevToolsProtocolTest::SetUpCommandLine(command_line);
++    feature_list_.InitAndEnableFeature(features::kFontSrcLocalMatching);
+   }
+ 
+   void LoadAndWait(const std::string& url) {
+diff --git a/content/browser/font_unique_name_lookup/font_unique_name_lookup_service.cc b/content/browser/font_unique_name_lookup/font_unique_name_lookup_service.cc
+index 2da8964abe52e..cc9c03ce1d913 100644
+--- a/content/browser/font_unique_name_lookup/font_unique_name_lookup_service.cc
++++ b/content/browser/font_unique_name_lookup/font_unique_name_lookup_service.cc
+@@ -19,6 +19,7 @@ namespace content {
+ 
+ FontUniqueNameLookupService::FontUniqueNameLookupService()
+     : font_unique_name_lookup_(::content::FontUniqueNameLookup::GetInstance()) {
++  DCHECK(base::FeatureList::IsEnabled(features::kFontSrcLocalMatching));
+ }
+ 
+ FontUniqueNameLookupService::~FontUniqueNameLookupService() {}
+diff --git a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+index f855592b93418..dc728f0bca254 100644
+--- a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
++++ b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+@@ -31,6 +31,7 @@
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "content/browser/renderer_host/dwrite_font_file_util_win.h"
++#include "content/common/features.h"
+ #include "mojo/public/cpp/bindings/callback_helpers.h"
+ #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+ #include "third_party/blink/public/common/font_unique_name_lookup/font_unique_name_table.pb.h"
+@@ -482,6 +483,7 @@ void DWriteFontProxyImpl::MatchUniqueFont(
+   base::UmaHistogramEnumeration("Chrome.DWriteFontProxy.InvokedIPC",
+                                 DWriteFontProxyIPC::kMatchUniqueFont);
+ 
++  DCHECK(base::FeatureList::IsEnabled(features::kFontSrcLocalMatching));
+   callback = mojo::WrapCallbackWithDefaultInvokeIfNotRun(std::move(callback),
+                                                          base::File(), 0);
+   InitializeDirectWrite();
+diff --git a/content/child/runtime_features.cc b/content/child/runtime_features.cc
+index 47d9180a5e054..ee743c88aac66 100644
+--- a/content/child/runtime_features.cc
++++ b/content/child/runtime_features.cc
+@@ -353,6 +353,7 @@ void SetRuntimeFeaturesFromChromiumFeatures() {
+            kSetOnlyIfOverridden},
+           {"FledgeBiddingAndAuctionServerAPI",
+            raw_ref(blink::features::kFledgeBiddingAndAuctionServer), kDefault},
++          {"FontSrcLocalMatching", raw_ref(features::kFontSrcLocalMatching)},
+ #if BUILDFLAG(IS_WIN)
+           {"FontDataService",
+            raw_ref(features::kFontDataServiceAllWebContents)},
+diff --git a/content/common/features.cc b/content/common/features.cc
+index 46380cb770410..5cd0a386e534f 100644
+--- a/content/common/features.cc
++++ b/content/common/features.cc
+@@ -367,6 +367,11 @@ bool IsFontDataServiceEnabled() {
+ }
+ #endif
+ 
++// Enables fixes for matching src: local() for web fonts correctly against full
++// font name or postscript name. Rolling out behind a flag, as enabling this
++// enables a font indexer on Android which we need to test in the field first.
++BASE_FEATURE(kFontSrcLocalMatching, base::FEATURE_ENABLED_BY_DEFAULT);
++
+ // Whether to use the Frame Routing Cache to avoid synchronous IPCs from the
+ // renderer side for iframe creation.
+ BASE_FEATURE(kFrameRoutingCache, base::FEATURE_ENABLED_BY_DEFAULT);
+diff --git a/content/common/features.h b/content/common/features.h
+index 1ccf8b5e1f6db..7a8abef04f3de 100644
+--- a/content/common/features.h
++++ b/content/common/features.h
+@@ -138,6 +138,7 @@ CONTENT_EXPORT BASE_DECLARE_FEATURE_PARAM(FontDataServiceTypefaceType,
+ bool IsFontDataServiceEnabled();
+ #endif
+ 
++CONTENT_EXPORT BASE_DECLARE_FEATURE(kFontSrcLocalMatching);
+ CONTENT_EXPORT BASE_DECLARE_FEATURE(kFrameRoutingCache);
+ CONTENT_EXPORT extern const base::FeatureParam<int>
+     kFrameRoutingCacheResponseSize;
+diff --git a/content/test/test_blink_web_unit_test_support.cc b/content/test/test_blink_web_unit_test_support.cc
+index e7815f3ffd799..c8024fb199e32 100644
+--- a/content/test/test_blink_web_unit_test_support.cc
++++ b/content/test/test_blink_web_unit_test_support.cc
+@@ -88,10 +88,6 @@ TestBlinkWebUnitTestSupport::TestBlinkWebUnitTestSupport(
+   std::string v8_flags("--expose-gc --no-freeze-flags-after-init");
+   v8_flags += additional_v8_flags;
+ 
+-  // Makes Mojo calls to the browser. This is called inside
+-  // blink::Initialize so it needs to be set first.
+-  blink::WebRuntimeFeatures::EnableAndroidDownloadableFontsMatching(false);
+-
+   blink::Platform::InitializeBlink();
+   scoped_refptr<base::SingleThreadTaskRunner> dummy_task_runner;
+   std::unique_ptr<base::SingleThreadTaskRunner::CurrentDefaultHandle>
+@@ -122,6 +118,10 @@ TestBlinkWebUnitTestSupport::TestBlinkWebUnitTestSupport(
+   // Set V8 flags.
+   v8::V8::SetFlagsFromString(v8_flags.c_str(), v8_flags.size());
+ 
++  // Makes Mojo calls to the browser. This is called inside
++  // blink::Initialize so it needs to be set first.
++  blink::WebRuntimeFeatures::EnableAndroidDownloadableFontsMatching(false);
++
+   mojo::BinderMap binders;
+   blink::InitializeWithoutIsolateForTesting(this, &binders,
+                                             main_thread_scheduler_.get());
+diff --git a/third_party/blink/renderer/core/inspector/inspector_css_agent_test.cc b/third_party/blink/renderer/core/inspector/inspector_css_agent_test.cc
+index d30c68fe175bf..178d1b6d35e3c 100644
+--- a/third_party/blink/renderer/core/inspector/inspector_css_agent_test.cc
++++ b/third_party/blink/renderer/core/inspector/inspector_css_agent_test.cc
+@@ -494,11 +494,11 @@ TEST_F(InspectorCSSAgentTest, GetFontFaceRule) {
+   GetDocument().body()->SetHTMLUnsafeWithoutTrustedTypes(R"HTML(
+     <style>
+       @font-face {
+-        font-family: ExampleFontForTest;
+-        src: url(//nonexistent.ttf);
++        font-family: Bixa;
++        src: local(Bixa);
+       }
+       #e {
+-        font-family: ExampleFontForTest;
++        font-family: Bixa;
+       }
+     </style>
+     <div id=e></div>
+@@ -515,19 +515,19 @@ TEST_F(InspectorCSSAgentTest, GetFontFaceRule) {
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(0)->getName(),
+             "font-family");
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(0)->getValue(),
+-            "ExampleFontForTest");
++            "Bixa");
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(1)->getName(),
+             "src");
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(1)->getValue(),
+-            "url(//nonexistent.ttf)");
++            "local(Bixa)");
+ }
+ 
+ TEST_F(InspectorCSSAgentTest, GetFontFaceRuleNoMatch) {
+   GetDocument().body()->SetHTMLUnsafeWithoutTrustedTypes(R"HTML(
+     <style>
+       @font-face {
+-        font-family: ExampleFontForTest;
+-        src: url(//nonexistent.ttf);
++        font-family: Bixa;
++        src: local(Bixa);
+       }
+       #e {
+         font-family: Papyrus;
+@@ -545,19 +545,19 @@ TEST_F(InspectorCSSAgentTest, GetFontFaceRuleFromPseudoElement) {
+   GetDocument().body()->SetHTMLUnsafeWithoutTrustedTypes(R"HTML(
+     <style>
+       @font-face {
+-        font-family: ExampleFontForTest;
+-        src: url(//nonexistent.ttf);
++        font-family: Bixa;
++        src: local(Bixa);
+       }
+       #e {
+         font-family: Papyrus;
+       }
+       #e::before {
+         content: "before";
+-        font-family: ExampleFontForTest;
++        font-family: Bixa;
+       }
+       #e::after {
+         content: "after";
+-        font-family: ExampleFontForTest;
++        font-family: Bixa;
+       }
+     </style>
+     <div id=e></div>
+@@ -575,11 +575,11 @@ TEST_F(InspectorCSSAgentTest, GetFontFaceRuleFromPseudoElement) {
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(0)->getName(),
+             "font-family");
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(0)->getValue(),
+-            "ExampleFontForTest");
++            "Bixa");
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(1)->getName(),
+             "src");
+   EXPECT_EQ(rules->at(0)->getStyle()->getCssProperties()->at(1)->getValue(),
+-            "url(//nonexistent.ttf)");
++            "local(Bixa)");
+ }
+ 
+ TEST_F(InspectorCSSAgentTest, GetFontPaletteValuesRule) {
+diff --git a/third_party/blink/renderer/core/layout/layout_text_test.cc b/third_party/blink/renderer/core/layout/layout_text_test.cc
+index 8131e0bb77e12..fa18bf4f97c09 100644
+--- a/third_party/blink/renderer/core/layout/layout_text_test.cc
++++ b/third_party/blink/renderer/core/layout/layout_text_test.cc
+@@ -182,17 +182,10 @@ TEST_F(LayoutTextTest, PrewarmFamily) {
+ TEST_F(LayoutTextTest, PrewarmFontFace) {
+   test::ScopedTestFontPrewarmer prewarmer;
+   SetBodyInnerHTML(R"HTML(
+-    <!--
+-      This font was produced by subsetting <roboto regular> to include only the
+-      .notdef glyph (GID 0) and 'A' (GID 1, U+0041). The following command was
+-      used on the source font:
+-      pyftsubset <roboto regular> --unicodes="U+0041" --no-hinting --layout-features='' \
+-        --name-IDs='' --drop-tables+=GPOS,GSUB,gasp,GDEF,name,post
+-    -->
+     <style>
+     @font-face {
+       font-family: testfont;
+-      src: url(data:font/ttf;base64,AAEAAAAIAIAAAwAAT1MvMnKqYewAAAFQAAAAYGNtYXAADACUAAABsAAAADRnbHlm9aiJLAAAAIwAAAA4aGVhZPxq0noAAADsAAAANmhoZWEKugWiAAABLAAAACRobXR4CMQAgAAAASQAAAAIbG9jYQAcAAAAAADkAAAABm1heHAAJADlAAAAxAAAACAAAgAcAAAFHQWwAAcACgAAASEDIwEzASMBIQMDzf2eicYCLKgCLcX9TQHv+AF8/oQFsPpQAhoCqQABAAAAAgCPABYAVAAFAAEAAAAAAAAAAAAAAAAABgABAAAAAAAcAAAAAQAAAAIjEpNb+gZfDzz1ABkIAAAAAADE8BEuAAAAANUBUvT6G/3VCTAIcwAAAAkAAgAAAAAAAAOMAGQFOAAcAAEAAAds/gwAAAlJ+hv+SgkwAAEAAAAAAAAAAAAAAAAAAAACAAMEhgGQAAUAAAWaBTMAAAEfBZoFMwAAA9EAZgIAAAACAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAEdPT0cAQABBAEEGAP4AAGYHmgIAAAAAAQAAAAAEOgWwACAAIAADAAAAAgAAAAMAAAAUAAMAAQAAABQABAAgAAAABAAEAAEAAABB//8AAABB////wAABAAAAAA==);
++      src: local(Arial);
+     }
+     #container { font-family: testfont; }
+     </style>
+diff --git a/third_party/blink/renderer/platform/fonts/android/font_unique_name_lookup_android.cc b/third_party/blink/renderer/platform/fonts/android/font_unique_name_lookup_android.cc
+index 7df8eef521817..66a7a1652023c 100644
+--- a/third_party/blink/renderer/platform/fonts/android/font_unique_name_lookup_android.cc
++++ b/third_party/blink/renderer/platform/fonts/android/font_unique_name_lookup_android.cc
+@@ -43,6 +43,7 @@ FontUniqueNameLookupAndroid::~FontUniqueNameLookupAndroid() = default;
+ void FontUniqueNameLookupAndroid::PrepareFontUniqueNameLookup(
+     NotifyFontUniqueNameLookupReady callback) {
+   DCHECK(!font_table_matcher_.get());
++  DCHECK(RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled());
+ 
+   pending_callbacks_.push_back(std::move(callback));
+ 
+@@ -61,6 +62,9 @@ void FontUniqueNameLookupAndroid::PrepareFontUniqueNameLookup(
+ }
+ 
+ bool FontUniqueNameLookupAndroid::IsFontUniqueNameLookupReadyForSyncLookup() {
++  if (!RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled())
++    return true;
++
+   EnsureServiceConnected();
+ 
+   // If we have the table already, we're ready for sync lookups.
+@@ -125,7 +129,7 @@ void FontUniqueNameLookupAndroid::Init() {
+     }
+   }
+   if (base::FeatureList::IsEnabled(features::kPrefetchFontLookupTables) &&
+-      RuntimeEnabledFeatures::AndroidDownloadableFontsMatchingEnabled()) {
++      RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled()) {
+     // This call primes IsFontUniqueNameLookupReadyForSyncLookup() by
+     // asynchronously fetching the font table so it will be ready when needed.
+     // It isn't needed now, so base::DoNothing() is passed as the callback.
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache_test.cc b/third_party/blink/renderer/platform/fonts/font_cache_test.cc
+index ba6c2d52de93a..6534e45a0d2ab 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache_test.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache_test.cc
+@@ -139,15 +139,7 @@ TEST_F(FontCacheTest, firstAvailableOrFirst) {
+             FontCache::FirstAvailableOrFirst(", not exist, not exist"));
+ }
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || \
+-    BUILDFLAG(IS_ANDROID)
+-// local() font matching requires a Mojo connection which is not available in
+-// unit tests.
+-#define MAYBE_FontUniqueNameMatchAvailable DISABLED_FontUniqueNameMatchAvailable
+-#else
+-#define MAYBE_FontUniqueNameMatchAvailable FontUniqueNameMatchAvailable
+-#endif
+-TEST_F(FontCacheTest, MAYBE_FontUniqueNameMatchAvailable) {
++TEST_F(FontCacheTest, FontUniqueNameMatchAvailable) {
+   FontCache& font_cache = FontCache::Get();
+ 
+   FontDescription font_description;
+diff --git a/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm b/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
+index 001ff233f40c1..402654b76fe5c 100644
+--- a/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
++++ b/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
+@@ -51,6 +51,7 @@
+ #include "third_party/blink/renderer/platform/fonts/mac/font_matcher_mac.h"
+ #include "third_party/blink/renderer/platform/fonts/mac/font_platform_data_mac.h"
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
++#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/main_thread.h"
+ #include "third_party/blink/renderer/platform/web_test_support.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+@@ -407,7 +408,8 @@ const FontPlatformData* FontCache::CreateFontPlatformData(
+   }
+ 
+   ScopedCFTypeRef<CTFontRef> matched_font;
+-  if (alternate_name == AlternateFontName::kLocalUniqueFace) {
++  if (alternate_name == AlternateFontName::kLocalUniqueFace &&
++      RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled()) {
+     matched_font = MatchUniqueFont(creation_params.Family(), size);
+   } else if (creation_params.Family() == font_family_names::kSystemUi) {
+     matched_font =
+diff --git a/third_party/blink/renderer/platform/fonts/plain_text_node_test.cc b/third_party/blink/renderer/platform/fonts/plain_text_node_test.cc
+index cd952bf50ba82..df0de9951ad06 100644
+--- a/third_party/blink/renderer/platform/fonts/plain_text_node_test.cc
++++ b/third_party/blink/renderer/platform/fonts/plain_text_node_test.cc
+@@ -4,11 +4,8 @@
+ 
+ #include "third_party/blink/renderer/platform/fonts/plain_text_node.h"
+ 
+-#include "base/test/scoped_feature_list.h"
+-#include "build/build_config.h"
+ #include "skia/ext/font_utils.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+-#include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/renderer/platform/fonts/font.h"
+ #include "third_party/blink/renderer/platform/fonts/font_description.h"
+ #include "third_party/blink/renderer/platform/fonts/shaping/shape_result_test_info.h"
+@@ -49,15 +46,7 @@ class PlainTextNodeTest : public testing::Test {
+   static constexpr bool kNormalizeSpace = true;
+   static constexpr bool kSupportsBidi = true;
+ 
+-  void SetUp() override {
+-    skia::InitializeFontRendering();
+-#if BUILDFLAG(IS_ANDROID)
+-    feature_list_.InitAndDisableFeature(features::kGMSCoreEmoji);
+-#endif
+-  }
+-
+- private:
+-  base::test::ScopedFeatureList feature_list_;
++  void SetUp() override { skia::InitializeFontRendering(); }
+ };
+ 
+ TEST_F(PlainTextNodeTest, NormalizeSpacesAndMaybeBidiNoConversion) {
+diff --git a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+index 3dc19c6fa55a4..d74cb21e2c466 100644
+--- a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
++++ b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+@@ -52,6 +52,7 @@
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+ #include "third_party/blink/renderer/platform/fonts/skia/sktypeface_factory.h"
+ #include "third_party/blink/renderer/platform/language.h"
++#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+ #include "third_party/skia/include/core/SkFontMgr.h"
+ #include "third_party/skia/include/core/SkStream.h"
+@@ -316,8 +317,9 @@ const FontPlatformData* FontCache::CreateFontPlatformData(
+            FontFaceCreationType::kCreateFontByFamily &&
+        creation_params.Family() == kNotoColorEmojiCompat);
+ #endif
+-  if (alternate_name == AlternateFontName::kLocalUniqueFace ||
+-      noto_color_emoji_from_gmscore) {
++  if (RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled() &&
++      (alternate_name == AlternateFontName::kLocalUniqueFace ||
++       noto_color_emoji_from_gmscore)) {
+     typeface = CreateTypefaceFromUniqueName(creation_params);
+   } else {
+     typeface = CreateTypeface(font_description, creation_params, name);
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc b/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc
+index 6890b04426f05..1c42577ddc41d 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc
++++ b/third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc
+@@ -52,6 +52,7 @@
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+ #include "third_party/blink/renderer/platform/fonts/win/font_fallback_win.h"
+ #include "third_party/blink/renderer/platform/language.h"
++#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/text/layout_locale.h"
+ #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
+ #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+@@ -433,7 +434,8 @@ const FontPlatformData* FontCache::CreateFontPlatformData(
+ 
+   std::string name;
+ 
+-  if (alternate_font_name == AlternateFontName::kLocalUniqueFace) {
++  if (alternate_font_name == AlternateFontName::kLocalUniqueFace &&
++      RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled()) {
+     typeface = CreateTypefaceFromUniqueName(creation_params);
+ 
+     // We do not need to try any heuristic around the font name, as below, for
+diff --git a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
+index e09a9f4bc3326..f35e19882bc6c 100644
+--- a/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
++++ b/third_party/blink/renderer/platform/fonts/win/font_unique_name_lookup_win.cc
+@@ -15,6 +15,7 @@
+ #include "third_party/blink/public/mojom/dwrite_font_proxy/dwrite_font_proxy.mojom-blink.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/skia/include/core/SkData.h"
+ #include "third_party/skia/include/core/SkFontMgr.h"
+ #include "third_party/skia/include/core/SkStream.h"
+@@ -62,7 +63,10 @@ sk_sp<SkTypeface> FontUniqueNameLookupWin::InstantiateFromFileAndTtcIndex(
+   if (RuntimeEnabledFeatures::FontDataServiceEnabled()) {
+     EnsureFontDataServiceConnected();
+   } else {
+-  EnsureServiceConnected();
++  if (RuntimeEnabledFeatures::FontSrcLocalMatchingEnabled()) {
++    EnsureServiceConnected();
++  }
++
+   }
+ 
+   return true;
+diff --git a/third_party/blink/renderer/platform/runtime_enabled_features.json5 b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+index 8c338f9bbc9bf..799d0e3a4cf40 100644
+--- a/third_party/blink/renderer/platform/runtime_enabled_features.json5
++++ b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+@@ -2981,6 +2981,12 @@
+       name: "FontMatchAliasesAsLastResort",
+       status: "stable",
+     },
++    {
++      name: "FontSrcLocalMatching",
++      base_feature: "none",
++      // No status, as the web platform runtime enabled feature is controlled by
++      // a Chromium level feature.
++    },
+     {
+       // crbug.com/393391746
+       name: "FontStyleObliqueZeroDegreeAsNormal",
+diff --git a/tools/metrics/histograms/enums.xml b/tools/metrics/histograms/enums.xml
+index 9bac26d5b4b51..fbd3267edd2f2 100644
+--- a/tools/metrics/histograms/enums.xml
++++ b/tools/metrics/histograms/enums.xml
+@@ -11728,6 +11728,7 @@ from previous Chrome versions.
+   <int value="-778047974" label="CrostiniUseBusterImage:disabled"/>
+   <int value="-777973127" label="EnableIPH:enabled"/>
+   <int value="-777568290" label="FilesTransferDetails:disabled"/>
++  <int value="-777126951" label="FontSrcLocalMatching:enabled"/>
+   <int value="-776686417" label="SiteExplorationUi:disabled"/>
+   <int value="-776598844" label="AIRewriterAPI:disabled"/>
+   <int value="-775952696" label="FeedStamp:enabled"/>
+@@ -19716,6 +19717,7 @@ from previous Chrome versions.
+   <int value="1870023694" label="AccessibilityDeprecateChromeVoxTabs:enabled"/>
+   <int value="1870187746" label="TabStripTransitionInDesktopWindow:enabled"/>
+   <int value="1870973833" label="AssistantEnableStereoAudioInput:enabled"/>
++  <int value="1871938175" label="FontSrcLocalMatching:disabled"/>
+   <int value="1872034472" label="TabletTabStripAnimation:enabled"/>
+   <int value="1872185826" label="LocationHardReload:enabled"/>
+   <int value="1872768755" label="BackgroundResourceFetch:disabled"/>
