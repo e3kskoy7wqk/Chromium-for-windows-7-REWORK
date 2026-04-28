@@ -1,0 +1,24 @@
+diff --git a/chrome/chrome_elf/nt_registry/nt_registry.cc b/chrome/chrome_elf/nt_registry/nt_registry.cc
+index d0c71f9a0cc91..9a7fc329e0d59 100644
+--- a/chrome/chrome_elf/nt_registry/nt_registry.cc
++++ b/chrome/chrome_elf/nt_registry/nt_registry.cc
+@@ -655,6 +660,10 @@ bool CreateRegKey(ROOT_KEY root,
+   return true;
+ }
+ 
++extern "C" NTSTATUS WINAPI NtOpenKey(OUT PHANDLE KeyHandle,
++                                            IN ACCESS_MASK DesiredAccess,
++                                            IN POBJECT_ATTRIBUTES
++                                                ObjectAttributes);
+ bool OpenRegKey(ROOT_KEY root,
+                 const wchar_t* key_path,
+                 ACCESS_MASK access,
+@@ -689,7 +698,7 @@ bool OpenRegKey(ROOT_KEY root,
+   InitializeObjectAttributes(&obj, &key_path_uni, OBJ_CASE_INSENSITIVE, NULL,
+                              NULL);
+ 
+-  status = ::NtOpenKeyEx(out_handle, access, &obj, 0);
++  status = NtOpenKey(out_handle, access, &obj);
+   // See if caller wants the NTSTATUS.
+   if (error_code)
+     *error_code = status;
