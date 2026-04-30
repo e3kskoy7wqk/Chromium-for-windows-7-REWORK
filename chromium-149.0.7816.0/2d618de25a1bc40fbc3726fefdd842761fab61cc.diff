@@ -1,0 +1,20 @@
+diff --git a/third_party/webrtc/modules/desktop_capture/win/d3d_device.cc b/third_party/webrtc/modules/desktop_capture/win/d3d_device.cc
+index 3d46117501..d9f454f029 100644
+--- a/third_party/webrtc/modules/desktop_capture/win/d3d_device.cc
++++ b/third_party/webrtc/modules/desktop_capture/win/d3d_device.cc
+@@ -67,6 +67,15 @@ bool D3dDevice::Initialize(const ComPtr<IDXGIAdapter>& adapter) {
+ 
+ // static
+ std::vector<D3dDevice> D3dDevice::EnumDevices() {
++typedef HRESULT (APIENTRY *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
++static PFN_CreateDXGIFactory1 fpCreateDXGIFactory1;
++    HMODULE dxgi_module = LoadLibraryW(L"dxgi.dll");
++    fpCreateDXGIFactory1 = dxgi_module == NULL ? NULL :
++        (PFN_CreateDXGIFactory1)GetProcAddress(dxgi_module, "CreateDXGIFactory1");
++  if (!fpCreateDXGIFactory1) {
++    return std::vector<D3dDevice>();
++  }
++
+   ComPtr<IDXGIFactory1> factory;
+   _com_error error =
+       CreateDXGIFactory1(__uuidof(IDXGIFactory1),

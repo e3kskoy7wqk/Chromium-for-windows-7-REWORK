@@ -1,0 +1,1 @@
+Settings: Remove obsolete 'isWindows10OrNewer' flag and related code.    2024/5/14 10:02:59    b0a01699f91e8692b6e38ae08ca1bd8ca7aa4b4b

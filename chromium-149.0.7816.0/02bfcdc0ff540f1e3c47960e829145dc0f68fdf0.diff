@@ -1,0 +1,42 @@
+diff --git a/media/capture/video/win/video_capture_device_utils_win.cc b/media/capture/video/win/video_capture_device_utils_win.cc
+index 771c193000607..fe37448e1a723 100644
+--- a/media/capture/video/win/video_capture_device_utils_win.cc
++++ b/media/capture/video/win/video_capture_device_utils_win.cc
+@@ -212,6 +227,19 @@ HRESULT CheckPathInfoForInternal(const PCWSTR device_name) {
+   DISPLAYCONFIG_PATH_INFO* path_info_array = nullptr;
+   DISPLAYCONFIG_MODE_INFO* mode_info_array = nullptr;
+ 
++    LONG (WINAPI * pfnQueryDisplayConfig)(UINT Flags,UINT *pNumPathArrayElements, DISPLAYCONFIG_PATH_INFO *pPathInfoArray,
++                                      UINT *pNumModeInfoArrayElements, DISPLAYCONFIG_MODE_INFO *pModeInfoArray,
++                                      DISPLAYCONFIG_TOPOLOGY_ID *pCurrentTopologyId) = 0;
++    LONG (WINAPI * pfnGetDisplayConfigBufferSizes)(UINT Flags, UINT *pNumPathArrayElements, UINT *pNumModeInfoArrayElements) = 0;
++    HMODULE hUser = GetModuleHandleW(L"user32.dll");
++    if (hUser)
++    {
++        *(uintptr_t *)&pfnQueryDisplayConfig = (uintptr_t)GetProcAddress(hUser, "QueryDisplayConfig");
++
++        *(uintptr_t *)&pfnGetDisplayConfigBufferSizes = (uintptr_t)GetProcAddress(hUser, "GetDisplayConfigBufferSizes");
++    }
++    if (!pfnQueryDisplayConfig || !pfnGetDisplayConfigBufferSizes)
++      return E_NOTIMPL;
+   do {
+     // In case this isn't the first time through the loop, delete the buffers
+     // allocated.
+@@ -221,7 +249,7 @@ HRESULT CheckPathInfoForInternal(const PCWSTR device_name) {
+     delete[] mode_info_array;
+     mode_info_array = nullptr;
+ 
+-    hr = HRESULT_FROM_WIN32(::GetDisplayConfigBufferSizes(
++    hr = HRESULT_FROM_WIN32(pfnGetDisplayConfigBufferSizes(
+         QDC_ONLY_ACTIVE_PATHS, &path_info_array_size, &mode_info_array_size));
+     if (FAILED(hr)) {
+       break;
+@@ -241,7 +269,7 @@ HRESULT CheckPathInfoForInternal(const PCWSTR device_name) {
+       break;
+     }
+ 
+-    hr = HRESULT_FROM_WIN32(::QueryDisplayConfig(
++    hr = HRESULT_FROM_WIN32(pfnQueryDisplayConfig(
+         QDC_ONLY_ACTIVE_PATHS, &path_info_array_size, path_info_array,
+         &mode_info_array_size, mode_info_array, nullptr));
+   } while (hr == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));

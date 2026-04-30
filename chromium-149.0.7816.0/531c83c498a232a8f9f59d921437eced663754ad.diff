@@ -1,0 +1,28 @@
+diff --git a/v8/gni/v8.gni b/v8/gni/v8.gni
+index a1ef5f1b4a3..847a399c2f0 100644
+--- a/v8/gni/v8.gni
++++ b/v8/gni/v8.gni
+@@ -185,7 +185,7 @@ declare_args() {
+   v8_enable_memory_sealing = false
+ 
+   # Sets -DV8_ENABLE_ETW_STACK_WALKING. Enables ETW Stack Walking
+-  v8_enable_etw_stack_walking = is_win
++  v8_enable_etw_stack_walking = false
+ 
+   # Specifies if the target build is a simulator build. By default it is set to
+   # true if the host and target do not match and we are not cross-compiling.
+diff --git a/v8/src/api/api.cc b/v8/src/api/api.cc
+index 6e4f6003ca0..95ad708515e 100644
+--- a/v8/src/api/api.cc
++++ b/v8/src/api/api.cc
+@@ -10976,6 +10976,10 @@ void Isolate::SetFilterETWSessionByURL2Callback(
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+   i_isolate->SetFilterETWSessionByURL2Callback(callback);
+ }
++#else
++void Isolate::SetFilterETWSessionByURL2Callback(
++    FilterETWSessionByURL2Callback callback) {
++}
+ #endif  // V8_ENABLE_ETW_STACK_WALKING
+ 
+ bool v8::Object::IsCodeLike(v8::Isolate* v8_isolate) const {
