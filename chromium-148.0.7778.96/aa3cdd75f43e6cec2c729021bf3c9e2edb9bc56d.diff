@@ -1,0 +1,231 @@
+diff --git a/gpu/command_buffer/service/dawn_context_provider.cc b/gpu/command_buffer/service/dawn_context_provider.cc
+index 4c00abadd1b0b..ebd3e1e238f2d 100644
+--- a/gpu/command_buffer/service/dawn_context_provider.cc
++++ b/gpu/command_buffer/service/dawn_context_provider.cc
+@@ -326,8 +326,10 @@ bool GetANGLED3D11DeviceLUID(LUID* luid) {
+   CHECK_EQ(hr, S_OK);
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-  hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (!SUCCEEDED(dxgi_device->GetAdapter(&dxgi_adapter))) {
++    LOG(ERROR) << "Failed to get IDXGIAdapter from ANGLE.";
++    return false;
++  }
+ 
+   DXGI_ADAPTER_DESC adapter_desc;
+   if (!SUCCEEDED(dxgi_adapter->GetDesc(&adapter_desc))) {
+diff --git a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+index 4f1db7db3da9f..f6dff6684d61a 100644
+--- a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+@@ -69,8 +69,11 @@ class GpuMemoryBufferHandleSharedState {
+       CHECK_EQ(hr, S_OK);
+ 
+       Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter = nullptr;
+-      hr = angle_dxgi_device->GetAdapter(&dxgi_adapter);
+-      CHECK_EQ(hr, S_OK);
++      hr = FAILED(angle_dxgi_device->GetAdapter(&dxgi_adapter));
++      if (FAILED(hr)) {
++        DLOG(ERROR) << "GetAdapter failed with error 0x" << std::hex << hr;
++        return nullptr;
++      }
+ 
+       // If adapter is not null, driver type must be D3D_DRIVER_TYPE_UNKNOWN
+       // otherwise D3D11CreateDevice will return E_INVALIDARG.
+@@ -518,8 +521,8 @@ bool D3DImageBackingFactory::CreateSwapChainInternal(
+   HRESULT hr = d3d11_device_.As(&dxgi_device);
+   CHECK_EQ(hr, S_OK);
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-  hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  dxgi_device->GetAdapter(&dxgi_adapter);
++  DCHECK(dxgi_adapter);
+   Microsoft::WRL::ComPtr<IDXGIFactory2> dxgi_factory;
+   dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory));
+   DCHECK(dxgi_factory);
+diff --git a/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc b/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc
+index 0b5c778a2d30e..8e0fd823b844e 100644
+--- a/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc
++++ b/gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.cc
+@@ -64,8 +64,8 @@ std::unique_ptr<DXGISwapChainImageBacking> DXGISwapChainImageBacking::Create(
+   HRESULT hr = d3d11_device.As(&dxgi_device);
+   CHECK_EQ(hr, S_OK);
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-  hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  dxgi_device->GetAdapter(&dxgi_adapter);
++  DCHECK(dxgi_adapter);
+   Microsoft::WRL::ComPtr<IDXGIFactory2> dxgi_factory;
+   dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory));
+   DCHECK(dxgi_factory);
+diff --git a/gpu/command_buffer/service/webgpu_decoder_impl.cc b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+index 96cfbe590bf8e..98c885529ab27 100644
+--- a/gpu/command_buffer/service/webgpu_decoder_impl.cc
++++ b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+@@ -1717,8 +1717,10 @@ wgpu::Adapter WebGPUDecoderImpl::CreatePreferredAdapter(
+   HRESULT hr = d3d11_device.As(&dxgi_device);
+   CHECK_EQ(hr, S_OK);
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-  hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (!SUCCEEDED(dxgi_device->GetAdapter(&dxgi_adapter))) {
++    LOG(ERROR) << "Failed to get IDXGIAdapter from ANGLE.";
++    return nullptr;
++  }
+ 
+   DXGI_ADAPTER_DESC adapter_desc;
+   if (!SUCCEEDED(dxgi_adapter->GetDesc(&adapter_desc))) {
+diff --git a/gpu/config/gpu_info_collector_win.cc b/gpu/config/gpu_info_collector_win.cc
+index e0f68da335dd1..315ab815b5ee4 100644
+--- a/gpu/config/gpu_info_collector_win.cc
++++ b/gpu/config/gpu_info_collector_win.cc
+@@ -146,8 +146,8 @@ bool GetActiveAdapterLuid(LUID* luid) {
+   CHECK_EQ(hr, S_OK);
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+-  hr = dxgi_device->GetAdapter(&adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(dxgi_device->GetAdapter(&adapter)))
++    return false;
+ 
+   DXGI_ADAPTER_DESC desc;
+   CHECK_EQ(S_OK, adapter->GetDesc(&desc));
+diff --git a/media/gpu/windows/d3d11_video_decoder.cc b/media/gpu/windows/d3d11_video_decoder.cc
+index 225d7ea257c38..9fd0b70a094dc 100644
+--- a/media/gpu/windows/d3d11_video_decoder.cc
++++ b/media/gpu/windows/d3d11_video_decoder.cc
+@@ -1064,7 +1064,8 @@ void D3D11VideoDecoder::LogDecoderAdapterLUID() {
+ 
+   ComDXGIAdapter dxgi_adapter;
+   hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr))
++    return;
+ 
+   DXGI_ADAPTER_DESC adapter_desc{};
+   hr = dxgi_adapter->GetDesc(&adapter_desc);
+diff --git a/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc b/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+index 096d18020ccd0..b29489a5c5c25 100644
+--- a/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
++++ b/media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+@@ -191,8 +191,9 @@ bool IsMatchingDevice(CHROME_LUID desired_luid, ID3D11Device* device) {
+     return false;
+   }
+   ComDXGIAdapter dxgi_adapter;
+-  HRESULT hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(dxgi_device->GetAdapter(&dxgi_adapter))) {
++    return false;
++  }
+   DXGI_ADAPTER_DESC adapter_desc{};
+   if (FAILED(dxgi_adapter->GetDesc(&adapter_desc))) {
+     return false;
+diff --git a/media/gpu/windows/supported_profile_helpers.cc b/media/gpu/windows/supported_profile_helpers.cc
+index 10987621353b8..741ae2fa9d139 100644
+--- a/media/gpu/windows/supported_profile_helpers.cc
++++ b/media/gpu/windows/supported_profile_helpers.cc
+@@ -545,7 +545,9 @@ UINT GetGPUVendorID(ComDXGIDevice dxgi_device) {
+   }
+   ComDXGIAdapter dxgi_adapter;
+   HRESULT hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    return 0;
++  }
+   DXGI_ADAPTER_DESC desc{};
+   hr = dxgi_adapter->GetDesc(&desc);
+   if (FAILED(hr)) {
+diff --git a/media/renderers/win/media_foundation_renderer.cc b/media/renderers/win/media_foundation_renderer.cc
+index 6bffd9b1c7920..3428d10a7a019 100644
+--- a/media/renderers/win/media_foundation_renderer.cc
++++ b/media/renderers/win/media_foundation_renderer.cc
+@@ -193,7 +193,9 @@ std::tuple<uint32_t, LUID> GetVendorIdAndLUIDFromD3D11Device(
+ 
+   ComPtr<IDXGIAdapter> adapter;
+   hr = dxgi_device->GetAdapter(&adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(hr)) {
++    return {kGpuVendorIdNone, {}};
++  }
+ 
+   DXGI_ADAPTER_DESC desc = {};
+   hr = adapter->GetDesc(&desc);
+diff --git a/ui/gl/direct_composition_support.cc b/ui/gl/direct_composition_support.cc
+index c83d856cc82c2..1cf0657d4e35e 100644
+--- a/ui/gl/direct_composition_support.cc
++++ b/ui/gl/direct_composition_support.cc
+@@ -519,8 +519,10 @@ void QueryVideoProcessorCustomExtForHDR() {
+   CHECK_EQ(hr, S_OK);
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-  hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(dxgi_device->GetAdapter(&dxgi_adapter))) {
++    DLOG(ERROR) << "Failed to retrieve DXGI adapter";
++    return;
++  }
+ 
+   DXGI_ADAPTER_DESC adapter_desc;
+   if (FAILED(dxgi_adapter->GetDesc(&adapter_desc))) {
+@@ -1085,11 +1087,11 @@ bool DXGISwapChainTearingSupported() {
+       return false;
+     }
+     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-    HRESULT hr = d3d11_device.As(&dxgi_device);
++    const HRESULT hr = d3d11_device.As(&dxgi_device);
+     CHECK_EQ(hr, S_OK);
+     Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-    hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-    CHECK_EQ(hr, S_OK);
++    dxgi_device->GetAdapter(&dxgi_adapter);
++    DCHECK(dxgi_adapter);
+     Microsoft::WRL::ComPtr<IDXGIFactory5> dxgi_factory;
+     if (FAILED(dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory)))) {
+       LOG(ERROR) << "Not using swap chain tearing because failed to retrieve "
+diff --git a/ui/gl/hdr_metadata_helper_win.cc b/ui/gl/hdr_metadata_helper_win.cc
+index 66873bfaf5636..ffca7715c805f 100644
+--- a/ui/gl/hdr_metadata_helper_win.cc
++++ b/ui/gl/hdr_metadata_helper_win.cc
+@@ -59,12 +59,12 @@ void HDRMetadataHelperWin::UpdateDisplayMetadata() {
+     return;
+ 
+   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+-  HRESULT hr = d3d11_device_.As(&dxgi_device);
++  const HRESULT hr = d3d11_device_.As(&dxgi_device);
+   CHECK_EQ(hr, S_OK);
+ 
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-  hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  if (FAILED(dxgi_device->GetAdapter(&dxgi_adapter)))
++    return;
+ 
+   Microsoft::WRL::ComPtr<IDXGIFactory> dxgi_factory;
+   if (FAILED(dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory))))
+diff --git a/ui/gl/swap_chain_presenter.cc b/ui/gl/swap_chain_presenter.cc
+index c45abaa7a96a6..cd37fc30e1866 100644
+--- a/ui/gl/swap_chain_presenter.cc
++++ b/ui/gl/swap_chain_presenter.cc
+@@ -1389,8 +1389,8 @@ bool SwapChainPresenter::PresentToDecodeSwapChain(
+     hr = d3d11_device_.As(&dxgi_device);
+     CHECK_EQ(hr, S_OK);
+     Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-    hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-    CHECK_EQ(hr, S_OK);
++    dxgi_device->GetAdapter(&dxgi_adapter);
++    DCHECK(dxgi_adapter);
+     Microsoft::WRL::ComPtr<IDXGIFactoryMedia> media_factory;
+     dxgi_adapter->GetParent(IID_PPV_ARGS(&media_factory));
+     DCHECK(media_factory);
+@@ -2459,8 +2459,8 @@ bool SwapChainPresenter::ReallocateSwapChain(
+   HRESULT hr = d3d11_device_.As(&dxgi_device);
+   CHECK_EQ(hr, S_OK);
+   Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
+-  hr = dxgi_device->GetAdapter(&dxgi_adapter);
+-  CHECK_EQ(hr, S_OK);
++  dxgi_device->GetAdapter(&dxgi_adapter);
++  DCHECK(dxgi_adapter);
+   Microsoft::WRL::ComPtr<IDXGIFactoryMedia> media_factory;
+   dxgi_adapter->GetParent(IID_PPV_ARGS(&media_factory));
+   DCHECK(media_factory);
