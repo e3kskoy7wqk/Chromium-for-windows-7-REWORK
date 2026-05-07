@@ -1,0 +1,22 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/internal_allocator.cc b/base/allocator/partition_allocator/src/partition_alloc/internal_allocator.cc
+index 587224026e327..65d24c9f74f22 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/internal_allocator.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/internal_allocator.cc
+@@ -5,8 +5,6 @@
+ #include "partition_alloc/internal_allocator.h"
+ 
+ namespace partition_alloc::internal {
+-PA_COMPONENT_EXPORT(PARTITION_ALLOC)
+-PartitionRoot& InternalAllocatorRoot() {
+   static internal::base::NoDestructor<PartitionRoot> allocator([] {
+     // Disable features using the internal root to avoid reentrancy issue.
+     PartitionOptions opts;
+@@ -15,6 +13,8 @@ PartitionRoot& InternalAllocatorRoot() {
+     return opts;
+   }());
+ 
++PA_COMPONENT_EXPORT(PARTITION_ALLOC)
++PartitionRoot& InternalAllocatorRoot() {
+   return *allocator;
+ }
+ 

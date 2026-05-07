@@ -1,0 +1,44 @@
+diff --git a/mojo/core/embedder/embedder.cc b/mojo/core/embedder/embedder.cc
+index 53968a70b9424..5aea2533898b0 100644
+--- a/mojo/core/embedder/embedder.cc
++++ b/mojo/core/embedder/embedder.cc
+@@ -38,12 +38,7 @@ namespace mojo::core {
+ namespace {
+ 
+ #if BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
+-#if BUILDFLAG(IS_CHROMEOS) && !defined(ENABLE_IPCZ_ON_CHROMEOS)
+ std::atomic<bool> g_mojo_ipcz_enabled{false};
+-#else
+-// Default to enabled even if InitFeatures() is never called.
+-std::atomic<bool> g_mojo_ipcz_enabled{true};
+-#endif
+ 
+ bool g_mojo_ipcz_force_disabled = false;
+ 
+diff --git a/mojo/core/embedder/features.cc b/mojo/core/embedder/features.cc
+index abfc12bd54528..6037f9c41c13a 100644
+--- a/mojo/core/embedder/features.cc
++++ b/mojo/core/embedder/features.cc
+@@ -35,11 +35,7 @@ BASE_FEATURE(kMojoAvoidRandomPipeId,
+         // BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
+-#if BUILDFLAG(IS_CHROMEOS)
+ BASE_FEATURE(kMojoIpcz, base::FEATURE_DISABLED_BY_DEFAULT);
+-#else
+-BASE_FEATURE(kMojoIpcz, base::FEATURE_ENABLED_BY_DEFAULT);
+-#endif
+ #endif  // BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
+ 
+ BASE_FEATURE(kMojoIpczMemV2, base::FEATURE_DISABLED_BY_DEFAULT);
+diff --git a/mojo/features.gni b/mojo/features.gni
+index ce164c3cd36ec..f54981fcb54c3 100644
+--- a/mojo/features.gni
++++ b/mojo/features.gni
+@@ -18,5 +18,5 @@ declare_args() {
+   #
+   # We also enable this by default for fuzzer builds, since some active fuzzers
+   # require the legacy implementation.
+-  mojo_support_legacy_core = target_os == "chromeos" || use_libfuzzer
++  mojo_support_legacy_core = target_os == "chromeos" || use_libfuzzer || is_win
+ }

@@ -1,0 +1,44 @@
+diff --git a/third_party/vulkan-loader/src/loader/loader_windows.c b/third_party/vulkan-loader/src/loader/loader_windows.c
+index 91cdfd00b..680b7d8b7 100644
+--- a/third_party/vulkan-loader/src/loader/loader_windows.c
++++ b/third_party/vulkan-loader/src/loader/loader_windows.c
+@@ -63,6 +63,12 @@
+ typedef HRESULT(APIENTRY *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
+ PFN_CreateDXGIFactory1 fpCreateDXGIFactory1;
+ 
++HRESULT dyn_CreateDXGIFactory1(REFIID riid, void **ppFactory) {
++    if (fpCreateDXGIFactory1 != NULL)
++        return fpCreateDXGIFactory1(riid, ppFactory);
++
++    return DXGI_ERROR_NOT_FOUND;
++}
+ // Empty function just so windows_initialization can find the current module location
+ void function_for_finding_the_current_module(void) {}
+ 
+@@ -416,7 +422,7 @@ VkResult windows_get_registry_files(const struct loader_instance *inst, char *lo
+     assert(reg_data != NULL && "windows_get_registry_files: reg_data is a NULL pointer");
+ 
+     if (is_driver) {
+-        HRESULT hres = fpCreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&dxgi_factory);
++        HRESULT hres = dyn_CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&dxgi_factory);
+         if (hres != S_OK) {
+             loader_log(inst, VULKAN_LOADER_WARN_BIT | log_target_flag, 0,
+                        "windows_get_registry_files: Failed to create dxgi factory for ICD registry verification. No ICDs will be "
+@@ -937,7 +943,7 @@ VkResult windows_read_sorted_physical_devices(struct loader_instance *inst, uint
+     uint32_t icd_phys_devs_array_size = 0;
+     struct loader_icd_term *icd_term = NULL;
+     IDXGIFactory6 *dxgi_factory = NULL;
+-    HRESULT hres = fpCreateDXGIFactory1(&IID_IDXGIFactory6, (void **)&dxgi_factory);
++    HRESULT hres = dyn_CreateDXGIFactory1(&IID_IDXGIFactory6, (void **)&dxgi_factory);
+     if (hres != S_OK) {
+         loader_log(inst, VULKAN_LOADER_INFO_BIT, 0, "Failed to create DXGI factory 6. Physical devices will not be sorted");
+         goto out;
+@@ -1019,7 +1025,7 @@ out:
+ VkLoaderFeatureFlags windows_initialize_dxgi(void) {
+     VkLoaderFeatureFlags feature_flags = 0;
+     IDXGIFactory6 *dxgi_factory = NULL;
+-    HRESULT hres = fpCreateDXGIFactory1(&IID_IDXGIFactory6, (void **)&dxgi_factory);
++    HRESULT hres = dyn_CreateDXGIFactory1(&IID_IDXGIFactory6, (void **)&dxgi_factory);
+     if (hres == S_OK) {
+         feature_flags |= VK_LOADER_FEATURE_PHYSICAL_DEVICE_SORTING;
+         dxgi_factory->lpVtbl->Release(dxgi_factory);

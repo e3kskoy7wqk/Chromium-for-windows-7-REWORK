@@ -1,0 +1,284 @@
+diff --git a/base/test/scoped_os_info_override_win.cc b/base/test/scoped_os_info_override_win.cc
+index 0c20775b0736e..8688909dc7c7e 100644
+--- a/base/test/scoped_os_info_override_win.cc
++++ b/base/test/scoped_os_info_override_win.cc
+@@ -98,6 +98,54 @@ ScopedOSInfoOverride::UniqueOsInfo ScopedOSInfoOverride::CreateInfoOfType(
+ 
+       os_type = PRODUCT_STANDARD_SERVER;
+       break;
++    case Type::kWin81Pro:
++      version_info.dwMajorVersion = 6;
++      version_info.dwMinorVersion = 3;
++      version_info.dwBuildNumber = 9600;
++      version_info.wServicePackMajor = 0;
++      version_info.wServicePackMinor = 0;
++      version_info.szCSDVersion[0] = 0;
++      version_info.wProductType = VER_NT_WORKSTATION;
++      version_info.wSuiteMask = VER_SUITE_PERSONAL;
++
++      system_info.wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
++      system_info.dwNumberOfProcessors = 1;
++      system_info.dwAllocationGranularity = 64 * 1024;
++
++      os_type = PRODUCT_PROFESSIONAL;
++      break;
++    case Type::kWinServer2012R2:
++      version_info.dwMajorVersion = 6;
++      version_info.dwMinorVersion = 3;
++      version_info.dwBuildNumber = 9600;
++      version_info.wServicePackMajor = 0;
++      version_info.wServicePackMinor = 0;
++      version_info.szCSDVersion[0] = 0;
++      version_info.wProductType = VER_NT_SERVER;
++      version_info.wSuiteMask = VER_SUITE_ENTERPRISE;
++
++      system_info.wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
++      system_info.dwNumberOfProcessors = 2;
++      system_info.dwAllocationGranularity = 64 * 1024;
++
++      os_type = PRODUCT_STANDARD_SERVER;
++      break;
++    case Type::kWin7ProSP1:
++      version_info.dwMajorVersion = 6;
++      version_info.dwMinorVersion = 1;
++      version_info.dwBuildNumber = 7601;
++      version_info.wServicePackMajor = 1;
++      version_info.wServicePackMinor = 0;
++      wcscpy_s(version_info.szCSDVersion, L"Service Pack 1");
++      version_info.wProductType = VER_NT_WORKSTATION;
++      version_info.wSuiteMask = VER_SUITE_PERSONAL;
++
++      system_info.wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
++      system_info.dwNumberOfProcessors = 1;
++      system_info.dwAllocationGranularity = 64 * 1024;
++
++      os_type = PRODUCT_PROFESSIONAL;
++      break;
+   }
+ 
+   return UniqueOsInfo(new base::win::OSInfo(version_info, system_info, os_type),
+diff --git a/base/test/scoped_os_info_override_win.h b/base/test/scoped_os_info_override_win.h
+index e9488a3aeaf66..8958da249e95f 100644
+--- a/base/test/scoped_os_info_override_win.h
++++ b/base/test/scoped_os_info_override_win.h
+@@ -33,6 +33,9 @@ class ScopedOSInfoOverride {
+     kWin10Pro,
+     kWin10Home,
+     kWinServer2016,
++    kWin81Pro,
++    kWinServer2012R2,
++    kWin7ProSP1,
+     kWin11HomeN,
+   };
+ 
+diff --git a/chrome/browser/ui/webui/version/version_handler_win_unittest.cc b/chrome/browser/ui/webui/version/version_handler_win_unittest.cc
+index 2ff9ed7de1a84..6d636e1bc14ed 100644
+--- a/chrome/browser/ui/webui/version/version_handler_win_unittest.cc
++++ b/chrome/browser/ui/webui/version/version_handler_win_unittest.cc
+@@ -96,3 +96,38 @@ TEST_F(WebUIWindowsVersion, WinServer2016) {
+   EXPECT_EQ(VersionHandlerWindows::GetFullWindowsVersionForTesting(),
+             "Server OS Version 1001 (Build 17134.1555)");
+ }
++
++TEST_F(WebUIWindowsVersion, Win81Pro) {
++  ubr_key.WriteValue(L"UBR", 0UL);
++  ubr_key.WriteValue(L"ReleaseId", L"1001");
++  base::test::ScopedOSInfoOverride os(
++      base::test::ScopedOSInfoOverride::Type::kWin81Pro);
++  EXPECT_EQ(VersionHandlerWindows::GetFullWindowsVersionForTesting(),
++            "8.1 Version 1001 (Build 9600)");
++}
++
++TEST_F(WebUIWindowsVersion, WinServer2012R2) {
++  ubr_key.WriteValue(L"UBR", 0UL);
++  ubr_key.WriteValue(L"ReleaseId", L"1001");
++  base::test::ScopedOSInfoOverride os(
++      base::test::ScopedOSInfoOverride::Type::kWinServer2012R2);
++  EXPECT_EQ(VersionHandlerWindows::GetFullWindowsVersionForTesting(),
++            "Server 2012 R2 Version 1001 (Build 9600)");
++}
++
++TEST_F(WebUIWindowsVersion, Win7ProSP1) {
++  ubr_key.WriteValue(L"UBR", 0UL);
++  ubr_key.WriteValue(L"ReleaseId", L"1001");
++  base::test::ScopedOSInfoOverride os(
++      base::test::ScopedOSInfoOverride::Type::kWin7ProSP1);
++  EXPECT_EQ(VersionHandlerWindows::GetFullWindowsVersionForTesting(),
++            "7 Service Pack 1 Version 1001 (Build 7601)");
++}
++
++TEST_F(WebUIWindowsVersion, Win7ProSP1NoReleaseId) {
++  ubr_key.WriteValue(L"UBR", 0UL);
++  base::test::ScopedOSInfoOverride os(
++      base::test::ScopedOSInfoOverride::Type::kWin7ProSP1);
++  EXPECT_EQ(VersionHandlerWindows::GetFullWindowsVersionForTesting(),
++            "7 Service Pack 1 (Build 7601)");
++}
+diff --git a/chrome/services/system_signals/win/win_system_signals_service.cc b/chrome/services/system_signals/win/win_system_signals_service.cc
+index 9ca9453413593..7c8ea3c410037 100644
+--- a/chrome/services/system_signals/win/win_system_signals_service.cc
++++ b/chrome/services/system_signals/win/win_system_signals_service.cc
+@@ -51,10 +51,19 @@ void WinSystemSignalsService::GetAntiVirusSignals(
+   }
+ 
+   std::vector<device_signals::AvProduct> av_products;
+-  auto response = wsc_client_->GetAntiVirusProducts();
++  if (os_info->version() >= base::win::Version::WIN8) {
++    // WSC is only supported on Win8+.
++    auto response = wsc_client_->GetAntiVirusProducts();
+ 
+-  LogWscAvResponse(response);
+-  av_products = std::move(response.av_products);
++    LogWscAvResponse(response);
++    av_products = std::move(response.av_products);
++  } else {
++    // Fallback to an undocumented WMI table on Win7 and earlier.
++    auto response = wmi_client_->GetAntiVirusProducts();
++
++    LogWmiAvResponse(response);
++    av_products = std::move(response.av_products);
++  }
+ 
+   std::move(callback).Run(std::move(av_products));
+ }
+diff --git a/chrome/services/system_signals/win/win_system_signals_service_unittest.cc b/chrome/services/system_signals/win/win_system_signals_service_unittest.cc
+index d076135f97daa..1f3d2975db940 100644
+--- a/chrome/services/system_signals/win/win_system_signals_service_unittest.cc
++++ b/chrome/services/system_signals/win/win_system_signals_service_unittest.cc
+@@ -97,9 +97,10 @@ TEST_F(WinSystemSignalsServiceTest, GetFileSystemSignals) {
+   EXPECT_EQ(results[0], response[0]);
+ }
+ 
+-// Tests that AV products cannot be retrieved on Win Server environments.
++// Tests that AV products cannot be retrieve on Win Server environments.
+ TEST_F(WinSystemSignalsServiceTest, GetAntiVirusSignals_Server) {
+-  std::array<base::test::ScopedOSInfoOverride::Type, 2> server_versions = {
++  std::array<base::test::ScopedOSInfoOverride::Type, 3> server_versions = {
++      base::test::ScopedOSInfoOverride::Type::kWinServer2012R2,
+       base::test::ScopedOSInfoOverride::Type::kWinServer2016,
+       base::test::ScopedOSInfoOverride::Type::kWinServer2022,
+   };
+@@ -115,9 +116,10 @@ TEST_F(WinSystemSignalsServiceTest, GetAntiVirusSignals_Server) {
+   }
+ }
+ 
+-// Tests that AV products are retrieved through WSC on Win10 and above.
++// Tests that AV products are retrieved through WSC on Win8 and above.
+ TEST_F(WinSystemSignalsServiceTest, GetAntiVirusSignals_Wsc_Success) {
+-  std::array<base::test::ScopedOSInfoOverride::Type, 4> win_versions = {
++  std::array<base::test::ScopedOSInfoOverride::Type, 5> win_versions = {
++      base::test::ScopedOSInfoOverride::Type::kWin81Pro,
+       base::test::ScopedOSInfoOverride::Type::kWin10Pro,
+       base::test::ScopedOSInfoOverride::Type::kWin10Pro21H1,
+       base::test::ScopedOSInfoOverride::Type::kWin11Home,
+@@ -233,6 +235,110 @@ TEST_F(WinSystemSignalsServiceTest, GetAntiVirusSignals_Wsc_MixedParsingError) {
+       /*error_rate=*/50, 1);
+ }
+ 
++// Tests that AV products are retrieved via WMI on Win7.
++// TODO(crbug.com/1372568): Fix flaky test.
++TEST_F(WinSystemSignalsServiceTest, DISABLED_GetAntiVirusSignals_Win7_Success) {
++  device_signals::AvProduct fake_av_product;
++  fake_av_product.display_name = "some display name";
++  fake_av_product.product_id = "some product id";
++  fake_av_product.state = device_signals::AvProductState::kOn;
++
++  device_signals::WmiAvProductsResponse fake_response;
++  fake_response.av_products.push_back(fake_av_product);
++
++  EXPECT_CALL(*wmi_client_, GetAntiVirusProducts())
++      .WillOnce(Return(fake_response));
++
++  base::test::TestFuture<const std::vector<device_signals::AvProduct>&> future;
++
++  // Override OS version after initializing `future` to prevent running into
++  // a DCHECK in ScopedWinrtInitializer.
++  os_info_override_.emplace(
++      base::test::ScopedOSInfoOverride::Type::kWin7ProSP1);
++
++  win_system_signals_service_->GetAntiVirusSignals(future.GetCallback());
++
++  const auto& av_products = future.Get();
++  EXPECT_EQ(av_products.size(), fake_response.av_products.size());
++  EXPECT_EQ(av_products[0].product_id, fake_response.av_products[0].product_id);
++
++  histogram_tester_.ExpectUniqueSample(
++      "Enterprise.SystemSignals.Collection.WMI.AntiVirus.ParsingError.Rate",
++      /*error_rate=*/0, 1);
++}
++
++// Tests when a query error occurs when querying AVs from WMI on Win7.
++// TODO(crbug.com/1372568): Fix flaky test.
++TEST_F(WinSystemSignalsServiceTest,
++       DISABLED_GetAntiVirusSignals_Win7_QueryError) {
++  device_signals::WmiAvProductsResponse fake_response;
++  fake_response.query_error = base::win::WmiError::kFailedToCreateInstance;
++
++  EXPECT_CALL(*wmi_client_, GetAntiVirusProducts())
++      .WillOnce(Return(fake_response));
++
++  base::test::TestFuture<const std::vector<device_signals::AvProduct>&> future;
++
++  // Override OS version after initializing `future` to prevent running into
++  // a DCHECK in ScopedWinrtInitializer.
++  os_info_override_.emplace(
++      base::test::ScopedOSInfoOverride::Type::kWin7ProSP1);
++
++  win_system_signals_service_->GetAntiVirusSignals(future.GetCallback());
++
++  const auto& av_products = future.Get();
++  EXPECT_TRUE(av_products.empty());
++
++  histogram_tester_.ExpectUniqueSample(
++      "Enterprise.SystemSignals.Collection.WMI.AntiVirus.QueryError",
++      fake_response.query_error.value(), 1);
++}
++
++// Tests when items and parsing error are returned when querying AVs from WMI on
++// Win7.
++// TODO(crbug.com/1372568): Fix flaky test.
++TEST_F(WinSystemSignalsServiceTest,
++       DISABLED_GetAntiVirusSignals_Win7_MixedParsingErrors) {
++  device_signals::AvProduct fake_av_product;
++  fake_av_product.display_name = "some display name";
++  fake_av_product.product_id = "some product id";
++  fake_av_product.state = device_signals::AvProductState::kOn;
++
++  // Adding 2 success and 2 failures, so the error rate should be 50%.
++  device_signals::WmiAvProductsResponse fake_response;
++  fake_response.av_products.push_back(fake_av_product);
++  fake_response.av_products.push_back(fake_av_product);
++  fake_response.parsing_errors.push_back(
++      device_signals::WmiParsingError::kFailedToGetName);
++  fake_response.parsing_errors.push_back(
++      device_signals::WmiParsingError::kStateInvalid);
++
++  EXPECT_CALL(*wmi_client_, GetAntiVirusProducts())
++      .WillOnce(Return(fake_response));
++
++  base::test::TestFuture<const std::vector<device_signals::AvProduct>&> future;
++
++  // Override OS version after initializing `future` to prevent running into
++  // a DCHECK in ScopedWinrtInitializer.
++  os_info_override_.emplace(
++      base::test::ScopedOSInfoOverride::Type::kWin7ProSP1);
++
++  win_system_signals_service_->GetAntiVirusSignals(future.GetCallback());
++
++  const auto& av_products = future.Get();
++  EXPECT_EQ(av_products.size(), fake_response.av_products.size());
++
++  histogram_tester_.ExpectBucketCount(
++      "Enterprise.SystemSignals.Collection.WMI.AntiVirus.ParsingError",
++      device_signals::WmiParsingError::kFailedToGetName, 1);
++  histogram_tester_.ExpectBucketCount(
++      "Enterprise.SystemSignals.Collection.WMI.AntiVirus.ParsingError",
++      device_signals::WmiParsingError::kStateInvalid, 1);
++  histogram_tester_.ExpectBucketCount(
++      "Enterprise.SystemSignals.Collection.WMI.AntiVirus.ParsingError.Rate",
++      /*error_rate=*/50, 1);
++}
++
+ // Tests that Hotfix information is retrieved via WMI.
+ TEST_F(WinSystemSignalsServiceTest, GetHotfixSignals_Empty) {
+   device_signals::InstalledHotfix fake_hotfix{"some hotfix id"};

@@ -1,0 +1,133 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.cc b/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.cc
+index 8227a641d2638..373b1ee4debf2 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.cc
+@@ -65,9 +93,9 @@ PA_NOINLINE void HandlePoolAllocFailure() {
+     HandlePoolAllocFailureOutOfVASpace();
+   } else if (alloc_page_error_code == ERROR_COMMITMENT_LIMIT ||
+              alloc_page_error_code == ERROR_COMMITMENT_MINIMUM) {
+-    // Should not happen, since as of Windows 8.1+, reserving address space
+-    // should not be charged against the commit limit, aside from a very small
+-    // amount per 64kiB block. Keep this path anyway, to check in crash reports.
++    // On Windows <8.1, MEM_RESERVE increases commit charge to account for
++    // not-yet-committed PTEs needed to cover that VA space, if it was to be
++    // committed (see crbug.com/1101421#c16).
+     HandlePoolAllocFailureOutOfCommitCharge();
+   } else
+ #endif  // PA_BUILDFLAG(IS_WIN)
+@@ -91,10 +119,35 @@ std::ptrdiff_t PartitionAddressSpace::brp_pool_shadow_offset_ = 0;
+ #endif  // PA_CONFIG(MOVE_METADATA_OUT_OF_GIGACAGE)
+ 
+ #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
+-#if !PA_BUILDFLAG(IS_IOS)
+-#error Dynamic pool size is only supported on iOS.
+-#endif
+-
++#if PA_BUILDFLAG(IS_WIN)
++bool PartitionAddressSpace::IsLegacyWindowsVersion() {
++  // Use ::RtlGetVersion instead of ::GetVersionEx or helpers from
++  // VersionHelpers.h because those alternatives change their behavior depending
++  // on whether or not the calling executable has a compatibility manifest
++  // resource. It's better for the allocator to not depend on that to decide the
++  // pool size.
++  // Assume legacy if ::RtlGetVersion is not available or it fails.
++  using RtlGetVersion = LONG(WINAPI*)(OSVERSIONINFOEX*);
++  const RtlGetVersion rtl_get_version = reinterpret_cast<RtlGetVersion>(
++      ::GetProcAddress(::GetModuleHandle(L"ntdll.dll"), "RtlGetVersion"));
++  if (!rtl_get_version) {
++    return true;
++  }
++
++  OSVERSIONINFOEX version_info = {};
++  version_info.dwOSVersionInfoSize = sizeof(version_info);
++  if (rtl_get_version(&version_info) != ERROR_SUCCESS) {
++    return true;
++  }
++
++  // Anything prior to Windows 8.1 is considered legacy for the allocator.
++  // Windows 8.1 is major 6 with minor 3.
++  return version_info.dwMajorVersion < 6 ||
++         (version_info.dwMajorVersion == 6 && version_info.dwMinorVersion < 3);
++}
++#endif  // PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
++
++#if PA_BUILDFLAG(IS_IOS)
+ bool PartitionAddressSpace::IsIOSTestProcess() {
+   // On iOS, only applications with the extended virtual addressing entitlement
+   // can use a large address space. Since Earl Grey test runner apps cannot get
+@@ -136,6 +161,7 @@ PA_ALWAYS_INLINE size_t PartitionAddressSpace::RegularPoolSize() {
+ 
+   return has_suffix("Runner") || has_suffix("ios_web_view_inttests");
+ }
++#endif  // PA_BUILDFLAG(IS_IOS)
+ #endif  // PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
+ 
+ void PartitionAddressSpace::Init() {
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h b/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h
+index 0774a0d3f3f1d..07e26dc18b878 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h
+@@ -136,9 +161,16 @@ PA_ALWAYS_INLINE size_t PartitionAddressSpace::RegularPoolSize() {
+   static bool IsIOSTestProcess();
+ 
+  public:
++#if PA_BUILDFLAG(IS_IOS)
+   PA_ALWAYS_INLINE static size_t CorePoolSize() {
+     return IsIOSTestProcess() ? kCorePoolSizeForIOSTestProcess : kCorePoolSize;
+   }
++#else
++  static bool IsLegacyWindowsVersion();
++PA_ALWAYS_INLINE static size_t CorePoolSize() {
++  return IsLegacyWindowsVersion() ? kBRPPoolSizeForLegacyWindows : kCorePoolSize;
++}
++#endif  // PA_BUILDFLAG(IS_IOS)
+ #else
+   // The pool sizes should be as large as maximum whenever possible.
+   PA_ALWAYS_INLINE static constexpr size_t CorePoolSize() {
+@@ -267,6 +267,16 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
+   static constexpr size_t kThreadIsolatedPoolSize = kGiB / 4;
+   static_assert(base::bits::HasSingleBit(kThreadIsolatedPoolSize));
+ #endif
++#if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
++  // We can't afford pool sizes as large as kPoolMaxSize on Windows <8.1 (see
++  // crbug.com/1101421 and crbug.com/1217759).
++  static constexpr size_t kRegularPoolSizeForLegacyWindows = 4 * kGiB;
++  static constexpr size_t kBRPPoolSizeForLegacyWindows = 4 * kGiB;
++  static_assert(kRegularPoolSizeForLegacyWindows < kCorePoolSize);
++  static_assert(kBRPPoolSizeForLegacyWindows < kCorePoolSize);
++  static_assert(base::bits::HasSingleBit(kRegularPoolSizeForLegacyWindows));
++  static_assert(base::bits::HasSingleBit(kBRPPoolSizeForLegacyWindows));
++#endif  // PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
+   static constexpr size_t kConfigurablePoolMaxSize = kPoolMaxSize;
+   static constexpr size_t kConfigurablePoolMinSize = 1 * kGiB;
+   static_assert(kConfigurablePoolMinSize <= kConfigurablePoolMaxSize);
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
+index 5e6a00fc76ba7..387f6047697a2 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
+@@ -53,18 +53,23 @@ static_assert(sizeof(void*) != 8, "");
+ static_assert(sizeof(void*) != 8, "");
+ #endif  // PA_CONFIG(HAS_64_BITS_POINTERS)
+ 
+-#if PA_BUILDFLAG(HAS_64_BIT_POINTERS) && PA_BUILDFLAG(IS_IOS)
++#if PA_BUILDFLAG(HAS_64_BIT_POINTERS) && (PA_BUILDFLAG(IS_IOS) || PA_BUILDFLAG(IS_WIN))
+ // Allow PA to select an alternate pool size at run-time before initialization,
+ // rather than using a single constexpr value.
+ //
+ // This is needed on iOS because iOS test processes can't handle large pools
+ // (see crbug.com/1250788).
+ //
++// This is needed on Windows, because OS versions <8.1 incur commit charge even
++// on reserved address space, thus don't handle large pools well (see
++// crbug.com/1101421 and crbug.com/1217759).
++//
+ // This setting is specific to 64-bit, as 32-bit has a different implementation.
+ #define PA_CONFIG_DYNAMICALLY_SELECT_POOL_SIZE() 1
+ #else
+ #define PA_CONFIG_DYNAMICALLY_SELECT_POOL_SIZE() 0
+-#endif  // PA_BUILDFLAG(HAS_64_BIT_POINTERS) && PA_BUILDFLAG(IS_IOS)
++#endif  // PA_BUILDFLAG(HAS_64_BIT_POINTERS) && (PA_BUILDFLAG(IS_IOS) ||
++        // PA_BUILDFLAG(IS_WIN))
+ 
+ // POSIX is not only UNIX, e.g. macOS and other OSes. We do use Linux-specific
+ // features such as futex(2).

@@ -1,0 +1,1 @@
+ICU-13845 Windows timezone detection: When DST is off, map to an Etc/GMT+-hh zone.    2020/9/30 4:57:39    b4d056ab935921d615e93db159f842179b39acfb

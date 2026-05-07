@@ -1,0 +1,19 @@
+diff --git a/third_party/crashpad/crashpad/snapshot/win/process_reader_win.cc b/third_party/crashpad/crashpad/snapshot/win/process_reader_win.cc
+index f8a2f92813436..4df9310f4fcd0 100644
+--- a/third_party/crashpad/crashpad/snapshot/win/process_reader_win.cc
++++ b/third_party/crashpad/crashpad/snapshot/win/process_reader_win.cc
+@@ -162,10 +162,13 @@ bool FillThreadContextAndSuspendCount(HANDLE thread_handle,
+ 
+ #if defined(ARCH_CPU_64_BITS)
+ bool ProcessReaderWin::ThreadContext::InitializeWow64(HANDLE thread_handle) {
++typedef BOOL (WINAPI *lpfnWow64GetThreadContext)(__in HANDLE hThread, __inout PWOW64_CONTEXT lpContext);
++lpfnWow64GetThreadContext fnWow64GetThreadContext = NULL;
++      fnWow64GetThreadContext = (lpfnWow64GetThreadContext)::GetProcAddress(::GetModuleHandle(L"Kernel32.dll"), "Wow64GetThreadContext");
+   data_.resize(sizeof(WOW64_CONTEXT));
+   initialized_ = true;
+   context<WOW64_CONTEXT>()->ContextFlags = CONTEXT_ALL;
+-  if (!Wow64GetThreadContext(thread_handle, context<WOW64_CONTEXT>())) {
++  if (fnWow64GetThreadContext == NULL || !fnWow64GetThreadContext(thread_handle, context<WOW64_CONTEXT>())) {
+     PLOG(ERROR) << "Wow64GetThreadContext";
+     return false;
+   }

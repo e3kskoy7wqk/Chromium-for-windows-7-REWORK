@@ -1,0 +1,1 @@
+Remove legacy shellexecute pinning from Installer utils.    2024/3/19 6:20:16    7e816638559c70f903630fd0142e81e97eca8541

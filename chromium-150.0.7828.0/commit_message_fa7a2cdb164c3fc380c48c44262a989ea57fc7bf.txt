@@ -1,0 +1,1 @@
+win: Add taskbar_manager for taskbar pinning    2025/3/27 6:56:51    fa7a2cdb164c3fc380c48c44262a989ea57fc7bf

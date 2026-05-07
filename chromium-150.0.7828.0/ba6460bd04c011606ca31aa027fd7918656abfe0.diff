@@ -1,0 +1,333 @@
+diff --git a/chrome/chrome_elf/nt_registry/nt_registry.cc b/chrome/chrome_elf/nt_registry/nt_registry.cc
+index d0c71f9a0cc91..cde3d6d254bae 100644
+--- a/chrome/chrome_elf/nt_registry/nt_registry.cc
++++ b/chrome/chrome_elf/nt_registry/nt_registry.cc
+@@ -21,6 +21,7 @@ bool g_system_install = false;
+ bool g_wow64_proc = false;
+ wchar_t g_kRegPathHKLM[] = L"\\Registry\\Machine\\";
+ wchar_t g_kRegPathHKCU[nt::g_kRegMaxPathLen + 1] = L"";
++wchar_t g_current_user_sid_string[nt::g_kRegMaxPathLen + 1] = L"";
+ 
+ // Max number of tries for system API calls when STATUS_BUFFER_OVERFLOW or
+ // STATUS_BUFFER_TOO_SMALL can be returned.
+@@ -78,6 +79,10 @@ bool InitNativeRegApi() {
+   ::wcsncat(g_kRegPathHKCU, current_user_reg_path.Buffer, nt::g_kRegMaxPathLen);
+   ::wcsncat(g_kRegPathHKCU, L"\\",
+             (nt::g_kRegMaxPathLen - ::wcslen(g_kRegPathHKCU)));
++  // Keep the sid string as well.
++  wchar_t* ptr = ::wcsrchr(current_user_reg_path.Buffer, L'\\');
++  ptr++;
++  ::wcsncpy(g_current_user_sid_string, ptr, nt::g_kRegMaxPathLen);
+   ::RtlFreeUnicodeString(&current_user_reg_path);
+ 
+   // Figure out if this is a system or user install.
+@@ -1044,10 +1049,100 @@ bool SetRegValueMULTISZ(ROOT_KEY root,
+   return true;
+ }
+ 
++//------------------------------------------------------------------------------
++// Enumeration Support
++//------------------------------------------------------------------------------
++
++bool QueryRegEnumerationInfo(HANDLE key, ULONG* out_subkey_count) {
++  if (!g_initialized && !InitNativeRegApi())
++    return false;
++
++  // Use a loop here, to be a little more tolerant of concurrent registry
++  // changes.
++  NTSTATUS ntstatus = STATUS_UNSUCCESSFUL;
++  int tries = 0;
++  // Start with sizeof the structure.  It's very common for the variable sized
++  // "Class" element to be of length 0.
++  KEY_FULL_INFORMATION* key_info = nullptr;
++  DWORD size_needed = sizeof(*key_info);
++  std::vector<BYTE> buffer(size_needed);
++  do {
++    buffer.resize(size_needed);
++    key_info = reinterpret_cast<KEY_FULL_INFORMATION*>(buffer.data());
++
++    ntstatus = ::NtQueryKey(key, KeyFullInformation, key_info, size_needed,
++                            &size_needed);
++  } while ((ntstatus == STATUS_BUFFER_OVERFLOW ||
++            ntstatus == STATUS_BUFFER_TOO_SMALL) &&
++           ++tries < kMaxTries);
++
++  if (!NT_SUCCESS(ntstatus))
++    return false;
++
++  // Move desired information to out variables.
++  *out_subkey_count = key_info->SubKeys;
++
++  return true;
++}
++
++bool QueryRegSubkey(HANDLE key,
++                    ULONG subkey_index,
++                    std::wstring* out_subkey_name) {
++  if (!g_initialized && !InitNativeRegApi())
++    return false;
++
++  // Use a loop here, to be a little more tolerant of concurrent registry
++  // changes.
++  NTSTATUS ntstatus = STATUS_UNSUCCESSFUL;
++  int tries = 0;
++  // Start with sizeof the structure, plus 12 characters.  It's very common for
++  // key names to be < 12 characters (without being inefficient as an initial
++  // allocation).
++  KEY_BASIC_INFORMATION* subkey_info = nullptr;
++  DWORD size_needed = sizeof(*subkey_info) + (12 * sizeof(wchar_t));
++  std::vector<BYTE> buffer(size_needed);
++  do {
++    buffer.resize(size_needed);
++    subkey_info = reinterpret_cast<KEY_BASIC_INFORMATION*>(buffer.data());
++
++    ntstatus = ::NtEnumerateKey(key, subkey_index, KeyBasicInformation,
++                                subkey_info, size_needed, &size_needed);
++  } while ((ntstatus == STATUS_BUFFER_OVERFLOW ||
++            ntstatus == STATUS_BUFFER_TOO_SMALL) &&
++           ++tries < kMaxTries);
++
++  if (!NT_SUCCESS(ntstatus))
++    return false;
++
++  // Move desired information to out variables.
++  // NOTE: NameLength is size of Name array in bytes.  Name array is also
++  //       NOT null terminated!
++  BYTE* name = reinterpret_cast<BYTE*>(subkey_info->Name);
++  std::vector<BYTE> content(name, name + subkey_info->NameLength);
++  EnsureTerminatedSZ(&content, false);
++  out_subkey_name->assign(reinterpret_cast<wchar_t*>(content.data()));
++
++  return true;
++}
++
+ //------------------------------------------------------------------------------
+ // Utils
+ //------------------------------------------------------------------------------
+ 
++const wchar_t* GetCurrentUserSidString() {
++  if (!g_initialized && !InitNativeRegApi())
++    return nullptr;
++
++  return g_current_user_sid_string;
++}
++
++bool IsCurrentProcWow64() {
++  if (!g_initialized && !InitNativeRegApi())
++    return false;
++
++  return g_wow64_proc;
++}
++
+ bool SetTestingOverride(ROOT_KEY root, const std::wstring& new_path) {
+   if (!g_initialized && !InitNativeRegApi())
+     return false;
+diff --git a/chrome/chrome_elf/nt_registry/nt_registry.h b/chrome/chrome_elf/nt_registry/nt_registry.h
+index 200175d942be3..a38d75f984608 100644
+--- a/chrome/chrome_elf/nt_registry/nt_registry.h
++++ b/chrome/chrome_elf/nt_registry/nt_registry.h
+@@ -33,7 +33,7 @@
+ namespace nt {
+ 
+ // Windows registry maximum lengths (in chars).  Not including null char.
+-// https://learn.microsoft.com/en-us/windows/win32/sysinfo/registry-element-size-limits
++// https://msdn.microsoft.com/en-us/library/windows/desktop/ms724872(v=vs.85).aspx
+ constexpr size_t g_kRegMaxPathLen = 255;
+ constexpr size_t g_kRegMaxValueName = 16383;
+ 
+@@ -228,10 +228,35 @@ bool SetRegValueMULTISZ(ROOT_KEY root,
+                         const wchar_t* value_name,
+                         const std::vector<std::wstring>& values);
+ 
++//------------------------------------------------------------------------------
++// Enumeration Support
++//------------------------------------------------------------------------------
++
++// Query key information for subkey enumeration.
++// - Key handle should have been opened with OpenRegKey (with at least
++//   KEY_ENUMERATE_SUB_KEYS access rights).
++// - Currently only returns the number of subkeys.  Use |subkey_count|
++//   in a loop for calling QueryRegSubkey.
++bool QueryRegEnumerationInfo(HANDLE key, ULONG* out_subkey_count);
++
++// Enumerate subkeys by index.
++// - Key handle should have been opened with OpenRegKey (with at least
++//   KEY_ENUMERATE_SUB_KEYS access rights).
++// - Get subkey count by calling QueryRegEnumerationInfo.
++bool QueryRegSubkey(HANDLE key,
++                    ULONG subkey_index,
++                    std::wstring* out_subkey_name);
++
+ //------------------------------------------------------------------------------
+ // Utils
+ //------------------------------------------------------------------------------
+ 
++// Returns the current user SID in string form.
++const wchar_t* GetCurrentUserSidString();
++
++// Returns true if this process is WOW64.
++bool IsCurrentProcWow64();
++
+ // Setter function for test suites that use reg redirection.
+ bool SetTestingOverride(ROOT_KEY root, const std::wstring& new_path);
+ 
+diff --git a/chrome/chrome_elf/nt_registry/nt_registry_functions.h b/chrome/chrome_elf/nt_registry/nt_registry_functions.h
+index 6dfb149d9ef89..bbbd737a7006e 100644
+--- a/chrome/chrome_elf/nt_registry/nt_registry_functions.h
++++ b/chrome/chrome_elf/nt_registry/nt_registry_functions.h
+@@ -8,6 +8,12 @@
+ 
+ #include <winternl.h>
+ 
++typedef enum _KEY_INFORMATION_CLASS {
++  KeyBasicInformation = 0,
++  KeyFullInformation = 2
++} KEY_INFORMATION_CLASS,
++    *PKEY_INFORMATION_CLASS;
++
+ typedef enum _KEY_VALUE_INFORMATION_CLASS {
+   KeyValueFullInformation = 1
+ } KEY_VALUE_INFORMATION_CLASS,
+@@ -22,6 +28,27 @@ typedef struct _KEY_VALUE_FULL_INFORMATION {
+   WCHAR Name[1];
+ } KEY_VALUE_FULL_INFORMATION, *PKEY_VALUE_FULL_INFORMATION;
+ 
++typedef struct _KEY_BASIC_INFORMATION {
++  LARGE_INTEGER LastWriteTime;
++  ULONG TitleIndex;
++  ULONG NameLength;
++  WCHAR Name[1];
++} KEY_BASIC_INFORMATION, *PKEY_BASIC_INFORMATION;
++
++typedef struct _KEY_FULL_INFORMATION {
++  LARGE_INTEGER LastWriteTime;
++  ULONG TitleIndex;
++  ULONG ClassOffset;
++  ULONG ClassLength;
++  ULONG SubKeys;
++  ULONG MaxNameLen;
++  ULONG MaxClassLen;
++  ULONG Values;
++  ULONG MaxValueNameLen;
++  ULONG MaxValueDataLen;
++  WCHAR Class[1];
++} KEY_FULL_INFORMATION, *PKEY_FULL_INFORMATION;
++
+ extern "C" {
+ // wdm.h.
+ NTSTATUS WINAPI NtCreateKey(OUT PHANDLE KeyHandle,
+@@ -41,6 +68,21 @@ NTSTATUS WINAPI NtOpenKeyEx(OUT PHANDLE KeyHandle,
+ // wdm.h.
+ NTSTATUS WINAPI NtDeleteKey(IN HANDLE KeyHandle);
+ 
++// wdm.h.
++NTSTATUS WINAPI NtQueryKey(IN HANDLE KeyHandle,
++                           IN KEY_INFORMATION_CLASS KeyInformationClass,
++                           OUT PVOID KeyInformation,
++                           IN ULONG Length,
++                           OUT PULONG ResultLength);
++
++// wdm.h.
++NTSTATUS WINAPI NtEnumerateKey(IN HANDLE KeyHandle,
++                               IN ULONG Index,
++                               IN KEY_INFORMATION_CLASS KeyInformationClass,
++                               OUT PVOID KeyInformation,
++                               IN ULONG Length,
++                               OUT PULONG ResultLength);
++
+ // wdm.h.
+ NTSTATUS WINAPI
+ NtQueryValueKey(IN HANDLE KeyHandle,
+diff --git a/chrome/chrome_elf/nt_registry/nt_registry_unittest.cc b/chrome/chrome_elf/nt_registry/nt_registry_unittest.cc
+index 43cf56ec6a6f0..344b20dffbd91 100644
+--- a/chrome/chrome_elf/nt_registry/nt_registry_unittest.cc
++++ b/chrome/chrome_elf/nt_registry/nt_registry_unittest.cc
+@@ -567,4 +567,88 @@ TEST_F(NtRegistryTest, CreateRegKeyRecursion) {
+   // Clean up done by NtRegistryTest.
+ }
+ 
++TEST_F(NtRegistryTest, ApiEnumeration) {
++  HANDLE key_handle;
++  HANDLE subkey_handle;
++  static constexpr wchar_t key[] = L"NTRegistry\\enum";
++  static constexpr wchar_t subkey1[] = L"NTRegistry\\enum\\subkey1";
++  static constexpr wchar_t subkey2[] = L"NTRegistry\\enum\\subkey2";
++  static constexpr wchar_t subkey3[] = L"NTRegistry\\enum\\subkey3";
++  static constexpr const wchar_t* check_names[] = {
++      L"subkey1",
++      L"subkey2",
++      L"subkey3",
++  };
++  // Test out the "(Default)" value name in this suite.
++  static constexpr wchar_t subkey_val_name[] = L"";
++  DWORD subkey_val = 1234;
++
++  // Create a subkey to play under.
++  // ------------------------------
++  ASSERT_TRUE(nt::CreateRegKey(nt::HKCU, key, KEY_ALL_ACCESS, &key_handle));
++  ASSERT_NE(key_handle, INVALID_HANDLE_VALUE);
++  ASSERT_NE(key_handle, nullptr);
++  base::ScopedClosureRunner key_closer(
++      base::BindOnce(&nt::CloseRegKey, key_handle));
++
++  // Set
++  // ------------------------------
++  // Sub-subkey with a default value.
++  ASSERT_TRUE(
++      nt::CreateRegKey(nt::HKCU, subkey1, KEY_ALL_ACCESS, &subkey_handle));
++  ASSERT_NE(subkey_handle, INVALID_HANDLE_VALUE);
++  ASSERT_NE(subkey_handle, nullptr);
++  EXPECT_TRUE(nt::SetRegValueDWORD(subkey_handle, subkey_val_name, subkey_val));
++  nt::CloseRegKey(subkey_handle);
++
++  // Sub-subkey with a default value.
++  ASSERT_TRUE(
++      nt::CreateRegKey(nt::HKCU, subkey2, KEY_ALL_ACCESS, &subkey_handle));
++  ASSERT_NE(subkey_handle, INVALID_HANDLE_VALUE);
++  ASSERT_NE(subkey_handle, nullptr);
++  EXPECT_TRUE(nt::SetRegValueDWORD(subkey_handle, subkey_val_name, subkey_val));
++  nt::CloseRegKey(subkey_handle);
++
++  // Sub-subkey with a default value.
++  ASSERT_TRUE(
++      nt::CreateRegKey(nt::HKCU, subkey3, KEY_ALL_ACCESS, &subkey_handle));
++  ASSERT_NE(subkey_handle, INVALID_HANDLE_VALUE);
++  ASSERT_NE(subkey_handle, nullptr);
++  EXPECT_TRUE(nt::SetRegValueDWORD(subkey_handle, subkey_val_name, subkey_val));
++  nt::CloseRegKey(subkey_handle);
++
++  // Get (via enumeration)
++  // ------------------------------
++  ULONG subkey_count = 0;
++  EXPECT_TRUE(nt::QueryRegEnumerationInfo(key_handle, &subkey_count));
++  ASSERT_EQ(subkey_count, ULONG{3});
++
++  std::wstring subkey_name;
++  for (ULONG i = 0; i < subkey_count; i++) {
++    ASSERT_TRUE(nt::QueryRegSubkey(key_handle, i, &subkey_name));
++
++    bool found = false;
++    for (size_t index = 0; index < std::size(check_names); index++) {
++      if (0 == subkey_name.compare(check_names[index])) {
++        found = true;
++        break;
++      }
++    }
++    ASSERT_TRUE(found);
++
++    // Grab the default DWORD value out of this subkey.
++    DWORD value = 0;
++    std::wstring temp(key);
++    temp.append(L"\\");
++    temp.append(subkey_name);
++    EXPECT_TRUE(nt::QueryRegValueDWORD(nt::HKCU, nt::NONE, temp.c_str(),
++                                       subkey_val_name, &value));
++    EXPECT_EQ(value, subkey_val);
++  }
++  // Also test a known bad index.
++  EXPECT_FALSE(nt::QueryRegSubkey(key_handle, subkey_count, &subkey_name));
++
++  // Clean up done by NtRegistryTest.
++}
++
+ }  // namespace

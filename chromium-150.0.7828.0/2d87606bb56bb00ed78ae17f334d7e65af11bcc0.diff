@@ -1,0 +1,131 @@
+diff --git a/third_party/crashpad/crashpad/util/win/exception_handler_server.cc b/third_party/crashpad/crashpad/util/win/exception_handler_server.cc
+index 70955c825b73a..b82c067e0ab08 100644
+--- a/third_party/crashpad/crashpad/util/win/exception_handler_server.cc
++++ b/third_party/crashpad/crashpad/util/win/exception_handler_server.cc
+@@ -260,21 +260,101 @@ void ExceptionHandlerServer::SetPipeName(const std::wstring& pipe_name) {
+   pipe_name_ = pipe_name;
+ }
+ 
++#define NTSTATUS ULONG
++
++typedef enum _FILE_INFORMATION_CLASS {
++ // end_wdm
++  FileDirectoryInformation       = 1,
++  FileFullDirectoryInformation, // 2
++  FileBothDirectoryInformation, // 3
++  FileBasicInformation,         // 4  wdm
++  FileStandardInformation,      // 5  wdm
++  FileInternalInformation,      // 6
++  FileEaInformation,            // 7
++  FileAccessInformation,        // 8
++  FileNameInformation,          // 9
++  FileRenameInformation,        // 10
++  FileLinkInformation,          // 11
++  FileNamesInformation,         // 12
++  FileDispositionInformation,   // 13
++  FilePositionInformation,      // 14 wdm
++  FileFullEaInformation,        // 15
++  FileModeInformation,          // 16
++  FileAlignmentInformation,     // 17
++  FileAllInformation,           // 18
++  FileAllocationInformation,    // 19
++  FileEndOfFileInformation,     // 20 wdm
++  FileAlternateNameInformation, // 21
++  FileStreamInformation,        // 22
++  FilePipeInformation,          // 23
++  FilePipeLocalInformation,     // 24
++  FilePipeRemoteInformation,    // 25
++  FileMailslotQueryInformation, // 26
++  FileMailslotSetInformation,   // 27
++  FileCompressionInformation,   // 28
++  FileObjectIdInformation,      // 29
++  FileCompletionInformation,    // 30
++  FileMoveClusterInformation,   // 31
++  FileQuotaInformation,         // 32
++  FileReparsePointInformation,  // 33
++  FileNetworkOpenInformation,   // 34
++  FileAttributeTagInformation,  // 35
++  FileTrackingInformation,      // 36
++  FileMaximumInformation
++  // begin_wdm
++} FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
++
++typedef struct _IO_STATUS_BLOCK {
++    union {
++        NTSTATUS Status;
++        PVOID Pointer;
++    };
++    ULONG_PTR Information;
++} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
++
++typedef NTSTATUS (WINAPI* NTQUERYINFORMATIONFILE)(
++  HANDLE,
++  PIO_STATUS_BLOCK,
++  PVOID,
++  ULONG,
++  FILE_INFORMATION_CLASS);
++
+ void ExceptionHandlerServer::InitializeWithInheritedDataForInitialClient(
+     const InitialClientData& initial_client_data,
+     Delegate* delegate) {
+   DCHECK(pipe_name_.empty());
+   DCHECK(!first_pipe_instance_.is_valid());
+ 
++  NTQUERYINFORMATIONFILE NtQueryInformationFile;
++
++  // Initialize the NTAPI functions we need
++  HMODULE ntdll_handle = ::GetModuleHandle(L"ntdll.dll");
++  if (!ntdll_handle) {
++    fprintf(stderr, "[ERROR] Cannot load ntdll.dll. Error %ld\r\n",
++            ::GetLastError());
++    return;
++  }
++
++  NtQueryInformationFile = reinterpret_cast<NTQUERYINFORMATIONFILE>(
++                      GetProcAddress(ntdll_handle, "NtQueryInformationFile"));
++
++  if (!NtQueryInformationFile) {
++    fprintf(stderr, "[ERROR] Cannot load all NT functions. Error %ld\r\n",
++                    ::GetLastError());
++    return;
++  }
++
+   first_pipe_instance_.reset(initial_client_data.first_pipe_instance());
+ 
+   // TODO(scottmg): Vista+. Might need to pass through or possibly find an Nt*.
+   auto data = base::HeapArray<uint8_t>::Uninit(sizeof(wchar_t) * _MAX_PATH +
+                                                sizeof(FILE_NAME_INFO));
+-  if (!GetFileInformationByHandleEx(first_pipe_instance_.get(),
+-                                    FileNameInfo,
+-                                    data.data(),
+-                                    static_cast<DWORD>(data.size()))) {
++  IO_STATUS_BLOCK status_block = {};
++  if (NtQueryInformationFile(reinterpret_cast<HANDLE>(first_pipe_instance_.get()),
++                             &status_block,
++                             data.data(),
++                             static_cast<DWORD>(data.size()),
++                             FileNameInformation)) {
+     PLOG(FATAL) << "GetFileInformationByHandleEx";
+   }
+   FILE_NAME_INFO* file_name_info =
+diff --git a/third_party/crashpad/crashpad/util/win/registration_protocol_win.cc b/third_party/crashpad/crashpad/util/win/registration_protocol_win.cc
+index e5cbd8d01531b..822d6a05b5d24 100644
+--- a/third_party/crashpad/crashpad/util/win/registration_protocol_win.cc
++++ b/third_party/crashpad/crashpad/util/win/registration_protocol_win.cc
+@@ -102,14 +102,14 @@ HANDLE CreateNamedPipeInstance(const std::wstring& pipe_name,
+ 
+   if (first_instance) {
+     // Pre-Vista does not have integrity levels.
+-    if (IsWindowsVistaOrGreater()) {
+       memset(&security_attributes, 0, sizeof(security_attributes));
+       security_attributes.nLength = sizeof(SECURITY_ATTRIBUTES);
++    if (IsWindowsVistaOrGreater()) {
+       security_attributes.lpSecurityDescriptor =
+           const_cast<void*>(GetSecurityDescriptorForNamedPipeInstance(nullptr));
++    }
+       security_attributes.bInheritHandle = TRUE;
+       security_attributes_pointer = &security_attributes;
+-    }
+   }
+ 
+   return CreateNamedPipe(

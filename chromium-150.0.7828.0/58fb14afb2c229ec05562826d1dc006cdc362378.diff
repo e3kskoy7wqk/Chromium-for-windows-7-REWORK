@@ -1,0 +1,34 @@
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index 66e1c0fa50581..4c3a1e7304ab1 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -1318,7 +1318,13 @@ void DesktopWindowTreeHostWin::SetAllowScreenshots(bool allow) {
+ 
+ bool DesktopWindowTreeHostWin::AreScreenshotsAllowed() {
+   DWORD affinity;
+-  if (GetWindowDisplayAffinity(GetHWND(), &affinity)) {
++    typedef BOOL(WINAPI *GetWindowDisplayAffinity_t)(HWND, DWORD *);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    GetWindowDisplayAffinity_t pfnGetWindowDisplayAffinity =
++        (GetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "GetWindowDisplayAffinity");
++    if (pfnGetWindowDisplayAffinity)
++  if (pfnGetWindowDisplayAffinity(GetHWND(), &affinity)) {
+     return affinity == WDA_NONE;
+   }
+ 
+@@ -1401,7 +1407,13 @@ void DesktopWindowTreeHostWin::UpdateAllowScreenshots() {
+   // screen, whereas the former completely removes the window from the screen.
+   // The former is better indication to the user that the contents of the window
+   // are being explicitly not shown.
+-  SetWindowDisplayAffinity(GetHWND(),
++    typedef BOOL(WINAPI *SetWindowDisplayAffinity_t)(HWND, DWORD);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    SetWindowDisplayAffinity_t pfnSetWindowDisplayAffinity =
++        (SetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "SetWindowDisplayAffinity");
++    if (pfnSetWindowDisplayAffinity)
++  pfnSetWindowDisplayAffinity(GetHWND(),
+                            allow_screenshots_ ? WDA_NONE : WDA_MONITOR);
+ }
+ 
