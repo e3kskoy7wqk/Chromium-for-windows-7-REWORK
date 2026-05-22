@@ -1,0 +1,1 @@
+w32pthreads: always use Vista+ API, drop XP support    2017/12/22 3:23:14    9b121dfc32810250938021952aab4172a988cb56

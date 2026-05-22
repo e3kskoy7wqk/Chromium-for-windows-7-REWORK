@@ -1,0 +1,1 @@
+[M142] Add LRU cache to gfx:Canvas::GetStringWidth()/GetStringWidthF()    2025/10/21 5:46:54    f68f40924c388e9c2e5f62554f01a0c9906309eb

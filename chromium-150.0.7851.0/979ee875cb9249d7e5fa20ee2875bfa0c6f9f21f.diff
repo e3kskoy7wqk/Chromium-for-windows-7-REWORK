@@ -1,0 +1,189 @@
+diff --git a/crypto/unexportable_key_win.cc b/crypto/unexportable_key_win.cc
+--- a/crypto/unexportable_key_win.cc
++++ b/crypto/unexportable_key_win.cc
+@@ -42,8 +42,185 @@
+ #include "third_party/boringssl/src/include/openssl/nid.h"
+ #include "third_party/boringssl/src/include/openssl/rsa.h"
+ 
++#include "base/lazy_instance.h"
+ namespace crypto {
+ 
++namespace {
++
++using NCryptOpenStorageProviderFunc = SECURITY_STATUS(WINAPI*)(_Out_ NCRYPT_PROV_HANDLE *phProvider, _In_opt_ LPCWSTR pszProviderName, _In_ DWORD dwFlags);
++using NCryptEnumAlgorithmsFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_PROV_HANDLE hProvider, _In_ DWORD dwAlgOperations, _Out_ DWORD * pdwAlgCount, _Outptr_result_buffer_(*pdwAlgCount) NCryptAlgorithmName **ppAlgList, _In_ DWORD dwFlags);
++using NCryptIsAlgSupportedFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_PROV_HANDLE hProvider, _In_ LPCWSTR pszAlgId, _In_ DWORD dwFlags);
++using NCryptEnumKeysFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_PROV_HANDLE hProvider, _In_opt_ LPCWSTR pszScope, _Outptr_ NCryptKeyName **ppKeyName, _Inout_ PVOID * ppEnumState, _In_ DWORD dwFlags);
++using NCryptEnumStorageProvidersFunc = SECURITY_STATUS(WINAPI*)(_Out_ DWORD * pdwProviderCount, _Outptr_result_buffer_(*pdwProviderCount) NCryptProviderName **ppProviderList, _In_ DWORD dwFlags);
++using NCryptFreeBufferFunc = SECURITY_STATUS(WINAPI*)(_Pre_notnull_ PVOID pvInput);
++using NCryptOpenKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_PROV_HANDLE hProvider, _Out_ NCRYPT_KEY_HANDLE *phKey, _In_ LPCWSTR pszKeyName, _In_opt_ DWORD dwLegacyKeySpec, _In_ DWORD dwFlags);
++using NCryptCreatePersistedKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_PROV_HANDLE hProvider, _Out_ NCRYPT_KEY_HANDLE *phKey, _In_ LPCWSTR pszAlgId, _In_opt_ LPCWSTR pszKeyName, _In_ DWORD dwLegacyKeySpec, _In_ DWORD dwFlags);
++using NCryptGetPropertyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_HANDLE hObject, _In_ LPCWSTR pszProperty, _Out_writes_bytes_to_opt_(cbOutput, *pcbResult) PBYTE pbOutput, _In_ DWORD cbOutput, _Out_ DWORD * pcbResult, _In_ DWORD dwFlags);
++using NCryptSetPropertyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_HANDLE hObject, _In_ LPCWSTR pszProperty, _In_reads_bytes_(cbInput) PBYTE pbInput, _In_ DWORD cbInput, _In_ DWORD dwFlags);
++using NCryptFinalizeKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_ DWORD dwFlags);
++using NCryptEncryptFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_reads_bytes_opt_(cbInput) PBYTE pbInput, _In_ DWORD cbInput, _In_opt_ VOID *pPaddingInfo, _Out_writes_bytes_to_opt_(cbOutput, *pcbResult) PBYTE pbOutput, _In_ DWORD cbOutput, _Out_ DWORD * pcbResult, _In_ DWORD dwFlags);
++using NCryptDecryptFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_reads_bytes_opt_(cbInput) PBYTE pbInput, _In_ DWORD cbInput, _In_opt_ VOID *pPaddingInfo, _Out_writes_bytes_to_opt_(cbOutput, *pcbResult) PBYTE pbOutput, _In_ DWORD cbOutput, _Out_ DWORD * pcbResult, _In_ DWORD dwFlags);
++using NCryptImportKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_PROV_HANDLE hProvider, _In_opt_ NCRYPT_KEY_HANDLE hImportKey, _In_ LPCWSTR pszBlobType, _In_opt_ NCryptBufferDesc *pParameterList, _Out_ NCRYPT_KEY_HANDLE *phKey, _In_reads_bytes_(cbData) PBYTE pbData, _In_ DWORD cbData, _In_ DWORD dwFlags);
++using NCryptExportKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_opt_ NCRYPT_KEY_HANDLE hExportKey, _In_ LPCWSTR pszBlobType, _In_opt_ NCryptBufferDesc *pParameterList, _Out_writes_bytes_to_opt_(cbOutput, *pcbResult) PBYTE pbOutput, _In_ DWORD cbOutput, _Out_ DWORD * pcbResult, _In_ DWORD dwFlags);
++using NCryptSignHashFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_opt_ VOID *pPaddingInfo, _In_reads_bytes_(cbHashValue) PBYTE pbHashValue, _In_ DWORD cbHashValue, _Out_writes_bytes_to_opt_(cbSignature, *pcbResult) PBYTE pbSignature, _In_ DWORD cbSignature, _Out_ DWORD * pcbResult, _In_ DWORD dwFlags);
++using NCryptVerifySignatureFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_opt_ VOID *pPaddingInfo, _In_reads_bytes_(cbHashValue) PBYTE pbHashValue, _In_ DWORD cbHashValue, _In_reads_bytes_(cbSignature) PBYTE pbSignature, _In_ DWORD cbSignature, _In_ DWORD dwFlags);
++using NCryptDeleteKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_ DWORD dwFlags);
++using NCryptFreeObjectFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_HANDLE hObject);
++using NCryptTranslateHandleFunc = SECURITY_STATUS(WINAPI*)(_Out_opt_ NCRYPT_PROV_HANDLE *phProvider, _Out_ NCRYPT_KEY_HANDLE *phKey, _In_ HCRYPTPROV hLegacyProv, _In_opt_ HCRYPTKEY hLegacyKey, _In_opt_ DWORD dwLegacyKeySpec, _In_ DWORD dwFlags);
++using NCryptNotifyChangeKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_PROV_HANDLE hProvider, _Inout_ HANDLE *phEvent, _In_ DWORD dwFlags);
++using NCryptSecretAgreementFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hPrivKey, _In_ NCRYPT_KEY_HANDLE hPubKey, _Out_ NCRYPT_SECRET_HANDLE *phAgreedSecret, _In_ DWORD dwFlags);
++using NCryptDeriveKeyFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_SECRET_HANDLE hSharedSecret, _In_ LPCWSTR pwszKDF, _In_opt_ NCryptBufferDesc *pParameterList, _Out_writes_bytes_to_opt_(cbDerivedKey, *pcbResult) PBYTE pbDerivedKey, _In_ DWORD cbDerivedKey, _Out_ DWORD *pcbResult, _In_ ULONG dwFlags);
++using NCryptKeyDerivationFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hKey, _In_opt_ NCryptBufferDesc *pParameterList, _Out_writes_bytes_to_(cbDerivedKey, *pcbResult) PUCHAR pbDerivedKey, _In_ DWORD cbDerivedKey, _Out_ DWORD *pcbResult, _In_ ULONG dwFlags);
++using NCryptCreateClaimFunc = SECURITY_STATUS(WINAPI*)(_In_opt_ NCRYPT_KEY_HANDLE hSubjectKey, _In_opt_ NCRYPT_KEY_HANDLE hAuthorityKey, _In_ DWORD dwClaimType, _In_opt_ NCryptBufferDesc *pParameterList, _Out_writes_bytes_to_opt_(cbClaimBlob, *pcbResult) PBYTE pbClaimBlob, _In_ DWORD cbClaimBlob, _Out_ DWORD *pcbResult, _In_ DWORD dwFlags);
++using NCryptVerifyClaimFunc = SECURITY_STATUS(WINAPI*)(_In_ NCRYPT_KEY_HANDLE hSubjectKey, _In_opt_ NCRYPT_KEY_HANDLE hAuthorityKey, _In_ DWORD dwClaimType, _In_opt_ NCryptBufferDesc *pParameterList, _In_reads_bytes_(cbClaimBlob) PBYTE pbClaimBlob, _In_ DWORD cbClaimBlob, _Out_ NCryptBufferDesc *pOutput, _In_ DWORD dwFlags);
++
++class CNGFunctions {
++ public:
++  CNGFunctions() :         ncrypt_open_storage_provider_(nullptr)
++    ,         ncrypt_enum_algorithms_(nullptr)
++    ,         ncrypt_is_alg_supported_(nullptr)
++    ,         ncrypt_enum_keys_(nullptr)
++    ,         ncrypt_enum_storage_providers_(nullptr)
++    ,         ncrypt_free_buffer_(nullptr)
++    ,         ncrypt_open_key_(nullptr)
++    ,         ncrypt_create_persisted_key_(nullptr)
++    ,         ncrypt_get_property_(nullptr)
++    ,         ncrypt_set_property_(nullptr)
++    ,         ncrypt_finalize_key_(nullptr)
++    ,         ncrypt_encrypt_(nullptr)
++    ,         ncrypt_decrypt_(nullptr)
++    ,         ncrypt_import_key_(nullptr)
++    ,         ncrypt_export_key_(nullptr)
++    ,         ncrypt_sign_hash_(nullptr)
++    ,         ncrypt_verify_signature_(nullptr)
++    ,         ncrypt_delete_key_(nullptr)
++    ,         ncrypt_free_object_(nullptr)
++    ,         ncrypt_translate_handle_(nullptr)
++    ,         ncrypt_notify_change_key_(nullptr)
++    ,         ncrypt_secret_agreement_(nullptr)
++    ,         ncrypt_derive_key_(nullptr)
++    ,         ncrypt_key_derivation_(nullptr)
++    ,         ncrypt_create_claim_(nullptr)
++    ,         ncrypt_verify_claim_(nullptr) {
++    HMODULE ncrypt = GetModuleHandle(L"ncrypt.dll");
++    if (ncrypt != nullptr) {
++      ncrypt_open_storage_provider_ = reinterpret_cast<NCryptOpenStorageProviderFunc>(GetProcAddress(ncrypt, "NCryptOpenStorageProvider"));
++      ncrypt_enum_algorithms_ = reinterpret_cast<NCryptEnumAlgorithmsFunc>(GetProcAddress(ncrypt, "NCryptEnumAlgorithms"));
++      ncrypt_is_alg_supported_ = reinterpret_cast<NCryptIsAlgSupportedFunc>(GetProcAddress(ncrypt, "NCryptIsAlgSupported"));
++      ncrypt_enum_keys_ = reinterpret_cast<NCryptEnumKeysFunc>(GetProcAddress(ncrypt, "NCryptEnumKeys"));
++      ncrypt_enum_storage_providers_ = reinterpret_cast<NCryptEnumStorageProvidersFunc>(GetProcAddress(ncrypt, "NCryptEnumStorageProviders"));
++      ncrypt_free_buffer_ = reinterpret_cast<NCryptFreeBufferFunc>(GetProcAddress(ncrypt, "NCryptFreeBuffer"));
++      ncrypt_open_key_ = reinterpret_cast<NCryptOpenKeyFunc>(GetProcAddress(ncrypt, "NCryptOpenKey"));
++      ncrypt_create_persisted_key_ = reinterpret_cast<NCryptCreatePersistedKeyFunc>(GetProcAddress(ncrypt, "NCryptCreatePersistedKey"));
++      ncrypt_get_property_ = reinterpret_cast<NCryptGetPropertyFunc>(GetProcAddress(ncrypt, "NCryptGetProperty"));
++      ncrypt_set_property_ = reinterpret_cast<NCryptSetPropertyFunc>(GetProcAddress(ncrypt, "NCryptSetProperty"));
++      ncrypt_finalize_key_ = reinterpret_cast<NCryptFinalizeKeyFunc>(GetProcAddress(ncrypt, "NCryptFinalizeKey"));
++      ncrypt_encrypt_ = reinterpret_cast<NCryptEncryptFunc>(GetProcAddress(ncrypt, "NCryptEncrypt"));
++      ncrypt_decrypt_ = reinterpret_cast<NCryptDecryptFunc>(GetProcAddress(ncrypt, "NCryptDecrypt"));
++      ncrypt_import_key_ = reinterpret_cast<NCryptImportKeyFunc>(GetProcAddress(ncrypt, "NCryptImportKey"));
++      ncrypt_export_key_ = reinterpret_cast<NCryptExportKeyFunc>(GetProcAddress(ncrypt, "NCryptExportKey"));
++      ncrypt_sign_hash_ = reinterpret_cast<NCryptSignHashFunc>(GetProcAddress(ncrypt, "NCryptSignHash"));
++      ncrypt_verify_signature_ = reinterpret_cast<NCryptVerifySignatureFunc>(GetProcAddress(ncrypt, "NCryptVerifySignature"));
++      ncrypt_delete_key_ = reinterpret_cast<NCryptDeleteKeyFunc>(GetProcAddress(ncrypt, "NCryptDeleteKey"));
++      ncrypt_free_object_ = reinterpret_cast<NCryptFreeObjectFunc>(GetProcAddress(ncrypt, "NCryptFreeObject"));
++      ncrypt_translate_handle_ = reinterpret_cast<NCryptTranslateHandleFunc>(GetProcAddress(ncrypt, "NCryptTranslateHandle"));
++      ncrypt_notify_change_key_ = reinterpret_cast<NCryptNotifyChangeKeyFunc>(GetProcAddress(ncrypt, "NCryptNotifyChangeKey"));
++      ncrypt_secret_agreement_ = reinterpret_cast<NCryptSecretAgreementFunc>(GetProcAddress(ncrypt, "NCryptSecretAgreement"));
++      ncrypt_derive_key_ = reinterpret_cast<NCryptDeriveKeyFunc>(GetProcAddress(ncrypt, "NCryptDeriveKey"));
++      ncrypt_key_derivation_ = reinterpret_cast<NCryptKeyDerivationFunc>(GetProcAddress(ncrypt, "NCryptKeyDerivation"));
++      ncrypt_create_claim_ = reinterpret_cast<NCryptCreateClaimFunc>(GetProcAddress(ncrypt, "NCryptCreateClaim"));
++      ncrypt_verify_claim_ = reinterpret_cast<NCryptVerifyClaimFunc>(GetProcAddress(ncrypt, "NCryptVerifyClaim"));
++    }
++  }
++
++  NCryptOpenStorageProviderFunc ncrypt_open_storage_provider() const { return ncrypt_open_storage_provider_; }
++  NCryptEnumAlgorithmsFunc ncrypt_enum_algorithms() const { return ncrypt_enum_algorithms_; }
++  NCryptIsAlgSupportedFunc ncrypt_is_alg_supported() const { return ncrypt_is_alg_supported_; }
++  NCryptEnumKeysFunc ncrypt_enum_keys() const { return ncrypt_enum_keys_; }
++  NCryptEnumStorageProvidersFunc ncrypt_enum_storage_providers() const { return ncrypt_enum_storage_providers_; }
++  NCryptFreeBufferFunc ncrypt_free_buffer() const { return ncrypt_free_buffer_; }
++  NCryptOpenKeyFunc ncrypt_open_key() const { return ncrypt_open_key_; }
++  NCryptCreatePersistedKeyFunc ncrypt_create_persisted_key() const { return ncrypt_create_persisted_key_; }
++  NCryptGetPropertyFunc ncrypt_get_property() const { return ncrypt_get_property_; }
++  NCryptSetPropertyFunc ncrypt_set_property() const { return ncrypt_set_property_; }
++  NCryptFinalizeKeyFunc ncrypt_finalize_key() const { return ncrypt_finalize_key_; }
++  NCryptEncryptFunc ncrypt_encrypt() const { return ncrypt_encrypt_; }
++  NCryptDecryptFunc ncrypt_decrypt() const { return ncrypt_decrypt_; }
++  NCryptImportKeyFunc ncrypt_import_key() const { return ncrypt_import_key_; }
++  NCryptExportKeyFunc ncrypt_export_key() const { return ncrypt_export_key_; }
++  NCryptSignHashFunc ncrypt_sign_hash() const { return ncrypt_sign_hash_; }
++  NCryptVerifySignatureFunc ncrypt_verify_signature() const { return ncrypt_verify_signature_; }
++  NCryptDeleteKeyFunc ncrypt_delete_key() const { return ncrypt_delete_key_; }
++  NCryptFreeObjectFunc ncrypt_free_object() const { return ncrypt_free_object_; }
++  NCryptTranslateHandleFunc ncrypt_translate_handle() const { return ncrypt_translate_handle_; }
++  NCryptNotifyChangeKeyFunc ncrypt_notify_change_key() const { return ncrypt_notify_change_key_; }
++  NCryptSecretAgreementFunc ncrypt_secret_agreement() const { return ncrypt_secret_agreement_; }
++  NCryptDeriveKeyFunc ncrypt_derive_key() const { return ncrypt_derive_key_; }
++  NCryptKeyDerivationFunc ncrypt_key_derivation() const { return ncrypt_key_derivation_; }
++  NCryptCreateClaimFunc ncrypt_create_claim() const { return ncrypt_create_claim_; }
++  NCryptVerifyClaimFunc ncrypt_verify_claim() const { return ncrypt_verify_claim_; }
++
++ private:
++  NCryptOpenStorageProviderFunc ncrypt_open_storage_provider_;
++  NCryptEnumAlgorithmsFunc ncrypt_enum_algorithms_;
++  NCryptIsAlgSupportedFunc ncrypt_is_alg_supported_;
++  NCryptEnumKeysFunc ncrypt_enum_keys_;
++  NCryptEnumStorageProvidersFunc ncrypt_enum_storage_providers_;
++  NCryptFreeBufferFunc ncrypt_free_buffer_;
++  NCryptOpenKeyFunc ncrypt_open_key_;
++  NCryptCreatePersistedKeyFunc ncrypt_create_persisted_key_;
++  NCryptGetPropertyFunc ncrypt_get_property_;
++  NCryptSetPropertyFunc ncrypt_set_property_;
++  NCryptFinalizeKeyFunc ncrypt_finalize_key_;
++  NCryptEncryptFunc ncrypt_encrypt_;
++  NCryptDecryptFunc ncrypt_decrypt_;
++  NCryptImportKeyFunc ncrypt_import_key_;
++  NCryptExportKeyFunc ncrypt_export_key_;
++  NCryptSignHashFunc ncrypt_sign_hash_;
++  NCryptVerifySignatureFunc ncrypt_verify_signature_;
++  NCryptDeleteKeyFunc ncrypt_delete_key_;
++  NCryptFreeObjectFunc ncrypt_free_object_;
++  NCryptTranslateHandleFunc ncrypt_translate_handle_;
++  NCryptNotifyChangeKeyFunc ncrypt_notify_change_key_;
++  NCryptSecretAgreementFunc ncrypt_secret_agreement_;
++  NCryptDeriveKeyFunc ncrypt_derive_key_;
++  NCryptKeyDerivationFunc ncrypt_key_derivation_;
++  NCryptCreateClaimFunc ncrypt_create_claim_;
++  NCryptVerifyClaimFunc ncrypt_verify_claim_;
++};
++
++base::LazyInstance<CNGFunctions>::Leaky g_cng_functions =
++    LAZY_INSTANCE_INITIALIZER;
++
++#define NCryptOpenStorageProvider(...) (g_cng_functions.Get().ncrypt_open_storage_provider() ? g_cng_functions.Get().ncrypt_open_storage_provider()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptEnumAlgorithms(...) (g_cng_functions.Get().ncrypt_enum_algorithms() ? g_cng_functions.Get().ncrypt_enum_algorithms()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptIsAlgSupported(...) (g_cng_functions.Get().ncrypt_is_alg_supported() ? g_cng_functions.Get().ncrypt_is_alg_supported()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptEnumKeys(...) (g_cng_functions.Get().ncrypt_enum_keys() ? g_cng_functions.Get().ncrypt_enum_keys()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptEnumStorageProviders(...) (g_cng_functions.Get().ncrypt_enum_storage_providers() ? g_cng_functions.Get().ncrypt_enum_storage_providers()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptFreeBuffer(...) (g_cng_functions.Get().ncrypt_free_buffer() ? g_cng_functions.Get().ncrypt_free_buffer()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptOpenKey(...) (g_cng_functions.Get().ncrypt_open_key() ? g_cng_functions.Get().ncrypt_open_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptCreatePersistedKey(...) (g_cng_functions.Get().ncrypt_create_persisted_key() ? g_cng_functions.Get().ncrypt_create_persisted_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptGetProperty(...) (g_cng_functions.Get().ncrypt_get_property() ? g_cng_functions.Get().ncrypt_get_property()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptSetProperty(...) (g_cng_functions.Get().ncrypt_set_property() ? g_cng_functions.Get().ncrypt_set_property()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptFinalizeKey(...) (g_cng_functions.Get().ncrypt_finalize_key() ? g_cng_functions.Get().ncrypt_finalize_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptEncrypt(...) (g_cng_functions.Get().ncrypt_encrypt() ? g_cng_functions.Get().ncrypt_encrypt()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptDecrypt(...) (g_cng_functions.Get().ncrypt_decrypt() ? g_cng_functions.Get().ncrypt_decrypt()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptImportKey(...) (g_cng_functions.Get().ncrypt_import_key() ? g_cng_functions.Get().ncrypt_import_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptExportKey(...) (g_cng_functions.Get().ncrypt_export_key() ? g_cng_functions.Get().ncrypt_export_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptSignHash(...) (g_cng_functions.Get().ncrypt_sign_hash() ? g_cng_functions.Get().ncrypt_sign_hash()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptVerifySignature(...) (g_cng_functions.Get().ncrypt_verify_signature() ? g_cng_functions.Get().ncrypt_verify_signature()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptDeleteKey(...) (g_cng_functions.Get().ncrypt_delete_key() ? g_cng_functions.Get().ncrypt_delete_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptFreeObject(...) (g_cng_functions.Get().ncrypt_free_object() ? g_cng_functions.Get().ncrypt_free_object()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptTranslateHandle(...) (g_cng_functions.Get().ncrypt_translate_handle() ? g_cng_functions.Get().ncrypt_translate_handle()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptNotifyChangeKey(...) (g_cng_functions.Get().ncrypt_notify_change_key() ? g_cng_functions.Get().ncrypt_notify_change_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptSecretAgreement(...) (g_cng_functions.Get().ncrypt_secret_agreement() ? g_cng_functions.Get().ncrypt_secret_agreement()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptDeriveKey(...) (g_cng_functions.Get().ncrypt_derive_key() ? g_cng_functions.Get().ncrypt_derive_key()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptKeyDerivation(...) (g_cng_functions.Get().ncrypt_key_derivation() ? g_cng_functions.Get().ncrypt_key_derivation()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptCreateClaim(...) (g_cng_functions.Get().ncrypt_create_claim() ? g_cng_functions.Get().ncrypt_create_claim()(__VA_ARGS__) : NTE_FAIL)
++#define NCryptVerifyClaim(...) (g_cng_functions.Get().ncrypt_verify_claim() ? g_cng_functions.Get().ncrypt_verify_claim()(__VA_ARGS__) : NTE_FAIL)
++
++}  // namespace
++
+ namespace {
+ 
+ const char kMetricVirtualCreateKeyError[] = "Crypto.TpmError.VirtualCreateKey";

@@ -1,0 +1,36 @@
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index b2c4562aa4536..acec47a0be298 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -1232,6 +1232,11 @@ component("base") {
+       "/DELAYLOAD:cfgmgr32.dll",
+       "/DELAYLOAD:powrprof.dll",
+       "/DELAYLOAD:setupapi.dll",
++      "/DELAYLOAD:dbghelp.dll",
++      "/DELAYLOAD:dwmapi.dll",
++      "/DELAYLOAD:shell32.dll",
++      "/DELAYLOAD:uxtheme.dll",
++      "/DELAYLOAD:propsys.dll",
+     ]
+   }
+ }
+diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
+index edb193a5f3ac0..614f8e0297940 100644
+--- a/build/config/win/BUILD.gn
++++ b/build/config/win/BUILD.gn
+@@ -432,7 +429,6 @@ config("delayloads_except_dbghelp") {
+     "/DELAYLOAD:oleaut32.dll",
+     "/DELAYLOAD:pdh.dll",
+     "/DELAYLOAD:propsys.dll",
+-    "/DELAYLOAD:psapi.dll",
+     "/DELAYLOAD:rpcrt4.dll",
+     "/DELAYLOAD:rstrtmgr.dll",
+     "/DELAYLOAD:secur32.dll",
+@@ -448,7 +443,6 @@ config("delayloads_except_dbghelp") {
+     "/DELAYLOAD:urlmon.dll",
+     "/DELAYLOAD:user32.dll",
+     "/DELAYLOAD:userenv.dll",
+-    "/DELAYLOAD:usp10.dll",
+     "/DELAYLOAD:uxtheme.dll",
+     "/DELAYLOAD:wer.dll",
+     "/DELAYLOAD:wevtapi.dll",

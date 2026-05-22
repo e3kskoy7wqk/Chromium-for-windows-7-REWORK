@@ -1,0 +1,222 @@
+diff --git a/content/browser/sandbox_support_win_impl.cc b/content/browser/sandbox_support_win_impl.cc
+index 259ca65f76ab9..4b935112eb3b6 100644
+--- a/content/browser/sandbox_support_win_impl.cc
++++ b/content/browser/sandbox_support_win_impl.cc
+@@ -13,9 +13,216 @@
+ 
+ namespace content {
+ namespace {
++typedef LCID (WINAPI* LocaleNameToLCIDPtr)(LPCWSTR, DWORD);
++typedef std::unordered_map<std::wstring, LCID> NameToLCIDMap;
++
++static std::wstring removeLastComponent(const std::wstring& name)
++{
++    size_t lastSeparator = name.rfind('-');
++    if (lastSeparator == std::wstring::npos)
++        return std::wstring();
++    return name.substr(0, lastSeparator);
++}
++
++static void ensureNameToLCIDMap(NameToLCIDMap& map)
++{
++    if (!map.empty())
++        return;
++    // http://www.microsoft.com/resources/msdn/goglobal/default.mspx
++    // We add only locales used in layout tests for now.
++    map.insert({L"af", 0x0436});
++    map.insert({L"sq", 0x041C});
++    map.insert({L"ar", 0x0001});
++    map.insert({L"ar-sa", 0x0401});
++    map.insert({L"ar-iq", 0x0801});
++    map.insert({L"ar-eg", 0x0C01});
++    map.insert({L"ar-ly", 0x1001});
++    map.insert({L"ar-dz", 0x1401});
++    map.insert({L"ar-ma", 0x1801});
++    map.insert({L"ar-tn", 0x1C01});
++    map.insert({L"ar-om", 0x2001});
++    map.insert({L"ar-ye", 0x2401});
++    map.insert({L"ar-sy", 0x2801});
++    map.insert({L"ar-jo", 0x2C01});
++    map.insert({L"ar-lb", 0x3001});
++    map.insert({L"ar-kw", 0x3401});
++    map.insert({L"ar-ae", 0x3801});
++    map.insert({L"ar-bh", 0x3C01});
++    map.insert({L"ar-qa", 0x4001});
++    map.insert({L"eu", 0x042D});
++    map.insert({L"bg", 0x0402});
++    map.insert({L"be", 0x0423});
++    map.insert({L"ca", 0x0403});
++    map.insert({L"zh", 0x0004});
++    map.insert({L"zh-mo", 0x1404});
++    map.insert({L"zh-tw", 0x0404});
++    map.insert({L"zh-cn", 0x0804});
++    map.insert({L"zh-hk", 0x0C04});
++    map.insert({L"zh-sg", 0x1004});
++    map.insert({L"hr", 0x041A});
++    map.insert({L"cs", 0x0405});
++    map.insert({L"da", 0x0406});
++    map.insert({L"nl", 0x0413});
++    map.insert({L"nl-be", 0x0813});
++    map.insert({L"en", 0x0009});
++    map.insert({L"en", 0x2409});
++    map.insert({L"en-us", 0x0409});
++    map.insert({L"en-gb", 0x0809});
++    map.insert({L"en-au", 0x0C09});
++    map.insert({L"en-ca", 0x1009});
++    map.insert({L"en-nz", 0x1409});
++    map.insert({L"en-ie", 0x1809});
++    map.insert({L"en-za", 0x1C09});
++    map.insert({L"en-zw", 0x3009});
++    map.insert({L"en-jm", 0x2009});
++    map.insert({L"en-bz", 0x2809});
++    map.insert({L"en-tt", 0x2C09});
++    map.insert({L"en-ph", 0x3409});
++    map.insert({L"et", 0x0425});
++    map.insert({L"fo", 0x0438});
++    map.insert({L"fa", 0x0429});
++    map.insert({L"fi", 0x040B});
++    map.insert({L"fr", 0x040C});
++    map.insert({L"fr-be", 0x080C});
++    map.insert({L"fr-ca", 0x0C0C});
++    map.insert({L"fr-ch", 0x100C});
++    map.insert({L"fr-lu", 0x140C});
++    map.insert({L"fr-mc", 0x180C});
++    map.insert({L"gd", 0x043C});
++    map.insert({L"de", 0x0407});
++    map.insert({L"de-ch", 0x0807});
++    map.insert({L"de-at", 0x0C07});
++    map.insert({L"de-lu", 0x1007});
++    map.insert({L"de-li", 0x1407});
++    map.insert({L"el", 0x0408});
++    map.insert({L"he", 0x040D});
++    map.insert({L"hi", 0x0439});
++    map.insert({L"hu", 0x040E});
++    map.insert({L"is", 0x040F});
++    map.insert({L"id", 0x0421});
++    map.insert({L"it", 0x0410});
++    map.insert({L"it-ch", 0x0810});
++    map.insert({L"ja", 0x0411});
++    map.insert({L"ko", 0x0412});
++    map.insert({L"lv", 0x0426});
++    map.insert({L"lt", 0x0427});
++    map.insert({L"mk", 0x042F});
++    map.insert({L"ms", 0x043E});
++    map.insert({L"mt", 0x043A});
++    map.insert({L"pl", 0x0415});
++    map.insert({L"pt-br", 0x0416});
++    map.insert({L"pt", 0x0816});
++    map.insert({L"rm", 0x0417});
++    map.insert({L"ro", 0x0418});
++    map.insert({L"ro-md", 0x0818});
++    map.insert({L"ru", 0x0419});
++    map.insert({L"ru-md", 0x0819});
++    map.insert({L"sr", 0x0C1A});
++    map.insert({L"sr", 0x081A});
++    map.insert({L"sk", 0x041B});
++    map.insert({L"sl", 0x0424});
++    map.insert({L"sb", 0x042E});
++    map.insert({L"es", 0x040A});
++    map.insert({L"es-mx", 0x080A});
++    map.insert({L"es", 0x0C0A});
++    map.insert({L"es-gt", 0x100A});
++    map.insert({L"es-cr", 0x140A});
++    map.insert({L"es-pa", 0x180A});
++    map.insert({L"es-do", 0x1C0A});
++    map.insert({L"es-ve", 0x200A});
++    map.insert({L"es-co", 0x240A});
++    map.insert({L"es-pe", 0x280A});
++    map.insert({L"es-ar", 0x2C0A});
++    map.insert({L"es-ec", 0x300A});
++    map.insert({L"es-cl", 0x340A});
++    map.insert({L"es-uy", 0x380A});
++    map.insert({L"es-py", 0x3C0A});
++    map.insert({L"es-bo", 0x400A});
++    map.insert({L"es-sv", 0x440A});
++    map.insert({L"es-hn", 0x480A});
++    map.insert({L"es-ni", 0x4C0A});
++    map.insert({L"es-pr", 0x500A});
++    map.insert({L"sx", 0x0430});
++    map.insert({L"sv", 0x041D});
++    map.insert({L"sv-fi", 0x081D});
++    map.insert({L"th", 0x041E});
++    map.insert({L"ts", 0x0431});
++    map.insert({L"tn", 0x0432});
++    map.insert({L"tr", 0x041F});
++    map.insert({L"uk", 0x0422});
++    map.insert({L"ur", 0x0420});
++    map.insert({L"uz", 0x0443});
++    map.insert({L"uz", 0x0843});
++    map.insert({L"vi", 0x042A});
++    map.insert({L"xh", 0x0434});
++    map.insert({L"yi", 0x043D});
++    map.insert({L"zu", 0x0435});
++    map.insert({L"hy", 0x042B});
++    map.insert({L"ka", 0x0437});
++    map.insert({L"kk", 0x043F});
++    map.insert({L"sw", 0x0441});
++    map.insert({L"tt", 0x0444});
++    map.insert({L"bn", 0x0445});
++    map.insert({L"pa", 0x0446});
++    map.insert({L"gu", 0x0447});
++    map.insert({L"or", 0x0448});
++    map.insert({L"ta", 0x0449});
++    map.insert({L"te", 0x044A});
++    map.insert({L"kn", 0x044B});
++    map.insert({L"ml", 0x044C});
++    map.insert({L"as", 0x044D});
++    map.insert({L"mr", 0x044E});
++    map.insert({L"ms", 0x083E});
++    map.insert({L"ne", 0x0861});
++    map.insert({L"sa", 0x044F});
++    map.insert({L"lt", 0x0827});
++    map.insert({L"kok", 0x0457});
++    map.insert({L"x-az-cyrillic", 0x082C});
++    map.insert({L"x-az-latin", 0x042C});
++    map.insert({L"no", 0x0414});
++    map.insert({L"nb-no", 0x0414});
++    map.insert({L"nn-no", 0x0814});
++    map.insert({L"az", 0x082C});
++    map.insert({L"az", 0x042C});
++    map.insert({L"kz", 0x0440});
++    map.insert({L"mn", 0x0450});
++    map.insert({L"gl", 0x0456});
++    map.insert({L"syr", 0x045A});
++    map.insert({L"div", 0x0465});
++    map.insert({L"es-us", 0x540A});
++}
++
++// Fallback implementation of LocaleNameToLCID API. This is used for
++// testing on Windows XP.
++// FIXME: Remove this, ensureNameToLCIDMap, and removeLastComponent when we drop
++// Windows XP support.
++static LCID WINAPI convertLocaleNameToLCID(LPCWSTR name, DWORD)
++{
++    if (!name || !name[0])
++        return LOCALE_USER_DEFAULT;
++    static NameToLCIDMap map;
++    ensureNameToLCIDMap(map);
++    std::wstring localeName = std::wstring(name);
++    std::replace(localeName.begin(), localeName.end(), L'_', L'-');
++    std::transform(localeName.begin(), localeName.end(), localeName.begin(),
++                   [](wchar_t c){ return towlower(c); });
++    do {
++        NameToLCIDMap::const_iterator iterator = map.find(localeName);
++        if (iterator != map.end())
++            return iterator->second;
++        localeName = removeLastComponent(localeName);
++    } while (!localeName.empty());
++    return LOCALE_USER_DEFAULT;
++}
++
+ LCID CallLocaleNameToLCID(std::u16string_view locale) {
+   CHECK(locale.size() < LOCALE_NAME_MAX_LENGTH);
+-  return ::LocaleNameToLCID(base::as_wcstr(locale), 0);
++    // LocaleNameToLCID() is available since Windows Vista.
++    LocaleNameToLCIDPtr localeNameToLCID = reinterpret_cast<LocaleNameToLCIDPtr>(::GetProcAddress(::GetModuleHandle(L"kernel32"), "LocaleNameToLCID"));
++    if (!localeNameToLCID)
++        localeNameToLCID = convertLocaleNameToLCID;
++
++  return localeNameToLCID(base::as_wcstr(locale), 0);
+ }
+ 
+ std::u16string GetLocaleInfoString(LCID lcid,

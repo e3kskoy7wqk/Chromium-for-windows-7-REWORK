@@ -1,0 +1,301 @@
+diff --git a/chrome/utility/importer/ie_importer_win.cc b/chrome/utility/importer/ie_importer_win.cc
+index 39d81273135cb..879a51d00994c 100644
+--- a/chrome/utility/importer/ie_importer_win.cc
++++ b/chrome/utility/importer/ie_importer_win.cc
+@@ -40,6 +40,7 @@
+ #include "chrome/common/importer/importer_bridge.h"
+ #include "chrome/common/importer/pstore_declarations.h"
+ #include "chrome/grit/generated_resources.h"
++#include "components/password_manager/core/browser/password_form.h"
+ #include "components/user_data_importer/common/imported_bookmark_entry.h"
+ #include "components/user_data_importer/common/importer_data_types.h"
+ #include "components/user_data_importer/common/importer_url_row.h"
+@@ -49,6 +50,7 @@ namespace {
+ // Registry key paths from which we import IE settings.
+ const wchar_t kSearchScopePath[] =
+     L"Software\\Microsoft\\Internet Explorer\\SearchScopes";
++const wchar_t kIEVersionKey[] = L"Software\\Microsoft\\Internet Explorer";
+ 
+ // NTFS stream name of favicon image data.
+ const wchar_t kFaviconStreamName[] = L":favicon:$DATA";
+@@ -458,6 +460,15 @@ void IEImporter::StartImport(const importer::SourceProfile& source_profile,
+     ImportSearchEngines();
+     bridge_->NotifyItemEnded(user_data_importer::SEARCH_ENGINES);
+   }
++  if ((items & user_data_importer::PASSWORDS) && !cancelled()) {
++    bridge_->NotifyItemStarted(user_data_importer::PASSWORDS);
++    // Always import IE6 passwords.
++    ImportPasswordsIE6();
++
++    if (CurrentIEVersion() >= 7)
++      ImportPasswordsIE7();
++    bridge_->NotifyItemEnded(user_data_importer::PASSWORDS);
++  }
+   bridge_->NotifyEnded();
+ }
+ 
+@@ -547,6 +558,180 @@ void IEImporter::ImportHistory() {
+   }
+ }
+ 
++static user_data_importer::ImportedPasswordForm::Scheme ConvertToPasswordFormScheme(
++    password_manager::PasswordForm::Scheme scheme) {
++  switch (scheme) {
++    case password_manager::PasswordForm::Scheme::kHtml:
++      return user_data_importer::ImportedPasswordForm::Scheme::kHtml;
++    case password_manager::PasswordForm::Scheme::kBasic:
++      return user_data_importer::ImportedPasswordForm::Scheme::kBasic;
++  }
++
++  return user_data_importer::ImportedPasswordForm::Scheme::kHtml;
++}
++
++static user_data_importer::ImportedPasswordForm ConvertImportedPasswordForm(
++    const password_manager::PasswordForm& form) {
++  user_data_importer::ImportedPasswordForm result;
++  result.scheme = ConvertToPasswordFormScheme(form.scheme);
++  result.signon_realm = form.signon_realm;
++  result.url = form.url;
++  result.action = form.action;
++  result.username_element = form.username_element;
++  result.username_value = form.username_value;
++  result.password_element = form.password_element;
++  result.password_value = form.password_value;
++  result.blocked_by_user = form.blocked_by_user;
++  return result;
++}
++
++// A struct that hosts the information of AutoComplete data in PStore.
++struct AutoCompleteInfo {
++  std::wstring key;
++  std::vector<std::wstring> data;
++  bool is_url;
++};
++void IEImporter::ImportPasswordsIE6() {
++  GUID AutocompleteGUID = kPStoreAutocompleteGUID;
++  if (!source_path_.empty()) {
++    // We supply a fake GUID for testting.
++    AutocompleteGUID = kUnittestGUID;
++  }
++
++  // The PStoreCreateInstance function retrieves an interface pointer
++  // to a storage provider. But this function has no associated import
++  // library or header file, we must call it using the LoadLibrary()
++  // and GetProcAddress() functions.
++  typedef HRESULT(WINAPI * PStoreCreateFunc)(IPStore**, DWORD, DWORD, DWORD);
++  HMODULE pstorec_dll = LoadLibrary(L"pstorec.dll");
++  if (!pstorec_dll)
++    return;
++  PStoreCreateFunc PStoreCreateInstance =
++      (PStoreCreateFunc)GetProcAddress(pstorec_dll, "PStoreCreateInstance");
++  if (!PStoreCreateInstance) {
++    FreeLibrary(pstorec_dll);
++    return;
++  }
++
++  Microsoft::WRL::ComPtr<IPStore> pstore;
++  HRESULT result = PStoreCreateInstance(pstore.GetAddressOf(), 0, 0, 0);
++  if (result != S_OK) {
++    FreeLibrary(pstorec_dll);
++    return;
++  }
++
++  std::vector<AutoCompleteInfo> ac_list;
++
++  // Enumerates AutoComplete items in the protected database.
++  Microsoft::WRL::ComPtr<IEnumPStoreItems> item;
++  result = pstore->EnumItems(0, &AutocompleteGUID, &AutocompleteGUID, 0,
++                             item.GetAddressOf());
++  if (result != PST_E_OK) {
++    pstore.Reset();
++    FreeLibrary(pstorec_dll);
++    return;
++  }
++
++  wchar_t* item_name;
++  while (!cancelled() && SUCCEEDED(item->Next(1, &item_name, 0))) {
++    DWORD length = 0;
++    unsigned char* buffer = NULL;
++    result = pstore->ReadItem(0, &AutocompleteGUID, &AutocompleteGUID,
++                              item_name, &length, &buffer, NULL, 0);
++    if (SUCCEEDED(result)) {
++      AutoCompleteInfo ac;
++      ac.key = item_name;
++      std::wstring data;
++      data.insert(0, reinterpret_cast<wchar_t*>(buffer),
++                  length / sizeof(wchar_t));
++
++      // The key name is always ended with ":StringData".
++      const wchar_t kDataSuffix[] = L":StringData";
++      size_t i = ac.key.rfind(kDataSuffix);
++      if (i != std::u16string::npos && ac.key.substr(i) == kDataSuffix) {
++        ac.key.erase(i);
++        ac.is_url = (ac.key.find(L"://") != std::u16string::npos);
++        ac_list.push_back(ac);
++        ac_list.back().data =
++            base::SplitString(data, std::wstring(1, '\0'),
++                              base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++      }
++      CoTaskMemFree(buffer);
++    }
++    CoTaskMemFree(item_name);
++  }
++  // Releases them before unload the dll.
++  item.Reset();
++  pstore.Reset();
++  FreeLibrary(pstorec_dll);
++
++  size_t i;
++  for (i = 0; i < ac_list.size(); i++) {
++    if (!ac_list[i].is_url || ac_list[i].data.size() < 2)
++      continue;
++
++    GURL url(base::WideToUTF16(ac_list[i].key.c_str()));
++    if (!(base::EqualsCaseInsensitiveASCII(url.scheme(), url::kHttpScheme) ||
++          base::EqualsCaseInsensitiveASCII(url.scheme(), url::kHttpsScheme))) {
++      continue;
++    }
++
++    password_manager::PasswordForm form;
++    GURL::Replacements rp;
++    rp.ClearUsername();
++    rp.ClearPassword();
++    rp.ClearQuery();
++    rp.ClearRef();
++    form.url = url.ReplaceComponents(rp);
++    form.username_value = base::WideToUTF16(ac_list[i].data[0]);
++    form.password_value = base::WideToUTF16(ac_list[i].data[1]);
++    form.signon_realm = url.DeprecatedGetOriginAsURL().spec();
++
++    // Goes through the list to find out the username field
++    // of the web page.
++    size_t list_it, item_it;
++    for (list_it = 0; list_it < ac_list.size(); ++list_it) {
++      if (ac_list[list_it].is_url)
++        continue;
++
++      for (item_it = 0; item_it < ac_list[list_it].data.size(); ++item_it)
++        if (base::WideToUTF16(ac_list[list_it].data[item_it]) == form.username_value) {
++          form.username_element = base::WideToUTF16(ac_list[list_it].key);
++          break;
++        }
++    }
++
++    bridge_->SetPasswordForm(ConvertImportedPasswordForm(form));
++  }
++}
++
++void IEImporter::ImportPasswordsIE7() {
++  std::wstring key_path(importer::GetIE7PasswordsKey());
++  base::win::RegKey key(HKEY_CURRENT_USER, key_path.c_str(), KEY_READ);
++  base::win::RegistryValueIterator reg_iterator(HKEY_CURRENT_USER,
++                                                key_path.c_str());
++  user_data_importer::ImporterIE7PasswordInfo password_info;
++  while (reg_iterator.Valid() && !cancelled()) {
++    // Get the size of the encrypted data.
++    DWORD value_len = 0;
++    key.ReadValue(reg_iterator.Name(), NULL, &value_len, NULL);
++    if (value_len) {
++      // Query the encrypted data.
++      password_info.encrypted_data.resize(value_len);
++      if (key.ReadValue(reg_iterator.Name(),
++                        &password_info.encrypted_data.front(), &value_len,
++                        NULL) == ERROR_SUCCESS) {
++        password_info.url_hash = base::WideToUTF16(reg_iterator.Name());
++        password_info.date_created = base::Time::Now();
++
++        bridge_->AddIE7PasswordInfo(password_info);
++      }
++    }
++
++    ++reg_iterator;
++  }
++}
++
+ void IEImporter::ImportSearchEngines() {
+   // On IE, search engines are stored in the registry, under:
+   // Software\Microsoft\Internet Explorer\SearchScopes
+@@ -738,3 +890,15 @@ void IEImporter::ParseFavoritesFolder(
+        iter != favicon_map.end(); ++iter)
+     favicons->push_back(iter->second);
+ }
++
++int IEImporter::CurrentIEVersion() const {
++  static int version = -1;
++  if (version < 0) {
++    wchar_t buffer[128];
++    DWORD buffer_length = sizeof(buffer);
++    base::win::RegKey reg_key(HKEY_LOCAL_MACHINE, kIEVersionKey, KEY_READ);
++    LONG result = reg_key.ReadValue(L"Version", buffer, &buffer_length, NULL);
++    version = ((result == ERROR_SUCCESS) ? _wtoi(buffer) : 0);
++  }
++  return version;
++}
+diff --git a/chrome/utility/importer/ie_importer_win.h b/chrome/utility/importer/ie_importer_win.h
+index 0c9de8de083b9..cfe8b7f26c854 100644
+--- a/chrome/utility/importer/ie_importer_win.h
++++ b/chrome/utility/importer/ie_importer_win.h
+@@ -52,6 +52,12 @@ class IEImporter : public Importer {
+   // Reads history information from COM interface.
+   void ImportHistory();
+ 
++  // Import password for IE6 stored in protected storage.
++  void ImportPasswordsIE6();
++
++  // Import password for IE7 and IE8 stored in Storage2.
++  void ImportPasswordsIE7();
++
+   void ImportSearchEngines();
+ 
+   // Import the homepage setting of IE. Note: IE supports multiple home pages,
+@@ -69,6 +75,9 @@ class IEImporter : public Importer {
+                             BookmarkVector* bookmarks,
+                             favicon_base::FaviconUsageDataList* favicons);
+ 
++  // Determines which version of IE is in use.
++  int CurrentIEVersion() const;
++
+   // Set to true when importing favorites from old Edge on Windows 10.
+   bool edge_import_mode_;
+ 
+diff --git a/chrome/common/importer/ie_importer_utils_win.cc b/chrome/common/importer/ie_importer_utils_win.cc
+index fce8abb61ab21..afd79ff9ffcdc 100644
+--- a/chrome/common/importer/ie_importer_utils_win.cc
++++ b/chrome/common/importer/ie_importer_utils_win.cc
+@@ -12,6 +12,9 @@ const wchar_t kIEFavoritesOrderKey[] =
+     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MenuOrder\\"
+     L"Favorites";
+ 
++const wchar_t kIEStorage2Key[] =
++    L"Software\\Microsoft\\Internet Explorer\\IntelliForms\\Storage2";
++
+ const wchar_t kIESettingsMainKey[] =
+     L"Software\\Microsoft\\Internet Explorer\\Main";
+ 
+@@ -31,6 +34,11 @@ std::wstring GetIEFavoritesOrderKey() {
+   return GetPotentiallyOverridenIEKey(kIEFavoritesOrderKey);
+ }
+ 
++std::wstring GetIE7PasswordsKey() {
++  // Return kIEStorage2Key unless an override has been set for tests.
++  return GetPotentiallyOverridenIEKey(kIEStorage2Key);
++}
++
+ std::wstring GetIESettingsKey() {
+   // Return kIESettingsMainKey unless an override has been set for tests.
+   return GetPotentiallyOverridenIEKey(kIESettingsMainKey);
+diff --git a/chrome/common/importer/ie_importer_utils_win.h b/chrome/common/importer/ie_importer_utils_win.h
+index 99d12672439e3..1686a12dd36ef 100644
+--- a/chrome/common/importer/ie_importer_utils_win.h
++++ b/chrome/common/importer/ie_importer_utils_win.h
+@@ -13,6 +13,10 @@ namespace importer {
+ // Overridable by tests via ImporterTestRegistryOverrider.
+ std::wstring GetIEFavoritesOrderKey();
+ 
++// Returns the key to be used in HKCU to look for IE7 passwords.
++// Overridable by tests via ImporterTestRegistryOverrider.
++std::wstring GetIE7PasswordsKey();
++
+ // Returns the key to be used in HKCU to look for IE settings.
+ // Overridable by tests via ImporterTestRegistryOverrider.
+ std::wstring GetIESettingsKey();
