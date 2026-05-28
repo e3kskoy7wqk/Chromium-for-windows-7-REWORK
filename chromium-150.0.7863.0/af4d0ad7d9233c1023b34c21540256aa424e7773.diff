@@ -1,0 +1,203 @@
+diff --git a/gpu/config/gpu_test_config.cc b/gpu/config/gpu_test_config.cc
+index f757f12625dd4..d63e283a63871 100644
+--- a/gpu/config/gpu_test_config.cc
++++ b/gpu/config/gpu_test_config.cc
+@@ -302,6 +302,12 @@ bool GPUTestBotConfig::CurrentConfigMatches(
+ 
+ // static
+ bool GPUTestBotConfig::GpuBlocklistedOnBot() {
++#if BUILDFLAG(IS_WIN)
++  // Blacklist rule #79 disables all Gpu acceleration before Windows 7.
++  if (base::win::GetVersion() <= base::win::Version::VISTA) {
++    return true;
++  }
++#endif
+   return false;
+ }
+ 
+diff --git a/media/audio/win/audio_manager_win.cc b/media/audio/win/audio_manager_win.cc
+index fa38c58d9f138..6b96668c5d3a9 100644
+--- a/media/audio/win/audio_manager_win.cc
++++ b/media/audio/win/audio_manager_win.cc
+@@ -122,7 +122,13 @@ static int NumberOfWaveOutBuffers() {
+     return buffers;
+   }
+ 
+-  return 3;
++  // Use 4 buffers for Vista, 3 for everyone else:
++  //  - The entire Windows audio stack was rewritten for Windows Vista and wave
++  //    out performance was degraded compared to XP.
++  //  - The regression was fixed in Windows 7 and most configurations will work
++  //    with 2, but some (e.g., some Sound Blasters) still need 3.
++  //  - Some XP configurations (even multi-processor ones) also need 3.
++  return (base::win::GetVersion() == base::win::Version::VISTA) ? 4 : 3;
+ }
+ 
+ }  // namespace
+diff --git a/media/audio/win/core_audio_util_win.cc b/media/audio/win/core_audio_util_win.cc
+index b5871b814164d..73edb83e7a9a7 100644
+--- a/media/audio/win/core_audio_util_win.cc
++++ b/media/audio/win/core_audio_util_win.cc
+@@ -203,6 +204,12 @@ static bool IsSupportedInternal() {
+     return false;
+   }
+ 
++  // Microsoft does not plan to make the Core Audio APIs available for use
++  // with earlier versions of Windows, including Microsoft Windows Server 2003,
++  // Windows XP, Windows Millennium Edition, Windows 2000, and Windows 98.
++  if (base::win::GetVersion() < base::win::Version::VISTA)
++    return false;
++
+   // Verify that it is possible to a create the IMMDeviceEnumerator interface.
+   ComPtr<IMMDeviceEnumerator> device_enumerator =
+       CreateDeviceEnumeratorInternal(false);
+diff --git a/rlz/win/lib/process_info.cc b/rlz/win/lib/process_info.cc
+index dc85c8420eb8c..8bf09e1fe7ce5 100644
+--- a/rlz/win/lib/process_info.cc
++++ b/rlz/win/lib/process_info.cc
+@@ -25,6 +25,9 @@ HRESULT GetElevationType(PTOKEN_ELEVATION_TYPE elevation) {
+ 
+   *elevation = TokenElevationTypeDefault;
+ 
++  if (base::win::GetVersion() < base::win::Version::VISTA)
++    return E_FAIL;
++
+   HANDLE process_token;
+   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &process_token))
+     return HRESULT_FROM_WIN32(GetLastError());
+@@ -42,6 +45,39 @@ HRESULT GetElevationType(PTOKEN_ELEVATION_TYPE elevation) {
+   return S_OK;
+ }
+ 
++// based on http://msdn2.microsoft.com/en-us/library/aa376389.aspx
++bool GetUserGroup(long* group) {
++  if (!group)
++    return false;
++
++  *group = 0;
++
++  // groups are listed in DECREASING order of importance
++  // (eg. If a user is a member of both the admin group and
++  // the power user group, it is more useful to list the user
++  // as an admin)
++  DWORD user_groups[] =  {DOMAIN_ALIAS_RID_ADMINS,
++                          DOMAIN_ALIAS_RID_POWER_USERS};
++  SID_IDENTIFIER_AUTHORITY nt_authority = {SECURITY_NT_AUTHORITY};
++
++  for (size_t i = 0; i < sizeof(user_groups)/sizeof(user_groups[0]) && *group == 0; ++i) {
++    PSID current_group;
++    if (AllocateAndInitializeSid(&nt_authority, 2,
++                                 SECURITY_BUILTIN_DOMAIN_RID,
++                                 user_groups[i], 0, 0, 0, 0,
++                                 0, 0, &current_group)) {
++      BOOL current_level;
++      if (CheckTokenMembership(NULL, current_group, &current_level) &&
++          current_level) {
++        *group = user_groups[i];
++      }
++
++      FreeSid(current_group);
++    }
++  }
++
++  return group != 0;
++}
+ }  //anonymous
+ 
+ 
+@@ -63,7 +99,7 @@ bool ProcessInfo::HasAdminRights() {
+   if (!evaluated) {
+     if (IsRunningAsSystem()) {
+       has_rights = true;
+-    } else {
++    } else if (base::win::GetVersion() >= base::win::Version::VISTA) {
+       TOKEN_ELEVATION_TYPE elevation;
+       if (SUCCEEDED(GetElevationType(&elevation))) {
+         base::IntegrityLevel level = base::GetCurrentProcessIntegrityLevel();
+@@ -72,6 +108,10 @@ bool ProcessInfo::HasAdminRights() {
+                        (level == base::HIGH_INTEGRITY);
+         }
+       }
++    } else {
++      long group = 0;
++      if (GetUserGroup(&group))
++        has_rights = (group == DOMAIN_ALIAS_RID_ADMINS);
+     }
+   }
+ 
+diff --git a/rlz/win/lib/registry_util.cc b/rlz/win/lib/registry_util.cc
+index 6feaea443f3a0..8fba7dd47aa2f 100644
+--- a/rlz/win/lib/registry_util.cc
++++ b/rlz/win/lib/registry_util.cc
+@@ -58,6 +58,9 @@ bool HasUserKeyAccess(bool write_access) {
+   }
+ 
+   if (write_access) {
++    if (base::win::GetVersion() < base::win::Version::VISTA)
++      return true;
++
+     if (base::GetCurrentProcessIntegrityLevel() <= base::LOW_INTEGRITY) {
+       ASSERT_STRING("UserKey::HasAccess: Cannot write from Low Integrity.");
+       return false;
+diff --git a/services/device/battery/battery_status_manager_win.cc b/services/device/battery/battery_status_manager_win.cc
+index 2a46e5d91c3f2..252001f4cce8c 100644
+--- a/services/device/battery/battery_status_manager_win.cc
++++ b/services/device/battery/battery_status_manager_win.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "base/callback_list.h"
+ #include "base/functional/bind.h"
++#include "base/win/windows_version.h"
+ #include "services/device/battery/battery_status_manager.h"
+ #include "ui/gfx/win/singleton_hwnd.h"
+ 
+@@ -119,12 +120,18 @@ class BatteryStatusObserver {
+   }
+ 
+   HPOWERNOTIFY RegisterNotification(LPCGUID power_setting) {
++    if (base::win::GetVersion() < base::win::Version::VISTA)
++      return NULL;
++
+     return RegisterPowerSettingNotification(
+         gfx::SingletonHwnd::GetInstance()->hwnd(), power_setting,
+         DEVICE_NOTIFY_WINDOW_HANDLE);
+   }
+ 
+   BOOL UnregisterNotification(HPOWERNOTIFY handle) {
++    if (base::win::GetVersion() < base::win::Version::VISTA)
++      return FALSE;
++
+     return UnregisterPowerSettingNotification(handle);
+   }
+ 
+diff --git a/ui/base/win/power_setting_change_listener.cc b/ui/base/win/power_setting_change_listener.cc
+index b7216f8421d80..96189c0845ef6 100644
+--- a/ui/base/win/power_setting_change_listener.cc
++++ b/ui/base/win/power_setting_change_listener.cc
+@@ -9,6 +9,7 @@
+ #include "base/location.h"
+ #include "base/memory/singleton.h"
+ #include "base/observer_list.h"
++#include "base/win/windows_version.h"
+ #include "ui/gfx/win/singleton_hwnd.h"
+ 
+ namespace ui {
+@@ -88,12 +89,18 @@ void PowerSettingChangeObserver::OnDisplayStateChanged(bool display_on) {
+ 
+ HPOWERNOTIFY PowerSettingChangeObserver::RegisterNotification(
+     LPCGUID power_setting) {
++  if (base::win::GetVersion() < base::win::Version::VISTA)
++    return NULL;
++
+   return RegisterPowerSettingNotification(
+       gfx::SingletonHwnd::GetInstance()->hwnd(), power_setting,
+       DEVICE_NOTIFY_WINDOW_HANDLE);
+ }
+ 
+ BOOL PowerSettingChangeObserver::UnregisterNotification(HPOWERNOTIFY handle) {
++  if (base::win::GetVersion() < base::win::Version::VISTA)
++    return FALSE;
++
+   return UnregisterPowerSettingNotification(handle);
+ }
+ 

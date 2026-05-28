@@ -1,0 +1,141 @@
+diff --git a/third_party/swiftshader/third_party/marl/src/thread.cpp b/third_party/swiftshader/third_party/marl/src/thread.cpp
+index 3a275c9..bd3a2fa 100644
+--- a/third_party/swiftshader/third_party/marl/src/thread.cpp
++++ b/third_party/swiftshader/third_party/marl/src/thread.cpp
+@@ -89,9 +89,25 @@ struct ProcessorGroups {
+ const ProcessorGroups& getProcessorGroups() {
+   static ProcessorGroups groups = [] {
+     ProcessorGroups out = {};
++    typedef BOOL (WINAPI *PFnGetLogicalProcessorInformationEx)(LOGICAL_PROCESSOR_RELATIONSHIP, PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, PDWORD);
++    PFnGetLogicalProcessorInformationEx pfnGetLogicalProcessorInformationEx
++        = (PFnGetLogicalProcessorInformationEx) GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
++                                                                "GetLogicalProcessorInformationEx");
++    if (pfnGetLogicalProcessorInformationEx == NULL)
++    {
++    SYSTEM_INFO  SystemInfo;
++
++    GetSystemInfo( &SystemInfo );
++
++    out.groups[out.count].affinity = (DWORD)SystemInfo.dwActiveProcessorMask;
++    out.groups[out.count++].count = SystemInfo.dwNumberOfProcessors;
++
++    return out;
++    }
++
+     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info[32] = {};
+     DWORD size = sizeof(info);
+-    CHECK_WIN32(GetLogicalProcessorInformationEx(RelationGroup, info, &size));
++    CHECK_WIN32(pfnGetLogicalProcessorInformationEx(RelationGroup, info, &size));
+     DWORD count = size / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX);
+     for (DWORD i = 0; i < count; i++) {
+       if (info[i].Relationship == RelationGroup) {
+@@ -279,15 +295,35 @@ Thread::Affinity& Thread::Affinity::remove(const Thread::Affinity& other) {
+ class Thread::Impl {
+  public:
+   Impl(Func&& func, _PROC_THREAD_ATTRIBUTE_LIST* attributes)
+-      : func(std::move(func)),
+-        handle(CreateRemoteThreadEx(GetCurrentProcess(),
++      : func(std::move(func)) {
++typedef HANDLE(WINAPI* pfnCreateRemoteThreadEx)(
++    IN            HANDLE                        hProcess,
++    IN OPTIONAL   LPSECURITY_ATTRIBUTES         lpThreadAttributes,
++    IN            SIZE_T                        dwStackSize,
++    IN            LPTHREAD_START_ROUTINE        lpStartAddress,
++    IN OPTIONAL   LPVOID                        lpParameter,
++    IN            DWORD                         dwCreationFlags,
++    IN OPTIONAL   LPPROC_THREAD_ATTRIBUTE_LIST  lpAttributeList,
++    OUT OPTIONAL  LPDWORD                       lpThreadId
++);
++
++pfnCreateRemoteThreadEx pCreateRemoteThreadEx       =     (pfnCreateRemoteThreadEx)GetProcAddress(GetModuleHandleW(L"KERNEL32.DLL"), "CreateRemoteThreadEx");
++    if( pCreateRemoteThreadEx != nullptr )
++    {
++        handle=pCreateRemoteThreadEx(GetCurrentProcess(),
+                                     nullptr,
+                                     0,
+                                     &Impl::run,
+                                     this,
+                                     0,
+                                     attributes,
+-                                    nullptr)) {}
++                                    nullptr);
++        return;
++    }
++
++  handle = CreateRemoteThread(GetCurrentProcess(), nullptr, 0,
++                                      &Impl::run, this, 0, nullptr);
++  }
+   ~Impl() { CloseHandle(handle); }
+ 
+   Impl(const Impl&) = delete;
+@@ -304,20 +340,57 @@ class Thread::Impl {
+ 
+  private:
+   const Func func;
+-  const HANDLE handle;
++  HANDLE handle;
+ };
+ 
+ Thread::Thread(Affinity&& affinity, Func&& func) {
+   SIZE_T size = 0;
+-  InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
++typedef BOOL (WINAPI *InitializeProcThreadAttributeListFunction)(
++    LPPROC_THREAD_ATTRIBUTE_LIST attribute_list,
++    DWORD attribute_count,
++    DWORD flags,
++    PSIZE_T size);
++static InitializeProcThreadAttributeListFunction
++    initialize_proc_thread_attribute_list;
++
++typedef BOOL (WINAPI *UpdateProcThreadAttributeFunction)(
++    LPPROC_THREAD_ATTRIBUTE_LIST attribute_list,
++    DWORD flags,
++    DWORD_PTR attribute,
++    PVOID value,
++    SIZE_T size,
++    PVOID previous_value,
++    PSIZE_T return_size);
++static UpdateProcThreadAttributeFunction update_proc_thread_attribute_list;
++
++typedef VOID (WINAPI *DeleteProcThreadAttributeListFunction)(
++    LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList);
++static DeleteProcThreadAttributeListFunction delete_proc_thread_attribute_list;
++
++  // Load the attribute API functions.
++  if (!initialize_proc_thread_attribute_list ||
++      !update_proc_thread_attribute_list ||
++      !delete_proc_thread_attribute_list) {
++    HMODULE module = ::GetModuleHandleW(L"kernel32.dll");
++    initialize_proc_thread_attribute_list =
++        reinterpret_cast<InitializeProcThreadAttributeListFunction>(
++            ::GetProcAddress(module, "InitializeProcThreadAttributeList"));
++    update_proc_thread_attribute_list =
++        reinterpret_cast<UpdateProcThreadAttributeFunction>(
++            ::GetProcAddress(module, "UpdateProcThreadAttribute"));
++    delete_proc_thread_attribute_list =
++        reinterpret_cast<DeleteProcThreadAttributeListFunction>(
++            ::GetProcAddress(module, "DeleteProcThreadAttributeList"));
++  }
++  if (initialize_proc_thread_attribute_list) initialize_proc_thread_attribute_list(nullptr, 1, 0, &size);
+   MARL_ASSERT(size > 0,
+               "InitializeProcThreadAttributeList() did not give a size");
+ 
+   std::vector<uint8_t> buffer(size);
+   LPPROC_THREAD_ATTRIBUTE_LIST attributes =
+       reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buffer.data());
+-  CHECK_WIN32(InitializeProcThreadAttributeList(attributes, 1, 0, &size));
+-  defer(DeleteProcThreadAttributeList(attributes));
++  if (initialize_proc_thread_attribute_list) CHECK_WIN32(initialize_proc_thread_attribute_list(attributes, 1, 0, &size));
++  if (delete_proc_thread_attribute_list) defer(delete_proc_thread_attribute_list(attributes));
+ 
+   GROUP_AFFINITY groupAffinity = {};
+ 
+@@ -330,7 +403,7 @@ Thread::Thread(Affinity&& affinity, Func&& func) {
+                   "Cannot create thread that uses multiple affinity groups");
+       groupAffinity.Mask |= (1ULL << core.windows.index);
+     }
+-    CHECK_WIN32(UpdateProcThreadAttribute(
++    if (update_proc_thread_attribute_list && GetProcAddress(GetModuleHandleW(L"KERNEL32.DLL"), "CreateRemoteThreadEx")) CHECK_WIN32(update_proc_thread_attribute_list(
+         attributes, 0, PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY, &groupAffinity,
+         sizeof(groupAffinity), nullptr, nullptr));
+   }

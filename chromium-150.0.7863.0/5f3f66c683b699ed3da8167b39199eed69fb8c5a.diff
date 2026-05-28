@@ -1,0 +1,52 @@
+diff --git a/third_party/libxml/src/threads.c b/third_party/libxml/src/threads.c
+index 4a087562a1eec..6177eeac58f6d 100644
+--- a/third_party/libxml/src/threads.c
++++ b/third_party/libxml/src/threads.c
+@@ -385,7 +385,7 @@ static int xmlParserInitialized = 0;
+ #ifdef HAVE_POSIX_THREADS
+ static pthread_once_t onceControl = PTHREAD_ONCE_INIT;
+ #elif defined HAVE_WIN32_THREADS
+-static INIT_ONCE onceControl = INIT_ONCE_STATIC_INIT;
++static volatile long onceControl = 0;
+ #else
+ static int onceControl = 0;
+ #endif
+@@ -422,6 +422,29 @@ xmlInitParserWinWrapper(INIT_ONCE *initOnce ATTRIBUTE_UNUSED,
+ }
+ #endif
+ 
++static int fake_pthread_once(volatile long *once_control,
++                             void (*init_routine)(void)) {
++    // Try for a fast path first. Note: this should be an acquire semantics read
++    // It is on x86 and x64, where Windows runs.
++    if (*once_control != 1) {
++        while (1) {
++            switch (InterlockedCompareExchange(once_control, 2, 0)) {
++                case 0:
++                    init_routine();
++                    InterlockedExchange(once_control, 1);
++                    return 0;
++                case 1:
++                    // The initializer has already been executed
++                    return 0;
++                default:
++                    // The initializer is being processed by another thread
++                    SwitchToThread();
++            }
++        }
++    }
++    return 0;
++}
++
+ /**
+  * Initialization function for the XML parser.
+  *
+@@ -439,7 +462,7 @@ xmlInitParser(void) {
+ #ifdef HAVE_POSIX_THREADS
+     pthread_once(&onceControl, xmlInitParserInternal);
+ #elif defined(HAVE_WIN32_THREADS)
+-    InitOnceExecuteOnce(&onceControl, xmlInitParserWinWrapper, NULL, NULL);
++    fake_pthread_once(&onceControl, xmlInitParserInternal);
+ #else
+     if (onceControl == 0) {
+         xmlInitParserInternal();

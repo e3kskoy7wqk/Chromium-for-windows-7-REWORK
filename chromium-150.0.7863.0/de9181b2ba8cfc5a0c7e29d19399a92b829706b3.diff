@@ -1,0 +1,13 @@
+diff --git a/third_party/vulkan_memory_allocator/include/vk_mem_alloc.h b/third_party/vulkan_memory_allocator/include/vk_mem_alloc.h
+index a09dd96..4e860db 100644
+--- a/third_party/vulkan_memory_allocator/include/vk_mem_alloc.h
++++ b/third_party/vulkan_memory_allocator/include/vk_mem_alloc.h
+@@ -4074,7 +4074,7 @@ void *aligned_alloc(size_t alignment, size_t size)
+             std::shared_mutex m_Mutex;
+         };
+         #define VMA_RW_MUTEX VmaRWMutex
+-    #elif defined(_WIN32) && defined(WINVER) && WINVER >= 0x0600
++    #elif defined(_WIN32) && defined(WINVER) && 0
+         // Use SRWLOCK from WinAPI.
+         // Minimum supported client = Windows Vista, server = Windows Server 2008.
+         class VmaRWMutex

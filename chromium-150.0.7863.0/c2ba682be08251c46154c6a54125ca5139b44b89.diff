@@ -1,0 +1,40 @@
+diff --git a/third_party/content_analysis_sdk/src/browser/src/client_win.cc b/third_party/content_analysis_sdk/src/browser/src/client_win.cc
+index a65179a..2dcfa39 100644
+--- a/third_party/content_analysis_sdk/src/browser/src/client_win.cc
++++ b/third_party/content_analysis_sdk/src/browser/src/client_win.cc
+@@ -28,10 +28,13 @@ ClientWin::ClientWin(Config config, int* rc) : ClientBase(std::move(config)) {
+   std::string pipename =
+     internal::GetPipeNameForClient(configuration().name,
+                                    configuration().user_specific);
++typedef	BOOL (WINAPI *GetNamedPipeClientProcessIdfunc)(HANDLE, PULONG);
++GetNamedPipeClientProcessIdfunc pfnGetNamedPipeServerProcessId = NULL;
+   if (!pipename.empty()) {
+     unsigned long pid = 0;
++    pfnGetNamedPipeServerProcessId = (GetNamedPipeClientProcessIdfunc)GetProcAddress(GetModuleHandleW(L"Kernel32.dll"), "GetNamedPipeServerProcessId");
+     if (ConnectToPipe(pipename, &hPipe_) == ERROR_SUCCESS &&
+-        GetNamedPipeServerProcessId(hPipe_, &pid)) {
++        pfnGetNamedPipeServerProcessId && pfnGetNamedPipeServerProcessId(hPipe_, &pid)) {
+       agent_info().pid = pid;
+ 
+       // Getting the process path is best effort.
+diff --git a/third_party/content_analysis_sdk/src/common/utils_win.cc b/third_party/content_analysis_sdk/src/common/utils_win.cc
+index d053a91..7def903 100644
+--- a/third_party/content_analysis_sdk/src/common/utils_win.cc
++++ b/third_party/content_analysis_sdk/src/common/utils_win.cc
+@@ -5,6 +5,7 @@
+ #include <vector>
+ 
+ #include <windows.h>
++#include <psapi.h>
+ #include <sddl.h>
+ 
+ #include "utils_win.h"
+@@ -126,7 +127,7 @@ bool GetProcessPath(unsigned long pid, std::string* binary_path) {
+   
+   char path[MAX_PATH];
+   DWORD size = sizeof(path);
+-  DWORD length = QueryFullProcessImageNameA(hProc, /*flags=*/0, path, &size);
++  DWORD length = GetModuleFileNameExA(hProc, /*flags=*/0, path, size);
+   CloseHandle(hProc);
+   if (length == 0) {
+     return false;

@@ -1,0 +1,23 @@
+diff --git a/chrome/installer/setup/uninstall.cc b/chrome/installer/setup/uninstall.cc
+index ff9ebbbb58414..62ee7762f0aa8 100644
+--- a/chrome/installer/setup/uninstall.cc
++++ b/chrome/installer/setup/uninstall.cc
+@@ -9,6 +9,7 @@
+ #include <shlobj.h>
+ #include <stddef.h>
+ #include <stdint.h>
++#include <psapi.h>
+ 
+ #include <initializer_list>
+ #include <memory>
+@@ -159,8 +161,8 @@ class ProcessPathPrefixFilter : public base::ProcessFilter {
+ 
+     DWORD path_len = MAX_PATH;
+     wchar_t path_string[MAX_PATH];
+-    if (::QueryFullProcessImageName(process.Handle(), 0, path_string,
+-                                    &path_len)) {
++    if (::GetModuleFileNameExW(process.Handle(), 0, path_string,
++                                    path_len)) {
+       base::FilePath file_path(path_string);
+       return base::StartsWith(file_path.value(), process_path_prefix_,
+                               base::CompareCase::INSENSITIVE_ASCII);

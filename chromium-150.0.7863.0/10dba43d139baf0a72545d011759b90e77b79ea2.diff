@@ -1,0 +1,113 @@
+diff --git a/ui/gl/dc_layer_tree.cc b/ui/gl/dc_layer_tree.cc
+index 554ee34fea445..b5d3c5ddfccd0 100644
+--- a/ui/gl/dc_layer_tree.cc
++++ b/ui/gl/dc_layer_tree.cc
+@@ -391,7 +391,7 @@ void DCLayerTree::Initialize(
+   dcomp_root_visual_->SetBitmapInterpolationMode(
+       DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR);
+ 
+-  hdr_metadata_helper_ = HDRMetadataHelperWin::Create();
++  hdr_metadata_helper_ = std::make_unique<HDRMetadataHelperWin>(d3d11_device_);
+ 
+   if (Microsoft::WRL::ComPtr<IDCompositionDevice5> dcomp_device5;
+       SUCCEEDED(dcomp_device_.As(&dcomp_device5))) {
+diff --git a/ui/gl/hdr_metadata_helper_win.cc b/ui/gl/hdr_metadata_helper_win.cc
+index 270ca4c11c498..8261dc204bd10 100644
+--- a/ui/gl/hdr_metadata_helper_win.cc
++++ b/ui/gl/hdr_metadata_helper_win.cc
+@@ -20,8 +20,8 @@ static constexpr int kMinLuminanceFixedPoint = 10000;
+ namespace gl {
+ 
+ HDRMetadataHelperWin::HDRMetadataHelperWin(
+-    Microsoft::WRL::ComPtr<IDXGIFactory> factory)
+-    : dxgi_factory_(std::move(factory)) {
++    Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device)
++    : d3d11_device_(std::move(d3d11_device)) {
+   UpdateDisplayMetadata();
+   ui::GpuSwitchingManager::GetInstance()->AddObserver(this);
+ }
+@@ -30,13 +30,6 @@ HDRMetadataHelperWin::~HDRMetadataHelperWin() {
+   ui::GpuSwitchingManager::GetInstance()->RemoveObserver(this);
+ }
+ 
+-std::unique_ptr<HDRMetadataHelperWin> HDRMetadataHelperWin::Create() {
+-  Microsoft::WRL::ComPtr<IDXGIFactory> dxgi_factory;
+-  HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&dxgi_factory));
+-  CHECK_EQ(hr, S_OK);
+-  return std::make_unique<HDRMetadataHelperWin>(std::move(dxgi_factory));
+-}
+-
+ std::optional<DXGI_HDR_METADATA_HDR10>
+ HDRMetadataHelperWin::GetDisplayMetadata() {
+   if (!brightest_monitor_) {
+@@ -63,6 +56,21 @@ void HDRMetadataHelperWin::UpdateDisplayMetadata() {
+   brightest_monitor_ = nullptr;
+   hdr_metadatas_.clear();
+ 
++  if (!d3d11_device_)
++    return;
++
++  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
++  HRESULT hr = d3d11_device_.As(&dxgi_device);
++  CHECK_EQ(hr, S_OK);
++
++  Microsoft::WRL::ComPtr<IDXGIAdapter> dxgi_adapter;
++  hr = dxgi_device->GetAdapter(&dxgi_adapter);
++  CHECK_EQ(hr, S_OK);
++
++  Microsoft::WRL::ComPtr<IDXGIFactory> dxgi_factory;
++  if (FAILED(dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory))))
++    return;
++
+   FLOAT max_luminance = 0;
+   HMONITOR brightest_monitor = nullptr;
+   std::unordered_map<HMONITOR, DXGI_HDR_METADATA_HDR10> hdr_metadatas;
+@@ -71,7 +79,7 @@ void HDRMetadataHelperWin::UpdateDisplayMetadata() {
+   // brightest monitor as the one we want as default.
+   Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+   for (unsigned int i = 0;
+-       dxgi_factory_->EnumAdapters(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
++       dxgi_factory->EnumAdapters(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
+     Microsoft::WRL::ComPtr<IDXGIOutput> output;
+     for (unsigned int u = 0;
+          adapter->EnumOutputs(u, &output) != DXGI_ERROR_NOT_FOUND; u++) {
+diff --git a/ui/gl/hdr_metadata_helper_win.h b/ui/gl/hdr_metadata_helper_win.h
+index 1c5343a59aa15..d0bc6fd6bfb3d 100644
+--- a/ui/gl/hdr_metadata_helper_win.h
++++ b/ui/gl/hdr_metadata_helper_win.h
+@@ -5,6 +5,7 @@
+ #ifndef UI_GL_HDR_METADATA_HELPER_WIN_H_
+ #define UI_GL_HDR_METADATA_HELPER_WIN_H_
+ 
++#include <d3d11_1.h>
+ #include <dxgi1_6.h>
+ #include <wrl/client.h>
+ 
+@@ -19,16 +20,14 @@ namespace gl {
+ 
+ class GL_EXPORT HDRMetadataHelperWin : ui::GpuSwitchingObserver {
+  public:
+-  HDRMetadataHelperWin() = delete;
+-  explicit HDRMetadataHelperWin(Microsoft::WRL::ComPtr<IDXGIFactory> factory);
++  explicit HDRMetadataHelperWin(
++      Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device);
+ 
+   HDRMetadataHelperWin(const HDRMetadataHelperWin&) = delete;
+   HDRMetadataHelperWin& operator=(const HDRMetadataHelperWin&) = delete;
+ 
+   ~HDRMetadataHelperWin() override;
+ 
+-  static std::unique_ptr<HDRMetadataHelperWin> Create();
+-
+   // Return the metadata of the brightest monitor, if available.  Must call
+   // UpdateDisplayMetadata first.
+   std::optional<DXGI_HDR_METADATA_HDR10> GetDisplayMetadata();
+@@ -54,7 +53,7 @@ class GL_EXPORT HDRMetadataHelperWin : ui::GpuSwitchingObserver {
+   void OnDisplayRemoved() override;
+ 
+  private:
+-  Microsoft::WRL::ComPtr<IDXGIFactory> dxgi_factory_;
++  Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device_;
+   HMONITOR brightest_monitor_ = nullptr;
+   std::unordered_map<HMONITOR, DXGI_HDR_METADATA_HDR10> hdr_metadatas_;
+ };
