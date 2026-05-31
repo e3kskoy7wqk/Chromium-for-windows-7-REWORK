@@ -1,0 +1,1 @@
+Add FLAG_CAN_DELETE_ON_CLOSE and DeleteOnClose for use on Windows.    2017/1/14 5:52:45    37dd92324bb996ba0c96e27f1e54f8d0f511294c

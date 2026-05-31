@@ -1,0 +1,1 @@
+Add secondary windows option for Windows.Graphics.Capture window capture    2025/9/24 5:15:46    412ea40eeb9971c6ca11e8f8789ad4d42e195710

@@ -1,0 +1,103 @@
+diff --git a/third_party/dawn/src/dawn/native/BUILD.gn b/third_party/dawn/src/dawn/native/BUILD.gn
+index e2cdfb0e4a..1f9682e620 100644
+--- a/third_party/dawn/src/dawn/native/BUILD.gn
++++ b/third_party/dawn/src/dawn/native/BUILD.gn
+@@ -440,7 +440,6 @@ source_set("sources") {
+   # In UWP, all available APIs are defined in WindowsApp.lib
+   if (is_win && !dawn_is_winuwp) {
+     libs += [
+-      "onecore.lib",
+       "user32.lib",
+       "delayimp.lib",
+     ]
+diff --git a/third_party/dawn/src/dawn/native/CMakeLists.txt b/third_party/dawn/src/dawn/native/CMakeLists.txt
+index d17a3e446e..6a144efbf6 100644
+--- a/third_party/dawn/src/dawn/native/CMakeLists.txt
++++ b/third_party/dawn/src/dawn/native/CMakeLists.txt
+@@ -293,14 +293,11 @@ list(APPEND conditional_private_platform_depends
+     ${CMAKE_DL_LIBS}
+ )
+ 
+-# Only win32 app needs to link with user32.lib and onecore_apiset.lib
++# Only win32 app needs to link with user32.lib
+ # In UWP, all availiable APIs are defined in WindowsApp.lib
+ # and is automatically linked when WINDOWS_STORE set
+ if (WIN32 AND NOT WINDOWS_STORE)
+-  list(APPEND conditional_private_platform_depends
+-       user32.lib
+-       onecore_apiset.lib
+-  )
++  list(APPEND conditional_private_platform_depends user32.lib)
+ endif()
+ 
+ # DXGIGetDebugInterface1 is defined in dxgi.lib
+diff --git a/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp b/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp
+index 635b9db9ac..b7ce6cc1bc 100644
+--- a/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp
++++ b/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp
+@@ -64,6 +64,7 @@ PlatformFunctions::~PlatformFunctions() = default;
+ 
+ MaybeError PlatformFunctions::Initialize() {
+     DAWN_TRY(LoadDXGI());
++    DAWN_TRY(LoadKernelBase());
+     InitWindowsVersion();
+     return {};
+ }
+@@ -118,6 +119,19 @@ MaybeError PlatformFunctions::LoadFXCompiler() {
+     return {};
+ }
+ 
++MaybeError PlatformFunctions::LoadKernelBase() {
++#if DAWN_PLATFORM_IS(WINUWP)
++    compareObjectHandles = &CompareObjectHandles;
++#else
++    std::string error;
++    if (!mKernelBaseLib.OpenSystemLibrary(L"kernelbase.dll", &error) ||
++        !mKernelBaseLib.GetProc(&compareObjectHandles, "CompareObjectHandles", &error)) {
++        return DAWN_INTERNAL_ERROR(error.c_str());
++    }
++#endif
++    return {};
++}
++
+ void PlatformFunctions::InitWindowsVersion() {
+     // Currently we only care about the build number of Windows 10 and Windows 11.
+     if (!IsWindows10OrGreater()) {
+diff --git a/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.h b/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.h
+index e886f863be..a8d3d14fa6 100644
+--- a/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.h
++++ b/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.h
+@@ -64,12 +64,19 @@ class PlatformFunctions {
+     pD3DCompile d3dCompile = nullptr;
+     pD3DDisassemble d3dDisassemble = nullptr;
+ 
++    // Functions from kernelbase.dll
++    using PFN_COMPARE_OBJECT_HANDLES = BOOL(WINAPI*)(HANDLE hFirstObjectHandle,
++                                                     HANDLE hSecondObjectHandle);
++    PFN_COMPARE_OBJECT_HANDLES compareObjectHandles = nullptr;
++
+   private:
+     MaybeError LoadDXGI();
++    MaybeError LoadKernelBase();
+     void InitWindowsVersion();
+ 
+     DynamicLib mDXGILib;
+     DynamicLib mFXCompilerLib;
++    DynamicLib mKernelBaseLib;
+ 
+     uint64_t mCurrentBuildNumber;
+ };
+diff --git a/third_party/dawn/src/dawn/native/d3d11/SharedFenceD3D11.cpp b/third_party/dawn/src/dawn/native/d3d11/SharedFenceD3D11.cpp
+index e61ea15141..45e07d0f5b 100644
+--- a/third_party/dawn/src/dawn/native/d3d11/SharedFenceD3D11.cpp
++++ b/third_party/dawn/src/dawn/native/d3d11/SharedFenceD3D11.cpp
+@@ -42,7 +42,8 @@ bool IsSameHandle(DeviceBase* device, HANDLE handle, HANDLE other) {
+         return true;
+     }
+ 
+-    return ::CompareObjectHandles(handle, other);
++    auto deviceD3D11 = ToBackend(device);
++    return deviceD3D11->GetFunctions()->compareObjectHandles(handle, other);
+ }
+ }  // namespace
+ 
