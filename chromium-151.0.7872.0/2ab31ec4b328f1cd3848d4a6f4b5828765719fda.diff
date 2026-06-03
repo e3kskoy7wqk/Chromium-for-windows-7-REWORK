@@ -1,0 +1,182 @@
+diff --git a/base/win/core_winrt_util_unittest.cc b/base/win/core_winrt_util_unittest.cc
+index f4f768dca745e..e920150eaf871 100644
+--- a/base/win/core_winrt_util_unittest.cc
++++ b/base/win/core_winrt_util_unittest.cc
+@@ -6,12 +6,18 @@
+ 
+ #include "base/win/com_init_util.h"
+ #include "base/win/scoped_com_initializer.h"
++#include "base/win/windows_version.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+-namespace base::win {
++namespace base {
++namespace win {
+ 
+ TEST(CoreWinrtUtilTest, PreloadFunctions) {
+-  EXPECT_TRUE(ResolveCoreWinRTDelayload());
++  if (GetVersion() < Version::WIN8)
++    EXPECT_FALSE(ResolveCoreWinRTDelayload());
++  else
++    EXPECT_TRUE(ResolveCoreWinRTDelayload());
+ }
+ 
+-}  // namespace base::win
++}  // namespace win
++}  // namespace base
+diff --git a/base/win/hstring_compare.cc b/base/win/hstring_compare.cc
+index c2f21067a7918..8cecac97c4cdc 100644
+--- a/base/win/hstring_compare.cc
++++ b/base/win/hstring_compare.cc
+@@ -7,13 +7,18 @@
+ #include <winstring.h>
+ 
+ #include "base/native_library.h"
++#include "base/win/windows_version.h"
+ 
+-namespace base::win {
++namespace base {
++namespace win {
+ 
+ HRESULT HStringCompare(HSTRING string1, HSTRING string2, INT32* result) {
+   using CompareStringFunc = decltype(&::WindowsCompareStringOrdinal);
+ 
+   static const auto compare_string_func = []() -> CompareStringFunc {
++    if (GetVersion() < Version::WIN8)
++      return nullptr;
++
+     NativeLibraryLoadError load_error;
+     NativeLibrary combase_module =
+         PinSystemLibrary(FILE_PATH_LITERAL("combase.dll"), &load_error);
+@@ -31,4 +36,5 @@ HRESULT HStringCompare(HSTRING string1, HSTRING string2, INT32* result) {
+   return compare_string_func(string1, string2, result);
+ }
+ 
+-}  // namespace base::win
++}  // namespace win
++}  // namespace base
+diff --git a/base/win/registry.cc b/base/win/registry.cc
+index 1165694b0ea6b..9ecdb080e5fe2 100644
+--- a/base/win/registry.cc
++++ b/base/win/registry.cc
+@@ -22,6 +22,7 @@
+ #include "base/win/object_watcher.h"
+ #include "base/win/scoped_handle.h"
+ #include "base/win/shlwapi.h"
++#include "base/win/windows_version.h"
+ 
+ extern "C" NTSTATUS WINAPI NtDeleteKey(IN HANDLE KeyHandle);
+ 
+@@ -82,8 +84,10 @@ bool RegKey::Watcher::StartWatching(HKEY key, ChangeCallback callback) {
+   }
+ 
+   DWORD filter = REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_ATTRIBUTES |
+-                 REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_SECURITY |
+-                 REG_NOTIFY_THREAD_AGNOSTIC;
++                 REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_SECURITY;
++  if (base::win::GetVersion() >= base::win::Version::WIN8)
++    filter |= REG_NOTIFY_THREAD_AGNOSTIC;
++
+   // Watch the registry key for a change of value.
+   LONG result =
+       RegNotifyChangeKeyValue(key, /*bWatchSubtree=*/TRUE, filter,
+diff --git a/base/win/scoped_process_information_unittest.cc b/base/win/scoped_process_information_unittest.cc
+index a1ef141bed5b7..a9add0b7044bf 100644
+--- a/base/win/scoped_process_information_unittest.cc
++++ b/base/win/scoped_process_information_unittest.cc
+@@ -13,6 +13,7 @@
+ #include "base/process/process.h"
+ #include "base/strings/string_util.h"
+ #include "base/test/multiprocess_test.h"
++#include "base/win/windows_version.h"
+ #include "testing/multiprocess_func_list.h"
+ 
+ namespace {
+@@ -124,6 +125,10 @@ TEST_F(ScopedProcessInformationTest, TakeWholeStruct) {
+ }
+ 
+ TEST_F(ScopedProcessInformationTest, Duplicate) {
++  if (base::win::GetVersion() <= base::win::Version::WIN7) {
++    // Disabled on Windows 7 due to flakiness. https://crbug.com/1336879
++    GTEST_SKIP();
++  }
+   PROCESS_INFORMATION temp_process_information;
+   DoCreateProcess("ReturnSeven", &temp_process_information);
+   base::win::ScopedProcessInformation process_info;
+diff --git a/base/win/scoped_winrt_initializer.cc b/base/win/scoped_winrt_initializer.cc
+index 85f83dab8192b..c062328cc00c6 100644
+--- a/base/win/scoped_winrt_initializer.cc
++++ b/base/win/scoped_winrt_initializer.cc
+@@ -13,8 +13,10 @@
+ #include "base/threading/scoped_thread_priority.h"
+ #include "base/win/com_init_util.h"
+ #include "base/win/core_winrt_util.h"
++#include "base/win/windows_version.h"
+ 
+-namespace base::win {
++namespace base {
++namespace win {
+ 
+ namespace {
+ 
+@@ -61,6 +63,7 @@ void CallRoUninitialize() {
+ ScopedWinrtInitializer::ScopedWinrtInitializer()
+     : hr_(CallRoInitialize(RO_INIT_MULTITHREADED)) {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  DCHECK_GE(GetVersion(), Version::WIN8);
+ #if DCHECK_IS_ON()
+   if (SUCCEEDED(hr_)) {
+     AssertComApartmentType(ComApartmentType::MTA);
+@@ -79,4 +82,5 @@ bool ScopedWinrtInitializer::Succeeded() const {
+   return SUCCEEDED(hr_);
+ }
+ 
+-}  // namespace base::win
++}  // namespace win
++}  // namespace base
+diff --git a/base/win/scoped_winrt_initializer_unittest.cc b/base/win/scoped_winrt_initializer_unittest.cc
+index fc6c4998591ad..d8f021d52ef3e 100644
+--- a/base/win/scoped_winrt_initializer_unittest.cc
++++ b/base/win/scoped_winrt_initializer_unittest.cc
+@@ -7,11 +7,16 @@
+ #include "base/test/gtest_util.h"
+ #include "base/win/com_init_util.h"
+ #include "base/win/scoped_com_initializer.h"
++#include "base/win/windows_version.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+-namespace base::win {
++namespace base {
++namespace win {
+ 
+ TEST(ScopedWinrtInitializer, BasicFunctionality) {
++  if (GetVersion() < Version::WIN8)
++    return;
++
+   AssertComApartmentType(ComApartmentType::NONE);
+   {
+     ScopedWinrtInitializer scoped_winrt_initializer;
+@@ -21,10 +26,22 @@ TEST(ScopedWinrtInitializer, BasicFunctionality) {
+ }
+ 
+ TEST(ScopedWinrtInitializer, ApartmentChangeCheck) {
++  if (GetVersion() < Version::WIN8)
++    return;
++
+   ScopedCOMInitializer com_initializer;
+   // ScopedCOMInitializer initialized an STA and the following should be a
+   // failed request for an MTA.
+   EXPECT_DCHECK_DEATH({ ScopedWinrtInitializer scoped_winrt_initializer; });
+ }
+ 
+-}  // namespace base::win
++TEST(ScopedWinrtInitializer, VersionCheck) {
++  if (GetVersion() >= Version::WIN8)
++    return;
++
++  // ScopedWinrtInitializer is unsupported on versions prior to Windows 8.
++  EXPECT_DCHECK_DEATH({ ScopedWinrtInitializer scoped_winrt_initializer; });
++}
++
++}  // namespace win
++}  // namespace base

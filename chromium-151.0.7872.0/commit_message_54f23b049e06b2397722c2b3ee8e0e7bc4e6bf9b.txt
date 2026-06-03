@@ -1,0 +1,1 @@
+Implement WEBP_DSP_INIT with SRWLOCK for Windows    2025/8/5 6:01:09    54f23b049e06b2397722c2b3ee8e0e7bc4e6bf9b

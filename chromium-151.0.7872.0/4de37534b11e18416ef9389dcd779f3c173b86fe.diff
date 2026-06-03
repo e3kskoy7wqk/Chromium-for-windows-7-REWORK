@@ -1,0 +1,643 @@
+diff --git a/chrome/app/chromium_strings.grd b/chrome/app/chromium_strings.grd
+index 34c4e28fb32c1..cb212bf396c79 100644
+--- a/chrome/app/chromium_strings.grd
++++ b/chrome/app/chromium_strings.grd
+@@ -348,6 +348,11 @@ If you update this file, be sure also to update google_chrome_strings.grd. -->
+       <message name="IDS_PRODUCT_LOGO_ENTERPRISE_ALT_TEXT" desc="Alt text for the Chromium Enterprise logo image." formatter_data="android_java">
+         Chromium Enterprise logo
+       </message>
++      <if expr="is_win">
++        <message name="IDS_SHORTCUT_NEW_WINDOW" desc="The text label of the New window shortcut context menu entry as of Windows 8">
++          New window
++        </message>
++      </if>
+       <if expr="is_macosx or is_chromeos">
+         <message name="IDS_TASK_MANAGER_TITLE" desc="The title of the Task Manager window">
+           Task Manager
+diff --git a/chrome/app/google_chrome_strings.grd b/chrome/app/google_chrome_strings.grd
+index 161e797ae48e6..17eb7b432f37d 100644
+--- a/chrome/app/google_chrome_strings.grd
++++ b/chrome/app/google_chrome_strings.grd
+@@ -349,6 +349,11 @@ chromium_strings.grd. -->
+       <message name="IDS_PRODUCT_LOGO_ENTERPRISE_ALT_TEXT" desc="Alt text for the Chrome Enterprise logo image." formatter_data="android_java">
+         Chrome Enterprise logo
+       </message>
++      <if expr="is_win">
++        <message name="IDS_SHORTCUT_NEW_WINDOW" desc="The text label of the New window shortcut context menu entry as of Windows 8">
++          New window
++        </message>
++      </if>
+       <if expr="is_macosx or is_chromeos">
+         <message name="IDS_TASK_MANAGER_TITLE" desc="The title of the Task Manager window">
+           Task Manager
+diff --git a/chrome/install_static/chromium_install_modes.h b/chrome/install_static/chromium_install_modes.h
+index f29a8228fe611..ee62888f89705 100644
+--- a/chrome/install_static/chromium_install_modes.h
++++ b/chrome/install_static/chromium_install_modes.h
+@@ -57,6 +57,9 @@ inline constexpr auto kInstallModes = std::to_array<InstallConstants>({
+         .active_setup_guid =
+             L"{7D2B3E1D-D096-4594-9D8F-A6667F12E0AC}",  // Active Setup
+                                                         // GUID.
++        .legacy_command_execute_clsid =
++            L"{A2DF06F9-A21A-44A8-8A99-8B9C84F29160}",  // CommandExecuteImpl
++                                                        // CLSID.
+         .toast_activator_clsid = {0x635EFA6F,
+                                   0x08D6,
+                                   0x4EC9,
+diff --git a/chrome/install_static/google_chrome_for_testing_install_modes.h b/chrome/install_static/google_chrome_for_testing_install_modes.h
+index dddb3eda6de19..12311b6e2c718 100644
+--- a/chrome/install_static/google_chrome_for_testing_install_modes.h
++++ b/chrome/install_static/google_chrome_for_testing_install_modes.h
+@@ -60,6 +60,7 @@ inline constexpr auto kInstallModes = std::to_array<InstallConstants>({
+         .active_setup_guid =
+             L"{E25CFD4E-D9D4-4123-936A-286FBB19BA5B}",  // Active Setup
+                                                         // GUID.
++        .legacy_command_execute_clsid = L"",  // CommandExecuteImpl CLSID.
+         .toast_activator_clsid = {0x77ED8F9B,
+                                   0xE27A,
+                                   0x499F,
+diff --git a/chrome/install_static/google_chrome_install_modes.h b/chrome/install_static/google_chrome_install_modes.h
+index 34b522b93ebf2..e62e49be82201 100644
+--- a/chrome/install_static/google_chrome_install_modes.h
++++ b/chrome/install_static/google_chrome_install_modes.h
+@@ -59,6 +59,9 @@ inline constexpr auto kInstallModes = std::to_array<InstallConstants>({
+         .active_setup_guid =
+             L"{8A69D345-D564-463c-AFF1-A69D9E530F96}",  // Active Setup
+                                                         // GUID.
++        .legacy_command_execute_clsid =
++            L"{5C65F4B0-3651-4514-B207-D10CB699B14B}",  // CommandExecuteImpl
++                                                        // CLSID.
+         .toast_activator_clsid = {0xA2C6CB58,
+                                   0xC076,
+                                   0x425C,
+@@ -125,6 +128,7 @@ inline constexpr auto kInstallModes = std::to_array<InstallConstants>({
+         .active_setup_guid =
+             L"{8237E44A-0054-442C-B6B6-EA0509993955}",  // Active Setup
+                                                         // GUID.
++        .legacy_command_execute_clsid = L"",  // CommandExecuteImpl CLSID.
+         .toast_activator_clsid = {0xB89B137F,
+                                   0x96AA,
+                                   0x4AE2,
+@@ -198,6 +202,7 @@ inline constexpr auto kInstallModes = std::to_array<InstallConstants>({
+         .active_setup_guid =
+             L"{401C381F-E0DE-4B85-8BD8-3F3F14FBDA57}",  // Active Setup
+                                                         // GUID.
++        .legacy_command_execute_clsid = L"",  // CommandExecuteImpl CLSID.
+         .toast_activator_clsid = {0xF01C03EB,
+                                   0xD431,
+                                   0x4C83,
+@@ -270,6 +275,9 @@ inline constexpr auto kInstallModes = std::to_array<InstallConstants>({
+         .active_setup_guid =
+             L"{4ea16ac7-fd5a-47c3-875b-dbf4a2008c20}",  // Active Setup
+                                                         // GUID.
++        .legacy_command_execute_clsid =
++            L"{1BEAC3E3-B852-44F4-B468-8906C062422E}",  // CommandExecuteImpl
++                                                        // CLSID.
+         .toast_activator_clsid = {0xFA372A6E,
+                                   0x149F,
+                                   0x4E95,
+diff --git a/chrome/install_static/install_constants.h b/chrome/install_static/install_constants.h
+index 82a827c2d075c..bf2483edcc226 100644
+--- a/chrome/install_static/install_constants.h
++++ b/chrome/install_static/install_constants.h
+@@ -116,6 +116,10 @@ struct InstallConstants {
+   // system-level installs.
+   const wchar_t* active_setup_guid;
+ 
++  // The legacy CommandExecuteImpl CLSID, or an empty string if this install
++  // mode never included a DelegateExecute verb handler.
++  const wchar_t* legacy_command_execute_clsid;
++
+   // The CLSID of the COM object registered with the Widnows OS. This is for app
+   // activation via user interaction with a toast notification in the Action
+   // Center.
+diff --git a/chrome/install_static/install_util.cc b/chrome/install_static/install_util.cc
+index 63dd68e2a5787..21d08bad37e9e 100644
+--- a/chrome/install_static/install_util.cc
++++ b/chrome/install_static/install_util.cc
+@@ -424,6 +424,10 @@ std::wstring GetActiveSetupPath() {
+       .append(InstallDetails::Get().mode().active_setup_guid);
+ }
+ 
++std::wstring GetLegacyCommandExecuteImplClsid() {
++  return InstallDetails::Get().mode().legacy_command_execute_clsid;
++}
++
+ bool SupportsSetAsDefaultBrowser() {
+   return InstallDetails::Get().mode().supports_set_as_default_browser;
+ }
+diff --git a/chrome/install_static/install_util.h b/chrome/install_static/install_util.h
+index eb9f201c8d8b1..8f2a1fdb1aa3b 100644
+--- a/chrome/install_static/install_util.h
++++ b/chrome/install_static/install_util.h
+@@ -159,6 +159,10 @@ const wchar_t* GetPDFProgIdDescription();
+ // (e.g., Software\Microsoft\Active Setup\Installed Components\[guid]).
+ std::wstring GetActiveSetupPath();
+ 
++// Returns the legacy CommandExecuteImpl CLSID, or an empty string if the
++// install mode never included a DelegateExecute verb handler.
++std::wstring GetLegacyCommandExecuteImplClsid();
++
+ // Returns true if this mode supports in-product mechanisms to make the browser
+ // the user's chosen default browser.
+ bool SupportsSetAsDefaultBrowser();
+diff --git a/chrome/installer/setup/install.cc b/chrome/installer/setup/install.cc
+index 3743671c97e5c..ec4e57443b471 100644
+--- a/chrome/installer/setup/install.cc
++++ b/chrome/installer/setup/install.cc
+@@ -583,6 +583,13 @@ void HandleOsUpgradeForBrowser(const InstallerState& installer_state,
+ void HandleActiveSetupForBrowser(const InstallerState& installer_state,
+                                  const base::FilePath& setup_path,
+                                  bool force) {
++  std::unique_ptr<WorkItemList> cleanup_list(WorkItem::CreateWorkItemList());
++  cleanup_list->set_log_message("Cleanup deprecated per-user registrations");
++  cleanup_list->set_rollback_enabled(false);
++  cleanup_list->set_best_effort(true);
++  AddCleanupDeprecatedPerUserRegistrationsWorkItems(cleanup_list.get());
++  cleanup_list->Do();
++
+   // Only create shortcuts on Active Setup if the first run sentinel is not
+   // present for this user (as some shortcuts used to be installed on first
+   // run and this could otherwise re-install shortcuts for users that have
+diff --git a/chrome/installer/setup/install_worker.cc b/chrome/installer/setup/install_worker.cc
+index 6ebdd55b87c06..bd00b2806e6c2 100644
+--- a/chrome/installer/setup/install_worker.cc
++++ b/chrome/installer/setup/install_worker.cc
+@@ -984,6 +984,8 @@ void AddInstallWorkItems(const InstallParams& install_params,
+ 
+   AddUninstallShortcutWorkItems(install_params, install_list);
+ 
++  AddCleanupDeprecatedPerUserRegistrationsWorkItems(install_list);
++
+   AddActiveSetupWorkItems(installer_state, new_version, install_list);
+ 
+   AddOsUpgradeWorkItems(installer_state, setup_path, new_version, install_list);
+@@ -1142,6 +1144,19 @@ void AddSetMsiMarkerWorkItem(const InstallerState& installer_state,
+   set_msi_work_item->set_log_message("Could not write MSI marker!");
+ }
+ 
++void AddCleanupDeprecatedPerUserRegistrationsWorkItems(WorkItemList* list) {
++  // This cleanup was added in M49. There are still enough active users on M48
++  // and earlier today (M55 timeframe) to justify keeping this cleanup in-place.
++  // Remove this when that population stops shrinking.
++  VLOG(1) << "Adding unregistration items for per-user Metro keys.";
++  list->AddDeleteRegKeyWorkItem(HKEY_CURRENT_USER,
++                                install_static::GetRegistryPath() + L"\\Metro",
++                                KEY_WOW64_32KEY);
++  list->AddDeleteRegKeyWorkItem(HKEY_CURRENT_USER,
++                                install_static::GetRegistryPath() + L"\\Metro",
++                                KEY_WOW64_64KEY);
++}
++
+ void AddActiveSetupWorkItems(const InstallerState& installer_state,
+                              const base::Version& new_version,
+                              WorkItemList* list) {
+diff --git a/chrome/installer/setup/install_worker.h b/chrome/installer/setup/install_worker.h
+index aea130a571b6b..d269d31f99234 100644
+--- a/chrome/installer/setup/install_worker.h
++++ b/chrome/installer/setup/install_worker.h
+@@ -101,6 +101,9 @@ void AddSetMsiMarkerWorkItem(const InstallerState& installer_state,
+                              bool set,
+                              WorkItemList* work_item_list);
+ 
++// Adds work items to cleanup deprecated per-user registrations.
++void AddCleanupDeprecatedPerUserRegistrationsWorkItems(WorkItemList* list);
++
+ // Adds Active Setup registration for sytem-level setup to be called by Windows
+ // on user-login post-install/update. This method should be called for
+ // installation only.
+diff --git a/chrome/installer/setup/setup_util.cc b/chrome/installer/setup/setup_util.cc
+index 623618d3b784b..f73a4b33ead0a 100644
+--- a/chrome/installer/setup/setup_util.cc
++++ b/chrome/installer/setup/setup_util.cc
+@@ -6,6 +6,8 @@
+ 
+ #include "chrome/installer/setup/setup_util.h"
+ 
++#include <objbase.h>
++
+ #include <windows.h>
+ 
+ #include <stddef.h>
+@@ -65,6 +67,26 @@ namespace {
+ constexpr wchar_t kEventLogProvidersRegPath[] =
+     L"SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\";
+ 
++// Remove the registration of the browser's DelegateExecute verb handler class.
++// This was once registered in support of "metro" mode on Windows 8.
++void RemoveLegacyIExecuteCommandKey(const InstallerState& installer_state) {
++  const std::wstring handler_class_uuid =
++      install_static::GetLegacyCommandExecuteImplClsid();
++
++  // No work to do if this mode of install never registered a DelegateExecute
++  // verb handler.
++  if (handler_class_uuid.empty())
++    return;
++
++  const HKEY root = installer_state.root_key();
++  std::wstring delegate_execute_path(L"Software\\Classes\\CLSID\\");
++  delegate_execute_path.append(handler_class_uuid);
++
++  // Delete both 64 and 32 keys to handle 32->64 or 64->32 migration.
++  for (REGSAM bitness : {KEY_WOW64_32KEY, KEY_WOW64_64KEY})
++    installer::DeleteRegistryKey(root, delegate_execute_path, bitness);
++}
++
+ // "The binaries" once referred to the on-disk footprint of Chrome and/or Chrome
+ // Frame when the products were configured to share such on-disk bits. Support
+ // for this mode of install was dropped from ToT in December 2016. Remove any
+@@ -496,6 +518,9 @@ void DoLegacyCleanups(const InstallerState& installer_state,
+   if (InstallUtil::GetInstallReturnCode(install_status))
+     return;
+ 
++  // Cleanups that apply to any install mode.
++  RemoveLegacyIExecuteCommandKey(installer_state);
++
+   // The cleanups below only apply to normal Chrome, not side-by-side (canary).
+   if (!install_static::InstallDetails::Get().is_primary_mode())
+     return;
+diff --git a/chrome/installer/setup/setup_util_unittest.cc b/chrome/installer/setup/setup_util_unittest.cc
+index cedb4cecd0c9b..b75dec56ec676 100644
+--- a/chrome/installer/setup/setup_util_unittest.cc
++++ b/chrome/installer/setup/setup_util_unittest.cc
+@@ -726,6 +726,9 @@ class LegacyCleanupsTest : public ::testing::Test {
+     ASSERT_TRUE(base::win::RegKey(HKEY_CURRENT_USER, kBinariesClientsKeyPath,
+                                   KEY_WRITE | KEY_WOW64_32KEY)
+                     .Valid());
++    ASSERT_TRUE(base::win::RegKey(HKEY_CURRENT_USER, kCommandExecuteImplClsid,
++                                  KEY_WRITE)
++                    .Valid());
+ #endif
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+     ASSERT_TRUE(base::win::RegKey(HKEY_CURRENT_USER, kAppLauncherClientsKeyPath,
+@@ -747,6 +750,12 @@ class LegacyCleanupsTest : public ::testing::Test {
+                              KEY_QUERY_VALUE | KEY_WOW64_32KEY)
+         .Valid();
+   }
++
++  bool HasCommandExecuteImplClassKey() const {
++    return base::win::RegKey(HKEY_CURRENT_USER, kCommandExecuteImplClsid,
++                             KEY_QUERY_VALUE)
++        .Valid();
++  }
+ #endif  // !BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+ 
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+@@ -789,6 +798,7 @@ class LegacyCleanupsTest : public ::testing::Test {
+ 
+ #if !BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+   static const wchar_t kBinariesClientsKeyPath[];
++  static const wchar_t kCommandExecuteImplClsid[];
+ #endif
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+   static const wchar_t kAppLauncherClientsKeyPath[];
+@@ -803,6 +813,8 @@ class LegacyCleanupsTest : public ::testing::Test {
+ const wchar_t LegacyCleanupsTest::kBinariesClientsKeyPath[] =
+     L"SOFTWARE\\Google\\Update\\Clients\\"
+     L"{4DC8B4CA-1BDA-483e-B5FA-D3C12E15B62D}";
++const wchar_t LegacyCleanupsTest::kCommandExecuteImplClsid[] =
++    L"Software\\Classes\\CLSID\\{5C65F4B0-3651-4514-B207-D10CB699B14B}";
+ const wchar_t LegacyCleanupsTest::kAppLauncherClientsKeyPath[] =
+     L"SOFTWARE\\Google\\Update\\Clients\\"
+     L"{FDA71E6F-AC4C-4a00-8B70-9958A68906BF}";
+@@ -810,12 +822,15 @@ const wchar_t LegacyCleanupsTest::kAppLauncherClientsKeyPath[] =
+     !BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+ const wchar_t LegacyCleanupsTest::kBinariesClientsKeyPath[] =
+     L"SOFTWARE\\Chromium Binaries";
++const wchar_t LegacyCleanupsTest::kCommandExecuteImplClsid[] =
++    L"Software\\Classes\\CLSID\\{A2DF06F9-A21A-44A8-8A99-8B9C84F29160}";
+ #endif  // !BUILDFLAG(GOOGLE_CHROME_BRANDING)
+ 
+ TEST_F(LegacyCleanupsTest, NoOpOnFailedUpdate) {
+   DoLegacyCleanups(installer_state(), INSTALL_FAILED);
+ #if !BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+   EXPECT_TRUE(HasBinariesVersionKey());
++  EXPECT_TRUE(HasCommandExecuteImplClassKey());
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+   EXPECT_TRUE(HasAppLauncherVersionKey());
+   EXPECT_TRUE(HasInstallExtensionCommand());
+@@ -827,6 +842,7 @@ TEST_F(LegacyCleanupsTest, Do) {
+   DoLegacyCleanups(installer_state(), NEW_VERSION_UPDATED);
+ #if !BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+   EXPECT_FALSE(HasBinariesVersionKey());
++  EXPECT_FALSE(HasCommandExecuteImplClassKey());
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+   EXPECT_FALSE(HasAppLauncherVersionKey());
+   EXPECT_FALSE(HasInstallExtensionCommand());
+diff --git a/chrome/installer/setup/uninstall.cc b/chrome/installer/setup/uninstall.cc
+index 3c311db427a36..92ce33ba8047d 100644
+--- a/chrome/installer/setup/uninstall.cc
++++ b/chrome/installer/setup/uninstall.cc
+@@ -96,11 +96,17 @@ void DeleteInstallTempDir(const base::FilePath& target_path) {
+ // Processes uninstall WorkItems from install_worker in no-rollback-list.
+ void ProcessChromeWorkItems(const InstallerState& installer_state) {
+   std::unique_ptr<WorkItemList> work_item_list(WorkItem::CreateWorkItemList());
+-  work_item_list->set_log_message("Cleanup OS upgrade command");
++  work_item_list->set_log_message(
++      "Cleanup OS upgrade command and deprecated per-user registrations");
+   work_item_list->set_best_effort(true);
+   work_item_list->set_rollback_enabled(false);
+   AddOsUpgradeWorkItems(installer_state, base::FilePath(), base::Version(),
+                         work_item_list.get());
++  // Perform a best-effort cleanup of per-user keys. On system-level installs
++  // this will only cleanup keys for the user running the uninstall but it was
++  // considered that this was good enough (better than triggering Active Setup
++  // for all users solely for this cleanup).
++  AddCleanupDeprecatedPerUserRegistrationsWorkItems(work_item_list.get());
+   work_item_list->Do();
+ }
+ 
+diff --git a/chrome/installer/util/prebuild/create_installer_string_rc.py b/chrome/installer/util/prebuild/create_installer_string_rc.py
+index c0c3db2e6448f..b1495d54d477c 100755
+--- a/chrome/installer/util/prebuild/create_installer_string_rc.py
++++ b/chrome/installer/util/prebuild/create_installer_string_rc.py
+@@ -27,6 +27,7 @@ STRING_IDS = [
+   'IDS_PRODUCT_DESCRIPTION',
+   'IDS_PRODUCT_NAME',
+   'IDS_SAME_VERSION_REPAIR_FAILED',
++  'IDS_SHORTCUT_NEW_WINDOW',
+   'IDS_SHORTCUT_TOOLTIP',
+   'IDS_TRACING_SERVICE_DESCRIPTION',
+ ]
+diff --git a/chrome/installer/util/shell_util.cc b/chrome/installer/util/shell_util.cc
+index 149cc04ae9a20..b4c5aa7d39ae3 100644
+--- a/chrome/installer/util/shell_util.cc
++++ b/chrome/installer/util/shell_util.cc
+@@ -18,6 +18,7 @@
+ #include <wrl/client.h>
+ 
+ #include <algorithm>
++#include <iterator>
+ #include <limits>
+ #include <memory>
+ #include <string>
+@@ -59,6 +60,8 @@
+ #include "chrome/installer/util/initial_preferences.h"
+ #include "chrome/installer/util/initial_preferences_constants.h"
+ #include "chrome/installer/util/install_util.h"
++#include "chrome/installer/util/installer_util_strings.h"
++#include "chrome/installer/util/l10n_string_util.h"
+ #include "chrome/installer/util/registry_entry.h"
+ #include "chrome/installer/util/registry_util.h"
+ #include "chrome/installer/util/taskbar_util.h"
+@@ -218,6 +221,66 @@ std::wstring GetCapabilitiesKey(const std::wstring& suffix) {
+   return base::StrCat({GetBrowserClientKey(suffix), L"\\Capabilities"});
+ }
+ 
++// DelegateExecute ProgId. Needed for Chrome Metro in Windows 8. This is only
++// needed for registering a web browser, not for general associations.
++std::vector<std::unique_ptr<RegistryEntry>> GetChromeDelegateExecuteEntries(
++    const base::FilePath& chrome_exe,
++    const ShellUtil::ApplicationInfo& app_info) {
++  std::vector<std::unique_ptr<RegistryEntry>> entries;
++
++  std::wstring app_id_shell_key =
++      base::StrCat({ShellUtil::kRegClasses, kFilePathSeparator, app_info.app_id,
++                    ShellUtil::kRegExePath, ShellUtil::kRegShellPath});
++
++  // <root hkey>\Software\Classes\<app_id>\.exe\shell @=open
++  entries.push_back(std::make_unique<RegistryEntry>(app_id_shell_key,
++                                                    ShellUtil::kRegVerbOpen));
++
++  // The command to execute when opening this application via the Metro UI.
++  const std::wstring delegate_command(
++      ShellUtil::GetChromeDelegateCommand(chrome_exe));
++
++  // Each of Chrome's shortcuts has an appid; which, as of Windows 8, is
++  // registered to handle some verbs. This registration has the side-effect
++  // that these verbs now show up in the shortcut's context menu. We
++  // mitigate this side-effect by making the context menu entries
++  // user readable/localized strings. See relevant MSDN article:
++  // http://msdn.microsoft.com/en-US/library/windows/desktop/cc144171.aspx
++  static const struct {
++    const wchar_t* verb;
++    int name_id;
++  } verbs[] = {
++      {ShellUtil::kRegVerbOpen, -1},
++      {ShellUtil::kRegVerbOpenNewWindow, IDS_SHORTCUT_NEW_WINDOW_BASE},
++  };
++  for (const auto& verb_and_id : verbs) {
++    std::wstring sub_path =
++        base::StrCat({app_id_shell_key, kFilePathSeparator, verb_and_id.verb});
++
++    // <root hkey>\Software\Classes\<app_id>\.exe\shell\<verb>
++    if (verb_and_id.name_id != -1) {
++      // TODO(grt): http://crbug.com/41337274 Write a reference to a localized
++      // resource.
++      const std::wstring verb_name(
++          installer::GetLocalizedString(verb_and_id.name_id));
++      entries.push_back(
++          std::make_unique<RegistryEntry>(sub_path, verb_name.c_str()));
++    }
++    entries.push_back(std::make_unique<RegistryEntry>(sub_path, L"CommandId",
++                                                      L"Browser.Launch"));
++
++    base::StrAppend(&sub_path, {kFilePathSeparator, ShellUtil::kRegCommand});
++
++    // <root hkey>\Software\Classes\<app_id>\.exe\shell\<verb>\command
++    entries.push_back(
++        std::make_unique<RegistryEntry>(sub_path, delegate_command));
++    entries.push_back(std::make_unique<RegistryEntry>(
++        sub_path, ShellUtil::kRegDelegateExecute, app_info.delegate_clsid));
++  }
++
++  return entries;
++}
++
+ // Gets the registry entries to register an application in the Windows registry.
+ // |app_info| provides all of the information needed.
+ void GetProgIdEntries(const ShellUtil::ApplicationInfo& app_info,
+@@ -226,7 +289,7 @@ void GetProgIdEntries(const ShellUtil::ApplicationInfo& app_info,
+   DCHECK(!app_info.prog_id.empty());
+   DCHECK_NE(L'.', app_info.prog_id[0]);
+ 
+-  // File association ProgId.
++  // File association ProgId
+   std::wstring prog_id_path = base::StrCat(
+       {ShellUtil::kRegClasses, kFilePathSeparator, app_info.prog_id});
+   entries->push_back(
+@@ -237,14 +300,22 @@ void GetProgIdEntries(const ShellUtil::ApplicationInfo& app_info,
+                                     app_info.file_type_icon_index)));
+   entries->push_back(std::make_unique<RegistryEntry>(
+       prog_id_path + ShellUtil::kRegShellOpen, app_info.command_line));
++  if (!app_info.delegate_clsid.empty()) {
++    entries->push_back(std::make_unique<RegistryEntry>(
++        prog_id_path + ShellUtil::kRegShellOpen, ShellUtil::kRegDelegateExecute,
++        app_info.delegate_clsid));
++    // TODO(scottmg): Simplify after Metro removal. https://crbug.com/40445378.
++    entries->back()->set_removal_flag(RegistryEntry::RemovalFlag::VALUE);
++  }
+ 
+-  // Associate the ProgId with the app's AppUserModelId.
++  // The following entries are required but do not depend on the DelegateExecute
++  // verb handler being set.
+   if (!app_info.app_id.empty()) {
+     entries->push_back(std::make_unique<RegistryEntry>(
+         prog_id_path, ShellUtil::kRegAppUserModelId, app_info.app_id));
+   }
+ 
+-  // Add \Software\Classes\<prog_id>\Application entries.
++  // Add \Software\Classes\<prog_id>\Application entries
+   std::wstring application_path(prog_id_path + ShellUtil::kRegApplication);
+   if (!app_info.app_id.empty()) {
+     entries->push_back(std::make_unique<RegistryEntry>(
+@@ -301,6 +372,7 @@ void GetChromeProgIdEntries(
+   app_info.application_icon_index = chrome_icon_index;
+   app_info.application_description = InstallUtil::GetAppDescription();
+   app_info.publisher_name = InstallUtil::GetPublisherName();
++  app_info.delegate_clsid = install_static::GetLegacyCommandExecuteImplClsid();
+ 
+   GetProgIdEntries(app_info, entries);
+ 
+@@ -310,6 +382,19 @@ void GetChromeProgIdEntries(
+   app_info.file_type_icon_index = install_static ::GetPDFIconResourceIndex();
+   app_info.application_icon_index = chrome_icon_index;
+   GetProgIdEntries(app_info, entries);
++
++  if (!app_info.delegate_clsid.empty()) {
++    auto delegate_execute_entries =
++        GetChromeDelegateExecuteEntries(chrome_exe, app_info);
++    // Remove the keys (not only their values) so that Windows will continue
++    // to launch Chrome without a pesky association error.
++    // TODO(scottmg): Simplify after Metro removal. https://crbug.com/40445378.
++    for (const auto& entry : delegate_execute_entries)
++      entry->set_removal_flag(RegistryEntry::RemovalFlag::KEY);
++    // Move |delegate_execute_entries| to |entries|.
++    std::move(delegate_execute_entries.begin(), delegate_execute_entries.end(),
++              std::back_inserter(*entries));
++  }
+ }
+ 
+ // This method returns a list of the registry entries needed to declare a
+@@ -930,6 +1015,21 @@ base::win::ShortcutProperties TranslateShortcutProperties(
+   return shortcut_properties;
+ }
+ 
++// Cleans up an old verb (run) we used to register in
++// <root>\Software\Classes\Chrome<.suffix>\.exe\shell\run on Windows 8.
++void RemoveRunVerbOnWindows8() {
++  bool is_per_user_install = InstallUtil::IsPerUserInstall();
++  HKEY root_key = DetermineRegistrationRoot(is_per_user_install);
++  // There's no need to rollback, so forgo the usual work item lists and just
++  // remove the key from the registry.
++  std::wstring run_verb_key =
++      base::StrCat({ShellUtil::kRegClasses, kFilePathSeparator,
++                    ShellUtil::GetBrowserModelId(is_per_user_install),
++                    ShellUtil::kRegExePath, ShellUtil::kRegShellPath,
++                    kFilePathSeparator, ShellUtil::kRegVerbRun});
++  installer::DeleteRegistryKey(root_key, run_verb_key, WorkItem::kWow64Default);
++}
++
+ // Probes default handler registration (in a manner appropriate for the current
+ // version of Windows) to determine if Chrome is the default handler for
+ // `identifiers`. `identifiers` can be either protocols or file extensions, and
+@@ -1325,6 +1425,8 @@ bool RegisterChromeBrowserImpl(const base::FilePath& chrome_exe,
+     return false;
+   }
+ 
++  RemoveRunVerbOnWindows8();
++
+   bool user_level = InstallUtil::IsPerUserInstall();
+   HKEY root = DetermineRegistrationRoot(user_level);
+ 
+@@ -1499,6 +1601,7 @@ const wchar_t* ShellUtil::kRegAppProtocolHandlers = L"\\AppProtocolHandlers";
+ const wchar_t* ShellUtil::kRegDefaultIcon = L"\\DefaultIcon";
+ const wchar_t* ShellUtil::kRegShellPath = L"\\shell";
+ const wchar_t* ShellUtil::kRegShellOpen = L"\\shell\\open\\command";
++const wchar_t* ShellUtil::kRegSoftware = L"Software\\";
+ const wchar_t* ShellUtil::kRegStartMenuInternet =
+     L"Software\\Clients\\StartMenuInternet";
+ const wchar_t* ShellUtil::kRegClasses = L"Software\\Classes";
+@@ -1526,6 +1629,12 @@ const wchar_t* ShellUtil::kRegApplicationDescription =
+ const wchar_t* ShellUtil::kRegApplicationName = L"ApplicationName";
+ const wchar_t* ShellUtil::kRegApplicationIcon = L"ApplicationIcon";
+ const wchar_t* ShellUtil::kRegApplicationCompany = L"ApplicationCompany";
++const wchar_t* ShellUtil::kRegExePath = L"\\.exe";
++const wchar_t* ShellUtil::kRegVerbOpen = L"open";
++const wchar_t* ShellUtil::kRegVerbOpenNewWindow = L"opennewwindow";
++const wchar_t* ShellUtil::kRegVerbRun = L"run";
++const wchar_t* ShellUtil::kRegCommand = L"command";
++const wchar_t* ShellUtil::kRegDelegateExecute = L"DelegateExecute";
+ const wchar_t* ShellUtil::kRegOpenWithProgids = L"OpenWithProgids";
+ 
+ ShellUtil::ShortcutProperties::ShortcutProperties(ShellChange level_in)
+@@ -1765,6 +1874,11 @@ std::wstring ShellUtil::GetChromeShellOpenCmd(
+   return base::CommandLine(chrome_exe).GetCommandLineStringForShell();
+ }
+ 
++std::wstring ShellUtil::GetChromeDelegateCommand(
++    const base::FilePath& chrome_exe) {
++  return L"\"" + chrome_exe.value() + L"\" -- %*";
++}
++
+ std::wstring ShellUtil::GetCurrentInstallationSuffix(
+     const base::FilePath& chrome_exe) {
+   // This method is somewhat the opposite of GetInstallationSpecificSuffix().
+diff --git a/chrome/installer/util/shell_util.h b/chrome/installer/util/shell_util.h
+index 12c054828cde5..f7d00f22f78a6 100644
+--- a/chrome/installer/util/shell_util.h
++++ b/chrome/installer/util/shell_util.h
+@@ -267,8 +267,14 @@ class ShellUtil {
+     int application_icon_index = 0;
+     std::wstring application_description;
+     std::wstring publisher_name;
++
++    // The CLSID for the application's DelegateExecute handler. May be empty.
++    std::wstring delegate_clsid;
+   };
+ 
++  // Relative path of the URL Protocol registry entry (prefixed with '\').
++  static const wchar_t* kRegURLProtocol;
++
+   // Registry key under which web app protocol handler prog_ids are stored.
+   static const wchar_t* kRegAppProtocolHandlers;
+ 
+@@ -282,6 +288,9 @@ class ShellUtil {
+   // (i.e. \\shell\\open\\command).
+   static const wchar_t* kRegShellOpen;
+ 
++  // Relative path of registry key under which applications need to register.
++  static const wchar_t* kRegSoftware;
++
+   // Relative path of registry key under which applications need to register
+   // to control Windows Start menu links.
+   static const wchar_t* kRegStartMenuInternet;
+@@ -341,6 +350,24 @@ class ShellUtil {
+   // Registry value name for an application's company.
+   static const wchar_t* kRegApplicationCompany;
+ 
++  // Relative path of ".exe" registry key.
++  static const wchar_t* kRegExePath;
++
++  // Registry value name of the open verb.
++  static const wchar_t* kRegVerbOpen;
++
++  // Registry value name of the opennewwindow verb.
++  static const wchar_t* kRegVerbOpenNewWindow;
++
++  // Registry value name of the run verb.
++  static const wchar_t* kRegVerbRun;
++
++  // Registry value name for command entries.
++  static const wchar_t* kRegCommand;
++
++  // Registry value name for the DelegateExecute verb handler.
++  static const wchar_t* kRegDelegateExecute;
++
+   // Registry value name for the OpenWithProgids entry for file associations.
+   static const wchar_t* kRegOpenWithProgids;
+ 
+@@ -418,6 +445,13 @@ class ShellUtil {
+   // |chrome_exe|: the full path to chrome.exe
+   static std::wstring GetChromeShellOpenCmd(const base::FilePath& chrome_exe);
+ 
++  // This method returns the command to be called by the DelegateExecute verb
++  // handler to launch chrome on Windows 8. Typically this command is written to
++  // the registry under the HKCR\Chrome\.exe\shell\(open|run)\command key.
++  // |chrome_exe|: the full path to chrome.exe
++  static std::wstring GetChromeDelegateCommand(
++      const base::FilePath& chrome_exe);
++
+   // Returns the suffix this user's Chrome install is registered with.
+   // Always returns the empty string on system-level installs.
+   //

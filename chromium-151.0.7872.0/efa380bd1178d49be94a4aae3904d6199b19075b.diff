@@ -1,0 +1,13 @@
+diff --git a/sandbox/policy/features.cc b/sandbox/policy/features.cc
+index b819937135f29..25b87396ef23f 100644
+--- a/sandbox/policy/features.cc
++++ b/sandbox/policy/features.cc
+@@ -63,7 +63,7 @@ BASE_FEATURE(kGpuLPAC,
+ 
+ // Enables Print Compositor Low Privilege AppContainer. Note, this might be
+ // overridden and disabled by policy.
+-BASE_FEATURE(kPrintCompositorLPAC, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kPrintCompositorLPAC, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // Enables Renderer AppContainer
+ BASE_FEATURE(kRendererAppContainer, base::FEATURE_DISABLED_BY_DEFAULT);
