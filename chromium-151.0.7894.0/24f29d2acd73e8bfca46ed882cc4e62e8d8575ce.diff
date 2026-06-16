@@ -1,0 +1,220 @@
+diff --git a/device/base/features.cc b/device/base/features.cc
+index a877b2f214857..12975303ca012 100644
+--- a/device/base/features.cc
++++ b/device/base/features.cc
+@@ -15,6 +15,10 @@ BASE_FEATURE(kNewUsbBackend,
+ namespace device {
+ 
+ #if BUILDFLAG(IS_WIN)
++BASE_FEATURE(kNewBLEWinImplementation,
++             "NewBLEWinImplementation",
++             base::FEATURE_ENABLED_BY_DEFAULT);
++
+ // Controls whether a more reliable GATT session handling
+ // implementation is used on Windows 10 1709 (RS3) and beyond.
+ //
+diff --git a/device/base/features.h b/device/base/features.h
+index ecb1c6b320003..622753a9b28ce 100644
+--- a/device/base/features.h
++++ b/device/base/features.h
+@@ -16,6 +16,7 @@ DEVICE_BASE_EXPORT BASE_DECLARE_FEATURE(kNewUsbBackend);
+ namespace device {
+ 
+ #if BUILDFLAG(IS_WIN)
++DEVICE_BASE_EXPORT BASE_DECLARE_FEATURE(kNewBLEWinImplementation);
+ DEVICE_BASE_EXPORT BASE_DECLARE_FEATURE(kNewBLEGattSessionHandling);
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+diff --git a/device/bluetooth/bluetooth_adapter_win.cc b/device/bluetooth/bluetooth_adapter_win.cc
+index 3570516f76568..31ceac0c0dec5 100644
+--- a/device/bluetooth/bluetooth_adapter_win.cc
++++ b/device/bluetooth/bluetooth_adapter_win.cc
+@@ -37,7 +37,10 @@ scoped_refptr<BluetoothAdapter> BluetoothAdapter::CreateAdapter() {
+ 
+ // static
+ scoped_refptr<BluetoothAdapter> BluetoothAdapterWin::CreateAdapter() {
+-  return base::WrapRefCounted(new BluetoothAdapterWinrt());
++  if (UseNewBLEWinImplementation())
++    return base::WrapRefCounted(new BluetoothAdapterWinrt());
++
++  return BluetoothAdapterWin::CreateClassicAdapter();
+ }
+ 
+ // static
+@@ -45,6 +48,11 @@ scoped_refptr<BluetoothAdapter> BluetoothAdapterWin::CreateClassicAdapter() {
+   return base::WrapRefCounted(new BluetoothAdapterWin());
+ }
+ 
++// static
++bool BluetoothAdapterWin::UseNewBLEWinImplementation() {
++  return base::FeatureList::IsEnabled(kNewBLEWinImplementation);
++}
++
+ BluetoothAdapterWin::BluetoothAdapterWin() = default;
+ 
+ BluetoothAdapterWin::~BluetoothAdapterWin() {
+diff --git a/device/bluetooth/bluetooth_adapter_win.h b/device/bluetooth/bluetooth_adapter_win.h
+index a4212e625ed3b..491a001a41201 100644
+--- a/device/bluetooth/bluetooth_adapter_win.h
++++ b/device/bluetooth/bluetooth_adapter_win.h
+@@ -40,6 +40,8 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothAdapterWin
+   BluetoothAdapterWin(const BluetoothAdapterWin&) = delete;
+   BluetoothAdapterWin& operator=(const BluetoothAdapterWin&) = delete;
+ 
++  static bool UseNewBLEWinImplementation();
++
+   // BluetoothAdapter:
+   std::string GetAddress() const override;
+   std::string GetName() const override;
+diff --git a/device/bluetooth/bluetooth_device.h b/device/bluetooth/bluetooth_device.h
+index 050fa78a91c43..382cf8a727c55 100644
+--- a/device/bluetooth/bluetooth_device.h
++++ b/device/bluetooth/bluetooth_device.h
+@@ -717,14 +717,14 @@ class DEVICE_BLUETOOTH_EXPORT BluetoothDevice {
+   FRIEND_TEST_ALL_PREFIXES(BluetoothTest, GetName_NullName);
+ 
+   FRIEND_TEST_ALL_PREFIXES(
+-      BluetoothTestWinrt,
++      BluetoothTestWinrtOnly,
+       BluetoothGattConnection_DisconnectGatt_SimulateConnect);
+   FRIEND_TEST_ALL_PREFIXES(
+-      BluetoothTestWinrt,
++      BluetoothTestWinrtOnly,
+       BluetoothGattConnection_DisconnectGatt_SimulateDisconnect);
+-  FRIEND_TEST_ALL_PREFIXES(BluetoothTestWinrt,
++  FRIEND_TEST_ALL_PREFIXES(BluetoothTestWinrtOnly,
+                            BluetoothGattConnection_ErrorAfterConnection);
+-  FRIEND_TEST_ALL_PREFIXES(BluetoothTestWinrt,
++  FRIEND_TEST_ALL_PREFIXES(BluetoothTestWinrtOnly,
+                            BluetoothGattConnection_DisconnectGatt_Cleanup);
+ 
+   // Helper class to easily update the sets of UUIDs and keep them in sync with
+diff --git a/device/bluetooth/bluetooth_remote_gatt_service_unittest.cc b/device/bluetooth/bluetooth_remote_gatt_service_unittest.cc
+index e1018562cef80..a56b30eab6a0c 100644
+--- a/device/bluetooth/bluetooth_remote_gatt_service_unittest.cc
++++ b/device/bluetooth/bluetooth_remote_gatt_service_unittest.cc
+@@ -415,7 +415,12 @@ TEST_F(BluetoothRemoteGattServiceTest, MAYBE_SimulateGattServiceRemove) {
+   std::string removed_service = service1->GetIdentifier();
+   SimulateGattServiceRemoved(device->GetGattService(removed_service));
+   base::RunLoop().RunUntilIdle();
+-
++#if BUILDFLAG(IS_WIN)
++  if (!UsesNewBleImplementation()) {
++    // The GattServicesRemoved event is not implemented for WinRT.
++    EXPECT_EQ(1, observer.gatt_service_removed_count());
++  }
++#endif  // BUILDFLAG(IS_WIN)
+   EXPECT_EQ(1u, device->GetGattServices().size());
+   EXPECT_FALSE(device->GetGattService(removed_service));
+   EXPECT_EQ(device->GetGattServices()[0], service2);
+@@ -595,7 +600,7 @@ TEST_F(BluetoothRemoteGattServiceTest, ExtraDidDiscoverCharacteristicsCall) {
+ #if BUILDFLAG(IS_WIN)
+ INSTANTIATE_TEST_SUITE_P(All,
+                          BluetoothRemoteGattServiceTestWinrt,
+-                         ::testing::ValuesIn(kBluetoothTestWinrtParam));
++                         ::testing::ValuesIn(kBluetoothTestWinrtParamAll));
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ }  // namespace device
+diff --git a/device/bluetooth/test/bluetooth_test_win.h b/device/bluetooth/test/bluetooth_test_win.h
+index e327e69f42367..18b8649e02238 100644
+--- a/device/bluetooth/test/bluetooth_test_win.h
++++ b/device/bluetooth/test/bluetooth_test_win.h
+@@ -114,41 +114,56 @@ class BluetoothTestWin : public BluetoothTestBase,
+ typedef BluetoothTestWin BluetoothTest;
+ 
+ struct BluetoothTestWinrtParam {
++  // The feature state of |kNewBLEWinImplementation|.
++  bool new_ble_implementation_enabled;
+   // The feature state of |kNewBLEGattSessionHandling|.
+   bool new_gatt_session_handling_enabled;
+   // The feature state of |kUncachedGattDiscoveryForGattConnection|.
+   bool uncached_gatt_discovery_for_gatt_connection;
+ 
+   friend std::ostream& operator<<(std::ostream& os,
+                                   const BluetoothTestWinrtParam& p) {
+-    return os << "{new_gatt_session_handling_enabled="
++    return os << "{new_ble_implementation_enabled="
++              << p.new_ble_implementation_enabled
++              << ", new_gatt_session_handling_enabled="
+               << p.new_gatt_session_handling_enabled << "}"
+               << "{uncached_gatt_discovery_for_gatt_connection="
+               << p.uncached_gatt_discovery_for_gatt_connection << "}";
+   }
+ };
+ 
+-constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParam[] = {
+-    {/*new_gatt_session_handling_enabled=*/true,
+-     /*uncached_gatt_discovery_for_gatt_connection=*/true},
+-    {/*new_gatt_session_handling_enabled=*/true,
+-     /*uncached_gatt_discovery_for_gatt_connection=*/false},
+-    {/*new_gatt_session_handling_enabled=*/false,
+-     /*uncached_gatt_discovery_for_gatt_connection=*/true},
+-    {/*new_gatt_session_handling_enabled=*/false,
+-     /*uncached_gatt_discovery_for_gatt_connection=*/false},
++constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParamAll[] = {
++    {false, false},
++    {false, true},
++    {true, false},
++    {true, true},
+ };
+ 
+-// This test suite represents tests that are parameterized on Windows. This
+-// requires declaring tests in the following way:
+-//
+-// TEST_P(BluetoothTestWinrt, YourTestName).
++constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParamWinrtOnly[] = {
++    {true, false},
++    {true, true},
++};
++
++constexpr BluetoothTestWinrtParam kBluetoothTestWinrtParamWin32Only[] = {
++    {false, false},
++    {false, true},
++};
++
++// This test suite represents tests that should run with the new BLE
++// implementation both enabled and disabled. This requires declaring tests
++// in the following way: TEST_P(BluetoothTestWinrt, YourTestName).
+ //
+ // Test suites inheriting from this class should be instantiated as
+ //
+ // INSTANTIATE_TEST_SUITE_P(
+ //     All, FooTestSuiteWinrt,
+-//     ::testing::ValuesIn(kBluetoothTestWinrtParam>));
++//     ::testing::ValuesIn(
++//         <kBluetoothTestWinrtParamWin32Only |
++//          kBluetoothTestWinrtParamWinrtOnly |
++//          kBluetoothTestWinrtParamAll>));
++//
++// depending on whether they should run only the old or new implementation or
++// both.
+ class BluetoothTestWinrt
+     : public BluetoothTestWin,
+       public ::testing::WithParamInterface<BluetoothTestWinrtParam> {
+@@ -150,6 +171,7 @@ class BluetoothTestWinrt
+ 
+   ~BluetoothTestWinrt() override;
+   void TearDown() override;
+ 
++  bool UsesNewBleImplementation() const;
+   bool UsesNewGattSessionHandling() const;
+   bool UncachedGattDiscoveryForGattConnection() const;
+@@ -251,14 +273,16 @@ class BluetoothTestWinrt
+ 
+  private:
+   base::test::ScopedFeatureList scoped_feature_list_;
+-  base::win::ScopedWinrtInitializer scoped_winrt_initializer_;
++  absl::optional<base::win::ScopedWinrtInitializer> scoped_winrt_initializer_;
+   int gatt_discovery_attempts_with_uncached_mode_ = 0;
+   Microsoft::WRL::ComPtr<FakeBluetoothLEDeviceWinrt> remembered_ble_device_;
+   std::vector<raw_ptr<FakeBluetoothLEDeviceWinrt>> fake_ble_devices_;
+   std::vector<raw_ptr<FakeBluetoothLEDeviceStaticsWinrt>>
+       fake_ble_device_statics_;
+ };
+ 
++using BluetoothTestWinrtOnly = BluetoothTestWinrt;
++
+ }  // namespace device
+ 
+ #endif  // DEVICE_BLUETOOTH_TEST_BLUETOOTH_TEST_WIN_H_
