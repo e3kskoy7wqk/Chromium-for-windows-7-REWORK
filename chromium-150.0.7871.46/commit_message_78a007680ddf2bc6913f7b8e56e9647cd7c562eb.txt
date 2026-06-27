@@ -1,0 +1,1 @@
+Remove `kGLImplementationDesktopName` and `kGLImplementationAppleName`    2024/8/5 16:06:18    78a007680ddf2bc6913f7b8e56e9647cd7c562eb

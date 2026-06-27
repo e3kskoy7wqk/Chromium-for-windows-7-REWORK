@@ -1,0 +1,81 @@
+diff --git a/gpu/command_buffer/service/shared_image/skia_vk_android_image_representation.cc b/gpu/command_buffer/service/shared_image/skia_vk_android_image_representation.cc
+index e760caa0f8974..9eb97dc0ca6c5 100644
+--- a/gpu/command_buffer/service/shared_image/skia_vk_android_image_representation.cc
++++ b/gpu/command_buffer/service/shared_image/skia_vk_android_image_representation.cc
+@@ -29,7 +29,6 @@
+ #include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
+ #include "third_party/skia/include/gpu/ganesh/SkSurfaceGanesh.h"
+ #include "third_party/skia/include/gpu/ganesh/vk/GrVkBackendSemaphore.h"
+-#include "third_party/skia/include/gpu/vk/VulkanMutableTextureState.h"
+ #include "third_party/skia/include/private/chromium/GrPromiseImageTexture.h"
+ #include "ui/gl/gl_utils.h"
+ 
+@@ -306,8 +305,7 @@ SkiaVkAndroidImageRepresentation::GetEndAccessState() {
+   if (!kSingleDeviceUsage.HasAll(android_backing()->usage()) ||
+       android_backing()->is_thread_safe()) {
+     return std::make_unique<skgpu::MutableTextureState>(
+-        skgpu::MutableTextureStates::MakeVulkan(
+-            VK_IMAGE_LAYOUT_UNDEFINED, vulkan_image_->queue_family_index()));
++        VK_IMAGE_LAYOUT_UNDEFINED, vulkan_image_->queue_family_index());
+   }
+   return nullptr;
+ }
+diff --git a/skia/BUILD.gn b/skia/BUILD.gn
+index 01ee2042c77ca..180ce2a36def3 100644
+--- a/skia/BUILD.gn
++++ b/skia/BUILD.gn
+@@ -62,6 +62,26 @@ config("skia_config") {
+     "SK_UNTIL_CRBUG_1187654_IS_FIXED",
+     "SK_USER_CONFIG_HEADER=\"../../skia/config/SkUserConfig.h\"",
+     "SK_WIN_FONTMGR_NO_SIMULATIONS",
++    "SK_DISABLE_LEGACY_SKSURFACE_METHODS",
++    "SK_DISABLE_LEGACY_GRAPHITE_IMAGE_FACTORIES",
++    "SK_DISABLE_LEGACY_GRAPHITE_IMAGE_METHODS",
++    "SK_DISABLE_LEGACY_SKSURFACE_FACTORIES",
++    "SK_DISABLE_LEGACY_SKSURFACE_FLUSH",
++    "SK_DISABLE_LEGACY_SKSURFACE_AS_IMAGE",
++    "SK_DISABLE_LEGACY_SKSURFACE_DISPLAYLIST",
++    "SK_DISABLE_LEGACY_IMAGE_SUBSET_METHODS",
++    "SK_DISABLE_LEGACY_IMAGE_COLORSPACE_METHODS",
++    "SK_DISABLE_LEGACY_IMAGE_RELEASE_PROCS",
++    "SK_DISABLE_LEGACY_GL_BACKEND_SURFACE",
++    "SK_DISABLE_LEGACY_GRDIRECTCONTEXT_FLUSH",
++    "SK_DISABLE_LEGACY_GRDIRECTCONTEXT_BOOLS",
++    "SK_DISABLE_LEGACY_GL_GRDIRECTCONTEXT_FACTORIES",
++    "SK_DISABLE_LEGACY_PNG_WRITEBUFFER",
++    "SK_DISABLE_LEGACY_VK_GRDIRECTCONTEXT_FACTORIES",
++    "SK_DEFAULT_TYPEFACE_IS_EMPTY",
++    "SK_DISABLE_LEGACY_DEFAULT_TYPEFACE",
++    "SK_DISABLE_LEGACY_FONTMGR_REFDEFAULT",
++    "SK_DISABLE_LEGACY_FONTMGR_FACTORY",
+ 
+     # Staging
+     "SK_ENABLE_LEGACY_SHADERCONTEXT",
+@@ -83,6 +102,11 @@ config("skia_config") {
+       "SK_CODEC_ENCODES_JPEG",
+     ]
+     include_dirs += [ "//third_party/wuffs/src/release/c" ]
++  } else {
++    # Decoder sources are only added when use_blink == true, but SkCodec.cpp is
++    # always present.  SK_DISABLE_LEGACY_INIT_DECODERS ensures that SkCodec.cpp
++    # is not attempting to reference inexistent codec code.
++    defines += [ "SK_DISABLE_LEGACY_INIT_DECODERS" ]
+   }
+ 
+   if (is_component_build) {
+diff --git a/skia/ext/font_utils.cc b/skia/ext/font_utils.cc
+index 83717873d6893..3631af6cc9587 100644
+--- a/skia/ext/font_utils.cc
++++ b/skia/ext/font_utils.cc
+@@ -118,3 +118,11 @@ SkFont DefaultFont() {
+ }
+ 
+ }  // namespace skia
++
++// TODO(b/305780908) Remove this after all dependencies on the default fontmgr
++// have been removed.
++#if !defined(SK_DISABLE_LEGACY_FONTMGR_FACTORY)
++SK_API sk_sp<SkFontMgr> SkFontMgr::Factory() {
++  return skia::DefaultFontMgr();
++}
++#endif

@@ -1,0 +1,32 @@
+diff --git a/chrome/browser/chrome_browser_main_win.cc b/chrome/browser/chrome_browser_main_win.cc
+index 049b078484234..2f6a42170292b 100644
+--- a/chrome/browser/chrome_browser_main_win.cc
++++ b/chrome/browser/chrome_browser_main_win.cc
+@@ -11,6 +11,7 @@
+ 
+ // windows.h must be included before shellapi.h
+ #include <windows.h>
++#include <psapi.h>
+ 
+ #include <delayimp.h>
+ #include <shellapi.h>
+@@ -432,15 +434,15 @@ base::expected<base::FilePath, DWORD> GetProcessExecutablePath(
+     const base::Process& process) {
+   std::wstring image_path(MAX_PATH, L'\0');
+   DWORD path_length = image_path.size();
+-  BOOL success = ::QueryFullProcessImageNameW(process.Handle(), 0,
+-                                              image_path.data(), &path_length);
++  BOOL success = ::GetModuleFileNameExW(process.Handle(), 0,
++                                              image_path.data(), path_length);
+   if (!success && ::GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+     // Process name is potentially greater than MAX_PATH, try larger max size.
+     // https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+     image_path.resize(UNICODE_STRING_MAX_CHARS);
+     path_length = image_path.size();
+-    success = ::QueryFullProcessImageNameW(process.Handle(), 0,
+-                                           image_path.data(), &path_length);
++    success = ::GetModuleFileNameExW(process.Handle(), 0,
++                                           image_path.data(), path_length);
+   }
+   if (!success) {
+     PLOG_IF(ERROR, ::GetLastError() != ERROR_GEN_FAILURE)

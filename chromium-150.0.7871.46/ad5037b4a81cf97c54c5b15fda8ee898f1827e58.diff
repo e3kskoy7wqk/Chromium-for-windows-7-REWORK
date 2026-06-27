@@ -1,0 +1,82 @@
+diff --git a/third_party/webrtc/rtc_base/task_queue_win.cc b/third_party/webrtc/rtc_base/task_queue_win.cc
+index 7e46d58e27..7a330057bc 100644
+--- a/third_party/webrtc/rtc_base/task_queue_win.cc
++++ b/third_party/webrtc/rtc_base/task_queue_win.cc
+@@ -208,6 +208,77 @@ TaskQueueWin::TaskQueueWin(absl::string_view queue_name,
+   event.Wait(Event::kForever);
+ }
+ 
++#define NTSTATUS ULONG
++
++// The thread environment block internal type.
++struct TEB {
++  NT_TIB Tib;
++  // Rest of struct is ignored.
++};
++
++DWORD
++APIENTRY
++GetThreadId(
++    HANDLE thread_handle
++    )
++/*++
++
++Routine Description:
++
++    Gets the thread ID of the thread open via the specified handle
++
++Arguments:
++
++    Thread - Handle of thread to do the query on
++
++Return Value:
++
++    Returns a unique value representing the thread ID of the
++    executing thread.  The return value may be used to identify a thread
++    in the system. If the function fails the return value is zero.
++
++--*/
++
++{
++  // Define the internal types we need to invoke NtQueryInformationThread.
++  enum THREAD_INFORMATION_CLASS { ThreadBasicInformation };
++
++  struct CLIENT_ID {
++    HANDLE UniqueProcess;
++    HANDLE UniqueThread;
++  };
++
++  struct THREAD_BASIC_INFORMATION {
++    NTSTATUS ExitStatus;
++    TEB* Teb;
++    CLIENT_ID ClientId;
++    KAFFINITY AffinityMask;
++    LONG Priority;
++    LONG BasePriority;
++  };
++
++  using NtQueryInformationThreadFunction =
++      NTSTATUS (WINAPI*)(HANDLE, THREAD_INFORMATION_CLASS, PVOID, ULONG,
++                         PULONG);
++
++  const NtQueryInformationThreadFunction nt_query_information_thread =
++      reinterpret_cast<NtQueryInformationThreadFunction>(
++          ::GetProcAddress(::GetModuleHandle(L"ntdll.dll"),
++                           "NtQueryInformationThread"));
++  if (!nt_query_information_thread)
++    return 0;
++
++  THREAD_BASIC_INFORMATION basic_info = {0};
++  NTSTATUS status =
++      nt_query_information_thread(thread_handle, ThreadBasicInformation,
++                                  &basic_info, sizeof(THREAD_BASIC_INFORMATION),
++                                  nullptr);
++  if (status != 0)
++    return 0;
++
++  return (ULONG)(ULONG_PTR) (basic_info.ClientId.UniqueThread);
++}
++
+ void TaskQueueWin::Delete() {
+   RTC_DCHECK(!IsCurrent());
+   RTC_CHECK(thread_.GetHandle() != std::nullopt);

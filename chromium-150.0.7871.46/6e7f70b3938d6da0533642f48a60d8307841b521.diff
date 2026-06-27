@@ -1,0 +1,24 @@
+diff --git a/third_party/pdfium/core/fxge/cfx_fontmgr.cpp b/third_party/pdfium/core/fxge/cfx_fontmgr.cpp
+index 1d0206d8f..ddc261e99 100644
+--- a/third_party/pdfium/core/fxge/cfx_fontmgr.cpp
++++ b/third_party/pdfium/core/fxge/cfx_fontmgr.cpp
+@@ -14,6 +14,7 @@
+ #include "core/fxge/cfx_font.h"
+ #include "core/fxge/cfx_fontmapper.h"
+ #include "core/fxge/cfx_glyphcache.h"
++#include "core/fxcrt/win/win_util.h"
+ #include "core/fxge/cfx_substfont.h"
+ #include "core/fxge/fontdata/chromefontdata/chromefontdata.h"
+ #include "core/fxge/fx_font.h"
+@@ -238,7 +239,10 @@ SkFontMgr* g_fontmgr = nullptr;
+ // static
+ sk_sp<SkFontMgr> CreateSkiaFontManager(CFX_FontMgr::FontBackend backend) {
+ #if BUILDFLAG(IS_WIN)
+-  return SkFontMgr_New_DirectWrite();
++  if(pdfium::IsUser32AndGdi32Available())
++    return SkFontMgr_New_GDI();
++  else
++    return SkFontMgr_New_DirectWrite();
+ #elif BUILDFLAG(IS_APPLE)
+   return SkFontMgr_New_CoreText(nullptr);
+ #else

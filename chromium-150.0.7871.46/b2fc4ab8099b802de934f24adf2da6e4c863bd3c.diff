@@ -1,0 +1,159 @@
+diff --git a/third_party/cpuinfo/src/src/cpuinfo/internal-api.h b/third_party/cpuinfo/src/src/cpuinfo/internal-api.h
+index 9c23d7c..b2c96bd 100644
+--- a/third_party/cpuinfo/src/src/cpuinfo/internal-api.h
++++ b/third_party/cpuinfo/src/src/cpuinfo/internal-api.h
+@@ -51,7 +51,7 @@ extern CPUINFO_INTERNAL uint32_t cpuinfo_max_cache_size;
+ #if CPUINFO_ARCH_ARM64
+ CPUINFO_PRIVATE BOOL CALLBACK cpuinfo_arm_windows_init(PINIT_ONCE init_once, PVOID parameter, PVOID* context);
+ #else
+-CPUINFO_PRIVATE BOOL CALLBACK cpuinfo_x86_windows_init(PINIT_ONCE init_once, PVOID parameter, PVOID* context);
++CPUINFO_PRIVATE void cpuinfo_x86_windows_init(void);
+ #endif
+ #endif
+ CPUINFO_PRIVATE void cpuinfo_arm_mach_init(void);
+diff --git a/third_party/cpuinfo/src/src/init.c b/third_party/cpuinfo/src/src/init.c
+index d61e7be..972d94a 100644
+--- a/third_party/cpuinfo/src/src/init.c
++++ b/third_party/cpuinfo/src/src/init.c
+@@ -14,7 +14,31 @@
+ #endif
+ 
+ #if defined(_WIN32) || defined(__CYGWIN__)
+-static INIT_ONCE init_guard = INIT_ONCE_STATIC_INIT;
++static volatile long init_guard = 0;
++/* Copied from "perftools_pthread_once" in tcmalloc */
++static int fake_pthread_once(volatile long *once_control,
++                             void (*init_routine)(void)) {
++    // Try for a fast path first. Note: this should be an acquire semantics read
++    // It is on x86 and x64, where Windows runs.
++    if (*once_control != 1) {
++        while (1) {
++            switch (InterlockedCompareExchange(once_control, 2, 0)) {
++                case 0:
++                    init_routine();
++                    InterlockedExchange(once_control, 1);
++                    return 0;
++                case 1:
++                    // The initializer has already been executed
++                    return 0;
++                default:
++                    // The initializer is being processed by another thread
++                    SwitchToThread();
++            }
++        }
++    }
++    return 0;
++}
++
+ #elif !defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_PTHREADS__)
+ static pthread_once_t init_guard = PTHREAD_ONCE_INIT;
+ #else
+@@ -28,7 +52,7 @@ bool CPUINFO_ABI cpuinfo_initialize(void) {
+ #elif defined(__linux__)
+ 	pthread_once(&init_guard, &cpuinfo_x86_linux_init);
+ #elif defined(_WIN32) || defined(__CYGWIN__)
+-	InitOnceExecuteOnce(&init_guard, &cpuinfo_x86_windows_init, NULL, NULL);
++	fake_pthread_once(&init_guard, &cpuinfo_x86_windows_init);
+ #else
+ 	cpuinfo_log_error("operating system is not supported in cpuinfo");
+ #endif
+diff --git a/third_party/cpuinfo/src/src/x86/windows/init.c b/third_party/cpuinfo/src/src/x86/windows/init.c
+index 274075c..6305d02 100644
+--- a/third_party/cpuinfo/src/src/x86/windows/init.c
++++ b/third_party/cpuinfo/src/src/x86/windows/init.c
+@@ -104,7 +104,7 @@ static bool cpuinfo_x86_windows_is_wine(void) {
+ 	return GetProcAddress(ntdll, "wine_get_version") != NULL;
+ }
+ 
+-BOOL CALLBACK cpuinfo_x86_windows_init(PINIT_ONCE init_once, PVOID parameter, PVOID* context) {
++void cpuinfo_x86_windows_init(void) {
+ 	struct cpuinfo_processor* processors = NULL;
+ 	struct cpuinfo_core* cores = NULL;
+ 	struct cpuinfo_cluster* clusters = NULL;
+@@ -131,15 +131,41 @@ BOOL CALLBACK cpuinfo_x86_windows_init(PINIT_ONCE init_once, PVOID parameter, PV
+ 		max(x86_processor.topology.thread_bits_offset + x86_processor.topology.thread_bits_length,
+ 		    x86_processor.topology.core_bits_offset + x86_processor.topology.core_bits_length);
+ 
++    typedef BOOL (WINAPI *PFnGetLogicalProcessorInformationEx)(LOGICAL_PROCESSOR_RELATIONSHIP, PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, PDWORD);
++    PFnGetLogicalProcessorInformationEx pfnGetLogicalProcessorInformationEx
++        = (PFnGetLogicalProcessorInformationEx) GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
++                                                                "GetLogicalProcessorInformationEx");
++    if (pfnGetLogicalProcessorInformationEx == NULL)
++    {
++        goto cleanup;
++    }
++
++    HMODULE hmodKernel32 = GetModuleHandleW(L"kernel32.dll");
++
++    typedef WORD (WINAPI *PFnGetMaximumProcessorGroupCount)();
++
++    // A pointer to a kernel32 function that exists only on Win7 and higher
++    typedef DWORD (WINAPI *PFnGetMaximumProcessorCount)(WORD);
++    PFnGetMaximumProcessorGroupCount pfnGetMaximumProcessorGroupCount = (PFnGetMaximumProcessorGroupCount) GetProcAddress(hmodKernel32,
++                                                                                            "GetMaximumProcessorGroupCount");
++
++    PFnGetMaximumProcessorCount pfnGetMaximumProcessorCount = (PFnGetMaximumProcessorCount) GetProcAddress(hmodKernel32,
++                                                                                            "GetMaximumProcessorCount");
++
++    if (pfnGetMaximumProcessorGroupCount == NULL || pfnGetMaximumProcessorCount == NULL)
++    {
++        goto cleanup;
++    }
++
+ 	/* WINE doesn't implement GetMaximumProcessorGroupCount and aborts when
+ 	 * calling it */
+-	const uint32_t max_group_count = is_wine ? 1 : (uint32_t)GetMaximumProcessorGroupCount();
++	const uint32_t max_group_count = is_wine ? 1 : (uint32_t)pfnGetMaximumProcessorGroupCount();
+ 	cpuinfo_log_debug("detected %" PRIu32 " processor groups", max_group_count);
+ 
+ 	uint32_t processors_count = 0;
+ 	uint32_t* processors_per_group = (uint32_t*)CPUINFO_ALLOCA(max_group_count * sizeof(uint32_t));
+ 	for (uint32_t i = 0; i < max_group_count; i++) {
+-		processors_per_group[i] = GetMaximumProcessorCount((WORD)i);
++		processors_per_group[i] = pfnGetMaximumProcessorCount((WORD)i);
+ 		cpuinfo_log_debug("detected %" PRIu32 " processors in group %" PRIu32, processors_per_group[i], i);
+ 		processors_count += processors_per_group[i];
+ 	}
+@@ -160,7 +186,7 @@ BOOL CALLBACK cpuinfo_x86_windows_init(PINIT_ONCE init_once, PVOID parameter, PV
+ 	}
+ 
+ 	DWORD cores_info_size = 0;
+-	if (GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &cores_info_size) == FALSE) {
++	if (pfnGetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &cores_info_size) == FALSE) {
+ 		const DWORD last_error = GetLastError();
+ 		if (last_error != ERROR_INSUFFICIENT_BUFFER) {
+ 			cpuinfo_log_error(
+@@ -170,7 +196,7 @@ BOOL CALLBACK cpuinfo_x86_windows_init(PINIT_ONCE init_once, PVOID parameter, PV
+ 	}
+ 
+ 	DWORD packages_info_size = 0;
+-	if (GetLogicalProcessorInformationEx(RelationProcessorPackage, NULL, &packages_info_size) == FALSE) {
++	if (pfnGetLogicalProcessorInformationEx(RelationProcessorPackage, NULL, &packages_info_size) == FALSE) {
+ 		const DWORD last_error = GetLastError();
+ 		if (last_error != ERROR_INSUFFICIENT_BUFFER) {
+ 			cpuinfo_log_error(
+@@ -188,7 +214,7 @@ BOOL CALLBACK cpuinfo_x86_windows_init(PINIT_ONCE init_once, PVOID parameter, PV
+ 		goto cleanup;
+ 	}
+ 
+-	if (GetLogicalProcessorInformationEx(RelationProcessorPackage, processor_infos, &max_info_size) == FALSE) {
++	if (pfnGetLogicalProcessorInformationEx(RelationProcessorPackage, processor_infos, &max_info_size) == FALSE) {
+ 		cpuinfo_log_error(
+ 			"failed to query processor packages information: error %" PRIu32, (uint32_t)GetLastError());
+ 		goto cleanup;
+@@ -233,7 +259,7 @@ BOOL CALLBACK cpuinfo_x86_windows_init(PINIT_ONCE init_once, PVOID parameter, PV
+ 	}
+ 
+ 	max_info_size = max(cores_info_size, packages_info_size);
+-	if (GetLogicalProcessorInformationEx(RelationProcessorCore, processor_infos, &max_info_size) == FALSE) {
++	if (pfnGetLogicalProcessorInformationEx(RelationProcessorCore, processor_infos, &max_info_size) == FALSE) {
+ 		cpuinfo_log_error(
+ 			"failed to query processor cores information: error %" PRIu32, (uint32_t)GetLastError());
+ 		goto cleanup;
+@@ -630,5 +656,5 @@ cleanup:
+ 	if (l4 != NULL) {
+ 		HeapFree(heap, 0, l4);
+ 	}
+-	return TRUE;
++	return;
+ }
