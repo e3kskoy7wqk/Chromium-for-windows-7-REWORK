@@ -1,0 +1,48 @@
+diff --git a/base/process/launch_win.cc b/base/process/launch_win.cc
+index 985dccc0a3214..c7edfdb1016b1 100644
+--- a/base/process/launch_win.cc
++++ b/base/process/launch_win.cc
+@@ -241,7 +243,9 @@ Process LaunchProcess(const string16& cmdline,
+     if (!startup_info_wrapper.InitializeProcThreadAttributeList(
+             attribute_count)) {
+       DPLOG(ERROR);
++#if 0
+         return Process();
++#endif
+     }
+     flags |= EXTENDED_STARTUPINFO_PRESENT;
+   }
+@@ -250,7 +254,9 @@ Process LaunchProcess(const string16& cmdline,
+             static_cast<DWORD>(options.handles_to_inherit.size() *
+                                sizeof(HANDLE)))) {
+       DPLOG(ERROR);
++#if 0
+         return Process();
++#endif
+       }
+ 
+       inherit_handles = true;
+diff --git a/remoting/host/win/launch_process_with_token.cc b/remoting/host/win/launch_process_with_token.cc
+index ab754f72e6045..fe3ac53b485b3 100644
+--- a/remoting/host/win/launch_process_with_token.cc
++++ b/remoting/host/win/launch_process_with_token.cc
+@@ -153,7 +153,9 @@ bool LaunchProcessWithToken(
+     if (!startup_info_wrapper.InitializeProcThreadAttributeList(
+             /* attribute_count= */ 1)) {
+       PLOG(ERROR) << "InitializeProcThreadAttributeList()";
++#if 0
+       return false;
++#endif
+     }
+ 
+     if (!startup_info_wrapper.UpdateProcThreadAttribute(
+@@ -161,7 +163,9 @@ bool LaunchProcessWithToken(
+             const_cast<HANDLE*>(&handles_to_inherit.at(0)),
+             static_cast<DWORD>(handles_to_inherit.size() * sizeof(HANDLE)))) {
+       PLOG(ERROR) << "UpdateProcThreadAttribute()";
++#if 0
+       return false;
++#endif
+     }
+ 
+     inherit_handles = true;
