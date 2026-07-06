@@ -1,0 +1,32 @@
+diff --git a/chrome/browser/media/webrtc/desktop_capture_devices_util_win.cc b/chrome/browser/media/webrtc/desktop_capture_devices_util_win.cc
+index 36a0a63de3300..c19b123c9fa56 100644
+--- a/chrome/browser/media/webrtc/desktop_capture_devices_util_win.cc
++++ b/chrome/browser/media/webrtc/desktop_capture_devices_util_win.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/media/webrtc/desktop_capture_devices_util_win.h"
+ 
+ #include <windows.h>
++#include <psapi.h>
+ 
+ #include <array>
+ 
+@@ -82,15 +83,15 @@ base::ProcessId GetUWPAppCoreWindowProcessId(HWND hwnd) {
+ base::FilePath GetProcessExecutablePath(HANDLE process_handle) {
+   std::wstring image_path(MAX_PATH, L'\0');
+   DWORD path_length = image_path.size();
+-  BOOL success = QueryFullProcessImageNameW(process_handle, 0,
+-                                            image_path.data(), &path_length);
++  BOOL success = GetModuleFileNameExW(process_handle, 0,
++                                            image_path.data(), path_length);
+   if (!success && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+     // Process name is potentially greater than MAX_PATH, try larger max size.
+     // https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+     image_path.resize(UNICODE_STRING_MAX_CHARS);
+     path_length = image_path.size();
+-    success = QueryFullProcessImageName(process_handle, 0, image_path.data(),
+-                                        &path_length);
++    success = GetModuleFileNameExW(process_handle, 0, image_path.data(),
++                                        path_length);
+     if (!success) {
+       return base::FilePath();
+     }

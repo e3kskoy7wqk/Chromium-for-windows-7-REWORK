@@ -1,0 +1,22 @@
+diff --git a/media/gpu/gpu_video_encode_accelerator_factory.cc b/media/gpu/gpu_video_encode_accelerator_factory.cc
+index 3d46117501..d9f454f029 100644
+--- a/media/gpu/gpu_video_encode_accelerator_factory.cc
++++ b/media/gpu/gpu_video_encode_accelerator_factory.cc
+@@ -67,7 +67,16 @@ bool D3dDevice::Initialize(const ComPtr<IDXGIAdapter>& adapter) {
+ 
+ Microsoft::WRL::ComPtr<IDXGIAdapter> GetDxgiAdapterByLuid(CHROME_LUID luid) {
+   Microsoft::WRL::ComPtr<IDXGIFactory4> dxgi_factory4;
+-  if (FAILED(::CreateDXGIFactory1(IID_PPV_ARGS(&dxgi_factory4)))) {
++typedef HRESULT (APIENTRY *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
++static PFN_CreateDXGIFactory1 fpCreateDXGIFactory1;
++    HMODULE dxgi_module = LoadLibraryW(L"dxgi.dll");
++    fpCreateDXGIFactory1 = dxgi_module == NULL ? NULL :
++        (PFN_CreateDXGIFactory1)GetProcAddress(dxgi_module, "CreateDXGIFactory1");
++  if (!fpCreateDXGIFactory1) {
++    return nullptr;
++  }
++
++  if (FAILED(fpCreateDXGIFactory1(IID_PPV_ARGS(&dxgi_factory4)))) {
+     LOG(ERROR) << "Failed to create DXGI factory";
+     return nullptr;
+   }

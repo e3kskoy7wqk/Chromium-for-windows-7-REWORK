@@ -1,0 +1,1 @@
+Replace gdi32/user32 calls in unrar on Windows with lower level ones    2024/3/29 0:11:55    cca10402b07faebfd0a3f5651fad43f14d87a6c2

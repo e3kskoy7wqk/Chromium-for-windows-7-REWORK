@@ -1,0 +1,37 @@
+diff --git a/chrome/browser/win/parental_controls.cc b/chrome/browser/win/parental_controls.cc
+index 5145cb3a9d49b..e6e0195a49643 100644
+--- a/chrome/browser/win/parental_controls.cc
++++ b/chrome/browser/win/parental_controls.cc
+@@ -23,6 +23,7 @@
+ #include "base/win/registry.h"
+ #include "base/win/win_util.h"
+ #include "base/win/windows_types.h"
++#include "base/win/windows_version.h"
+ 
+ namespace {
+ 
+@@ -123,7 +124,8 @@ class WinParentalControlsValue {
+ 
+     // Parental controls APIs are not fully supported in Win10 and beyond, so
+     // check registry properties for restictions.
+-    UpdateParentalControlsFromRegistry(&controls);
++    if (base::win::GetVersion() >= base::win::Version::WIN10)
++      UpdateParentalControlsFromRegistry(&controls);
+ 
+     return controls;
+   }
+diff --git a/chrome/browser/win/titlebar_config.cc b/chrome/browser/win/titlebar_config.cc
+index ea0ec0bcdf667..43678e39b310a 100644
+--- a/chrome/browser/win/titlebar_config.cc
++++ b/chrome/browser/win/titlebar_config.cc
+@@ -9,8 +9,10 @@
+ #include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/win/mica_titlebar.h"
++#include "base/win/windows_version.h"
+ 
+ bool ShouldBrowserCustomDrawTitlebar(BrowserView* browser_view) {
++  if (base::win::GetVersion() < base::win::Version::WIN10) return false;
+   return !ShouldDefaultThemeUseMicaTitlebar() ||
+          !ThemeServiceFactory::GetForProfile(browser_view->GetProfile())
+               ->UsingSystemTheme() ||

@@ -1,0 +1,45 @@
+diff --git a/gpu/config/gpu_info_collector_win.cc b/gpu/config/gpu_info_collector_win.cc
+index 841a1e6fbd0de..7b5ce1f2dfde2 100644
+--- a/gpu/config/gpu_info_collector_win.cc
++++ b/gpu/config/gpu_info_collector_win.cc
+@@ -105,8 +105,19 @@ bool GetAMDSwitchableInfo(bool* is_switchable,
+ 
+   CollectNPUInformation(gpu_info);
+ 
++typedef HRESULT (WINAPI *PFN_CREATE_DXGI_FACTORY)(REFIID riid, void **ppFactory);
++  HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
++  if (!dxgi) {
++      return false;
++  }
++  PFN_CREATE_DXGI_FACTORY pfnCreateDXGIFactory =
++      (PFN_CREATE_DXGI_FACTORY)GetProcAddress(dxgi, "CreateDXGIFactory1");
++  if (!pfnCreateDXGIFactory) {
++      FreeLibrary(dxgi);
++      return false;
++  }
+   Microsoft::WRL::ComPtr<IDXGIFactory1> dxgi_factory;
+-  HRESULT hr = ::CreateDXGIFactory1(IID_PPV_ARGS(&dxgi_factory));
++  HRESULT hr = pfnCreateDXGIFactory(IID_PPV_ARGS(&dxgi_factory));
+   if (FAILED(hr))
+     return false;
+ 
+@@ -495,7 +506,18 @@ bool CollectDriverInfoD3D(GPUInfo* gpu_info) {
+ bool CollectD3D11FeatureInfo(D3D_FEATURE_LEVEL* d3d11_feature_level,
+                              bool* has_discrete_gpu) {
++typedef HRESULT (WINAPI *PFN_CREATE_DXGI_FACTORY)(REFIID riid, void **ppFactory);
++  HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
++  if (!dxgi) {
++      return false;
++  }
++  PFN_CREATE_DXGI_FACTORY pfnCreateDXGIFactory =
++      (PFN_CREATE_DXGI_FACTORY)GetProcAddress(dxgi, "CreateDXGIFactory1");
++  if (!pfnCreateDXGIFactory) {
++      FreeLibrary(dxgi);
++      return false;
++  }
+   Microsoft::WRL::ComPtr<IDXGIFactory1> dxgi_factory;
+-  if (FAILED(::CreateDXGIFactory1(IID_PPV_ARGS(&dxgi_factory))))
++  if (FAILED(pfnCreateDXGIFactory(IID_PPV_ARGS(&dxgi_factory))))
+     return false;
+ 
+   base::ScopedNativeLibrary d3d11_library(
