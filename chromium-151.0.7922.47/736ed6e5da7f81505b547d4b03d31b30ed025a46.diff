@@ -1,0 +1,62 @@
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index a556c6de7d4da..03efe6e06c580 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -9853,21 +9853,6 @@
+             ]
+         }
+     ],
+-    "RemoveFontLinkFallbacks": [
+-        {
+-            "platforms": [
+-                "windows"
+-            ],
+-            "experiments": [
+-                {
+-                    "name": "Enabled_20230210",
+-                    "enable_features": [
+-                        "RemoveFontLinkFallbacks"
+-                    ]
+-                }
+-            ]
+-        }
+-    ],
+     "RemoveGreySnapshot": [
+         {
+             "platforms": [
+diff --git a/ui/gfx/render_text_harfbuzz.cc b/ui/gfx/render_text_harfbuzz.cc
+index b1875653c1d61..9bc39c30f2c77 100644
+--- a/ui/gfx/render_text_harfbuzz.cc
++++ b/ui/gfx/render_text_harfbuzz.cc
+@@ -810,12 +810,6 @@ internal::TextRunHarfBuzz::FontParams CreateFontParams(
+   return font_params;
+ }
+ 
+-BASE_FEATURE(kRemoveFontLinkFallbacks, base::FEATURE_DISABLED_BY_DEFAULT);
+-
+-bool IsRemoveFontLinkFallbacks() {
+-  return base::FeatureList::IsEnabled(kRemoveFontLinkFallbacks);
+-}
+-
+ }  // namespace
+ 
+ namespace internal {
+@@ -2081,7 +2073,7 @@ void RenderTextHarfBuzz::ShapeRuns(
+     return true;
+   }
+ 
+-  if (!IsRemoveFontLinkFallbacks()) {
++  if (true) {
+     std::vector<Font> fallback_font_list;
+     {
+       SCOPED_UMA_HISTOGRAM_LONG_TIMER(
+@@ -2124,8 +2114,7 @@ void RenderTextHarfBuzz::ShapeRuns(
+       // font could be a raster font like System, which would not give us a
+       // reasonable fallback font list.
+       Font segoe("Segoe UI", 13);
+-      if (!FontWasAlreadyTried(segoe.platform_font()->GetNativeSkTypeface(),
+-                               &fallback_fonts_already_tried)) {
++      if (true) {
+         std::vector<Font> default_fallback_families = GetFallbackFonts(segoe);
+         fallback_font_list.insert(fallback_font_list.end(),
+                                   default_fallback_families.begin(),

@@ -1,0 +1,26 @@
+diff --git a/chrome/app/chromium_strings.grd b/chrome/app/chromium_strings.grd
+index e5c488d5421f2..bb3cda3a3d3a8 100644
+--- a/chrome/app/chromium_strings.grd
++++ b/chrome/app/chromium_strings.grd
+@@ -581,7 +581,7 @@ Permissions you've already given to websites and apps may apply to this account.
+           Can not install the same Chromium version that is currently running. Please close Chromium and try again.
+         </message>
+         <message name="IDS_INSTALL_OS_NOT_SUPPORTED" desc="Error displayed if OS is not supported">
+-          Chromium requires Windows 10 or higher.
++          Chromium requires Windows 7 or higher.
+         </message>
+         <message name="IDS_INSTALL_OS_ERROR" desc="Error displayed when any Windows API call fails and we do not have more specific information.">
+           An operating system error occurred during installation. Please download Chromium again.
+diff --git a/chrome/app/google_chrome_strings.grd b/chrome/app/google_chrome_strings.grd
+index fe768666e35dc..82e8657193dcf 100644
+--- a/chrome/app/google_chrome_strings.grd
++++ b/chrome/app/google_chrome_strings.grd
+@@ -616,7 +616,7 @@ Permissions you've already given to websites and apps may apply to this account.
+           Can not install the same Google Chrome version that is currently running. Please close Google Chrome and try again.
+         </message>
+         <message name="IDS_INSTALL_OS_NOT_SUPPORTED" desc="Error displayed if OS is not supported">
+-          Google Chrome requires Windows 10 or higher.
++          Google Chrome requires Windows 7 or higher.
+         </message>
+         <message name="IDS_INSTALL_OS_ERROR" desc="Error displayed when any Windows API call fails and we do not have more specific information.">
+           An operating system error occurred during installation. Please download Google Chrome again.

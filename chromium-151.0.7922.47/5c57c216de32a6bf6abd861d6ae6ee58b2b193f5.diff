@@ -1,0 +1,58 @@
+diff --git a/chrome/app/chrome_exe_main_win.cc b/chrome/app/chrome_exe_main_win.cc
+index 74c3b7c04aa07..bcb719943bc67 100644
+--- a/chrome/app/chrome_exe_main_win.cc
++++ b/chrome/app/chrome_exe_main_win.cc
+@@ -11158,20 +11158,49 @@ int main() {
+   FiberStatus fiber_status = FiberStatus::kSuccess;
+   // GetLastError result if fiber conversion failed.
+   DWORD fiber_error = ERROR_SUCCESS;
+-  if (!::IsThreadAFiber()) {
++typedef LPVOID (WINAPI *PFN_MS_EX) (LPVOID , DWORD  );
++typedef BOOL (*LPFN)();
++    PFN_MS_EX pfnex;
++    LPFN lpfn;
++    HMODULE h = GetModuleHandle (L"kernel32.dll");
++    bool fiber;
++    void *ptr;
++
++    if ((lpfn = (LPFN) GetProcAddress (h, "IsThreadAFiber")))
++    fiber = lpfn();
++    else
++      {
++        ptr = ::GetCurrentFiber(); 
++        fiber = nullptr != ptr && reinterpret_cast< LPVOID >( 0x1E00) != ptr;
++      }
++  if (!fiber) {
+     // Make the main thread's stack size 4 MiB so that it has roughly the same
+     // effective size as the 64-bit build's 8 MiB stack.
+     constexpr size_t kStackSize = 4 * 1024 * 1024;  // 4 MiB
+     // Leak the fiber on exit.
+-    LPVOID original_fiber =
+-        ::ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
++    LPVOID original_fiber;
++    /*  Use ConvertThreadToFiberEx if available.  */
++    if ((pfnex = (PFN_MS_EX) GetProcAddress (h, "ConvertThreadToFiberEx")))
++    original_fiber =
++        pfnex(nullptr, FIBER_FLAG_FLOAT_SWITCH);
++
++    /*  Fall back to ConvertThreadToFiber which is always available.  */
++    else
++      {
++    original_fiber =
++        ::ConvertThreadToFiber(nullptr);
++        if (original_fiber)
++        *(DWORD*)((char *) original_fiber + sizeof (void *) * 5) |= CONTEXT_FLOATING_POINT;
++      }
+     if (original_fiber) {
+       FiberState fiber_state = {instance, original_fiber};
+       // Create a fiber with a bigger stack and switch to it. Leak the fiber on
+       // exit.
+       LPVOID big_stack_fiber = ::CreateFiberEx(
+-          0, kStackSize, FIBER_FLAG_FLOAT_SWITCH, FiberBinder, &fiber_state);
++          0, kStackSize, pfnex ? FIBER_FLAG_FLOAT_SWITCH : 0, FiberBinder, &fiber_state);
+       if (big_stack_fiber) {
++        if (0 == pfnex)
++        *(DWORD*)((char *) big_stack_fiber + sizeof (void *) * 5) |= CONTEXT_FLOATING_POINT;
+         ::SwitchToFiber(big_stack_fiber);
+         // The fibers must be cleaned up to avoid obscure TLS-related shutdown
+         // crashes.

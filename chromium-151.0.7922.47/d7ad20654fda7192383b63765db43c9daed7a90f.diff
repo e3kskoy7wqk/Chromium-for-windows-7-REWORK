@@ -1,0 +1,103 @@
+diff --git a/chrome/installer/mini_installer/decompress.cc b/chrome/installer/mini_installer/decompress.cc
+index de5860065de68..0dcf29159e61a 100644
+--- a/chrome/installer/mini_installer/decompress.cc
++++ b/chrome/installer/mini_installer/decompress.cc
+@@ -13,6 +13,85 @@
+ 
+ #include "chrome/installer/mini_installer/mini_file.h"
+ 
++#pragma comment(lib, "ntdll.lib")
++
++#ifdef __cplusplus
++extern "C" {
++#endif // __cplusplus
++typedef LONG NTSTATUS;
++
++typedef struct _IO_STATUS_BLOCK {
++    union {
++        NTSTATUS Status;
++        PVOID Pointer;
++    };
++
++    ULONG_PTR Information;
++} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
++
++typedef enum _FILE_INFORMATION_CLASS {
++// end_wdm
++    FileDirectoryInformation         = 1,
++    FileFullDirectoryInformation,   // 2
++    FileBothDirectoryInformation,   // 3
++    FileBasicInformation,           // 4  wdm
++    FileStandardInformation,        // 5  wdm
++    FileInternalInformation,        // 6
++    FileEaInformation,              // 7
++    FileAccessInformation,          // 8
++    FileNameInformation,            // 9
++    FileRenameInformation,          // 10
++    FileLinkInformation,            // 11
++    FileNamesInformation,           // 12
++    FileDispositionInformation,     // 13
++    FilePositionInformation,        // 14 wdm
++    FileFullEaInformation,          // 15
++    FileModeInformation,            // 16
++    FileAlignmentInformation,       // 17
++    FileAllInformation,             // 18
++    FileAllocationInformation,      // 19
++    FileEndOfFileInformation,       // 20 wdm
++    FileAlternateNameInformation,   // 21
++    FileStreamInformation,          // 22
++    FilePipeInformation,            // 23
++    FilePipeLocalInformation,       // 24
++    FilePipeRemoteInformation,      // 25
++    FileMailslotQueryInformation,   // 26
++    FileMailslotSetInformation,     // 27
++    FileCompressionInformation,     // 28
++    FileObjectIdInformation,        // 29
++    FileCompletionInformation,      // 30
++    FileMoveClusterInformation,     // 31
++    FileQuotaInformation,           // 32
++    FileReparsePointInformation,    // 33
++    FileNetworkOpenInformation,     // 34
++    FileAttributeTagInformation,    // 35
++    FileTrackingInformation,        // 36
++    FileIdBothDirectoryInformation, // 37
++    FileIdFullDirectoryInformation, // 38
++    FileValidDataLengthInformation, // 39
++    FileShortNameInformation,       // 40
++    FileMaximumInformation
++// begin_wdm
++} FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
++
++#define NT_SUCCESS(Status)      ((NTSTATUS)(Status) >= 0)
++#define STATUS_SUCCESS          ((NTSTATUS)0x00000000L)
++
++NTSYSCALLAPI
++NTSTATUS
++NTAPI
++NtSetInformationFile(
++    IN HANDLE FileHandle,
++    OUT PIO_STATUS_BLOCK IoStatusBlock,
++    IN PVOID FileInformation,
++    IN ULONG Length,
++    IN FILE_INFORMATION_CLASS FileInformationClass
++    );
++
++#ifdef __cplusplus
++} // extern "C"
++#endif // __cplusplus
+ namespace {
+ 
+ // A simple struct to hold data passed to and from FDICopy via its |pvUser|
+@@ -160,8 +239,10 @@ FNFDINOTIFY(Notify) {
+       info.FileAttributes =
+           pfdin->attribs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN |
+                             FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE);
+-      ::SetFileInformationByHandle(reinterpret_cast<HANDLE>(pfdin->hf),
+-                                   FileBasicInfo, &info, sizeof(info));
++    IO_STATUS_BLOCK         IoStatusBlock;
++
++      NtSetInformationFile(reinterpret_cast<HANDLE>(pfdin->hf),
++                                   &IoStatusBlock, &info, sizeof(info), FileBasicInformation);
+ 
+       // Close the handle given out above in fdintCOPY_FILE.
+       ::CloseHandle(reinterpret_cast<HANDLE>(pfdin->hf));
