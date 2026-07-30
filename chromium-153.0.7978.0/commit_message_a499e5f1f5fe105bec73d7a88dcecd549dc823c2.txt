@@ -1,0 +1,1 @@
+[Permissions] Fix re-entrancy crash in SystemMediaSourceWin    2026/6/16 11:47:38    a499e5f1f5fe105bec73d7a88dcecd549dc823c2

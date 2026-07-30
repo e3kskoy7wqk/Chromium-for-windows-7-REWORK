@@ -1,0 +1,41 @@
+diff --git a/mojo/core/ipcz_driver/invitation.cc b/mojo/core/ipcz_driver/invitation.cc
+index 69ec2887f86e5..f3507a7d57138 100644
+--- a/mojo/core/ipcz_driver/invitation.cc
++++ b/mojo/core/ipcz_driver/invitation.cc
+@@ -120,11 +120,17 @@ base::Process OpenRemoteProcess(
+   base::ProcessId server_pid = 0;
+   base::ProcessId current_pid = base::GetCurrentProcId();
+ 
+-  if (!GetNamedPipeClientProcessId(handle, &client_pid)) {
++typedef	BOOL (WINAPI *GetNamedPipeClientProcessIdfunc)(HANDLE, PULONG);
++GetNamedPipeClientProcessIdfunc pfnGetNamedPipeClientProcessId = NULL;
++GetNamedPipeClientProcessIdfunc pfnGetNamedPipeServerProcessId = NULL;
++  HMODULE hmod = GetModuleHandleW(L"Kernel32.dll");
++  pfnGetNamedPipeClientProcessId = (GetNamedPipeClientProcessIdfunc)GetProcAddress(hmod, "GetNamedPipeClientProcessId");
++  pfnGetNamedPipeServerProcessId = (GetNamedPipeClientProcessIdfunc)GetProcAddress(hmod, "GetNamedPipeServerProcessId");
++  if (pfnGetNamedPipeClientProcessId && !pfnGetNamedPipeClientProcessId(handle, &client_pid)) {
+     PLOG(ERROR) << "GetNamedPipeClientProcessId failed";
+     return base::Process();
+   }
+-  if (!GetNamedPipeServerProcessId(handle, &server_pid)) {
++  if (pfnGetNamedPipeServerProcessId && !pfnGetNamedPipeServerProcessId(handle, &server_pid)) {
+     PLOG(ERROR) << "GetNamedPipeServerProcessId failed";
+     return base::Process();
+   }
+diff --git a/mojo/public/cpp/platform/named_platform_channel_win.cc b/mojo/public/cpp/platform/named_platform_channel_win.cc
+index abf32b2e486e4..cf96b30d4c987 100644
+--- a/mojo/public/cpp/platform/named_platform_channel_win.cc
++++ b/mojo/public/cpp/platform/named_platform_channel_win.cc
+@@ -17,7 +17,11 @@
+ 
+ bool VerifyServerPrivilege(HANDLE pipe_handle) {
+   DWORD pid = 0;
+-  if (!GetNamedPipeServerProcessId(pipe_handle, &pid)) {
++typedef	BOOL (WINAPI *GetNamedPipeClientProcessIdfunc)(HANDLE, PULONG);
++GetNamedPipeClientProcessIdfunc pfnGetNamedPipeServerProcessId = NULL;
++  HMODULE hmod = GetModuleHandleW(L"Kernel32.dll");
++  pfnGetNamedPipeServerProcessId = (GetNamedPipeClientProcessIdfunc)GetProcAddress(hmod, "GetNamedPipeServerProcessId");
++  if (!pfnGetNamedPipeServerProcessId || !pfnGetNamedPipeServerProcessId(pipe_handle, &pid)) {
+     return false;
+   }
+ 

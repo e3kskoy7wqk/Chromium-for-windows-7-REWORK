@@ -1,0 +1,32 @@
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.h b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+index 58e111d61ca58..637ff11a0d86c 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+@@ -10,6 +10,7 @@
+ #include "base/callback_list.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/win/scoped_gdi_object.h"
++#include "base/win/win_util.h"
+ #include "chrome/browser/ui/views/frame/browser_frame_view.h"
+ #include "chrome/browser/ui/views/frame/windows_caption_button.h"
+ #include "chrome/browser/ui/views/tab_icon_view.h"
+@@ -103,6 +106,19 @@ class BrowserFrameViewWin : public BrowserFrameView, public TabIconViewModel {
+  private:
+   friend class BrowserCaptionButtonContainer;
+ 
++// Returns true if the window is arranged via Snap. For example, the browser
++// window is snapped via buttons shown when the mouse is hovered over window
++// maximize button.
++static bool IsWindowArranged(HWND window) {
++  // IsWindowArranged() is not a part of any header file.
++  // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-iswindowarranged
++  using IsWindowArrangedFuncType = BOOL(WINAPI*)(HWND);
++  static const auto is_window_arranged_func =
++      reinterpret_cast<IsWindowArrangedFuncType>(
++          base::win::GetUser32FunctionPointer("IsWindowArranged"));
++  return is_window_arranged_func ? is_window_arranged_func(window) : false;
++}
++
+   class CaptionButtonMetrics;
+ 
+   // Describes the type of titlebar that a window might have; used to query

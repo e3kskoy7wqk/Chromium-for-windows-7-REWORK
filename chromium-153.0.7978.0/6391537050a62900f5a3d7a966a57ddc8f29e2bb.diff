@@ -1,0 +1,34 @@
+diff --git a/third_party/skia/src/utils/win/SkDWrite.cpp b/third_party/skia/src/utils/win/SkDWrite.cpp
+index 08be1e17e2..bd95e561dc 100644
+--- a/third_party/skia/src/utils/win/SkDWrite.cpp
++++ b/third_party/skia/src/utils/win/SkDWrite.cpp
+@@ -31,14 +31,12 @@ static void create_dwrite_factory(IDWriteFactory** factory) {
+     using DWriteCreateFactoryProc = decltype(DWriteCreateFactory)*;
+     DWriteCreateFactoryProc dWriteCreateFactoryProc;
+ 
+-    dWriteCreateFactoryProc = reinterpret_cast<DWriteCreateFactoryProc>(GetProcAddress(
+-            LoadLibraryExW(L"DWriteCore.dll", NULL, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS),
+-            "DWriteCoreCreateFactory"));
++    dWriteCreateFactoryProc = reinterpret_cast<DWriteCreateFactoryProc>(
++        GetProcAddress(LoadLibraryW(L"DWriteCore.dll"), "DWriteCoreCreateFactory"));
+ 
+     if (!dWriteCreateFactoryProc) {
+-        dWriteCreateFactoryProc = reinterpret_cast<DWriteCreateFactoryProc>(GetProcAddress(
+-                LoadLibraryExW(L"dwrite.dll", NULL, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS),
+-                "DWriteCreateFactory"));
++        dWriteCreateFactoryProc = reinterpret_cast<DWriteCreateFactoryProc>(
++            GetProcAddress(LoadLibraryW(L"dwrite.dll"), "DWriteCreateFactory"));
+     }
+ 
+     if (!dWriteCreateFactoryProc) {
+@@ -128,8 +126,8 @@ HRESULT sk_get_locale_string(IDWriteLocalizedStrings* names, const WCHAR* prefer
+ 
+ HRESULT SkGetGetUserDefaultLocaleNameProc(SkGetUserDefaultLocaleNameProc* proc) {
+     *proc = reinterpret_cast<SkGetUserDefaultLocaleNameProc>(
+-            GetProcAddress(LoadLibraryExW(L"Kernel32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32),
+-                           "GetUserDefaultLocaleName"));
++        GetProcAddress(LoadLibraryW(L"Kernel32.dll"), "GetUserDefaultLocaleName")
++    );
+     if (!*proc) {
+         HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+         if (!IS_ERROR(hr)) {

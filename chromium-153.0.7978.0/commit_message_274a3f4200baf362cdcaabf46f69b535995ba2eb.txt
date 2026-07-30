@@ -1,0 +1,1 @@
+Remove Windows Vista/XP specific code from net/cert and net/ssl.    2016/5/20 19:50:04    274a3f4200baf362cdcaabf46f69b535995ba2eb

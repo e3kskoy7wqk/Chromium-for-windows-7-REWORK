@@ -1,0 +1,29 @@
+diff --git a/chrome/browser/ui/webui/default_browser/settings_window_finder_win.cc b/chrome/browser/ui/webui/default_browser/settings_window_finder_win.cc
+index d42998cdbe623..c32bece075748 100644
+--- a/chrome/browser/ui/webui/default_browser/settings_window_finder_win.cc
++++ b/chrome/browser/ui/webui/default_browser/settings_window_finder_win.cc
+@@ -7,6 +7,7 @@
+ #include <objbase.h>
+ 
+ #include <propkey.h>
++#include <psapi.h>
+ #include <shellapi.h>
+ #include <shlobj.h>
+ #include <wrl/client.h>
+@@ -36,14 +37,14 @@ bool GetWindowProcessImagePath(HWND hwnd, std::wstring* path_out) {
+   }
+ 
+   base::win::ScopedHandle process(
+-      ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
++      ::OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid));
+   if (!process.is_valid()) {
+     return false;
+   }
+ 
+   wchar_t buffer[MAX_PATH];
+   DWORD size = std::size(buffer);
+-  if (!::QueryFullProcessImageNameW(process.get(), 0, buffer, &size)) {
++  if (!::GetModuleFileNameExW(process.get(), 0, buffer, size)) {
+     return false;
+   }
+ 
