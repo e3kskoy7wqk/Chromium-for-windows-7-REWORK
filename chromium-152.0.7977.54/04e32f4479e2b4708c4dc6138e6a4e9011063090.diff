@@ -1,0 +1,1188 @@
+diff --git a/include/GLSLANG/ShaderLang.h b/include/GLSLANG/ShaderLang.h
+index 57ba1568d9..6ff1943f55 100644
+--- a/third_party/angle/include/GLSLANG/ShaderLang.h
++++ b/third_party/angle/include/GLSLANG/ShaderLang.h
+@@ -59,7 +59,8 @@ enum ShShaderOutput
+     SH_GLSL_440_CORE_OUTPUT,
+     SH_GLSL_450_CORE_OUTPUT,
+ 
+-    // Prefer using this to specify HLSL output type:
++    // Prefer using these to specify HLSL output type:
++    SH_HLSL_3_0_OUTPUT,  // D3D 9
+     SH_HLSL_4_1_OUTPUT,  // D3D 11
+ 
+     // Output SPIR-V for the Vulkan backend.
+@@ -179,6 +180,10 @@ struct ShCompileOptions
+     // Limit the number of output varyings allowed in vertex shaders to work around driver bugs.
+     uint64_t limitOutputVaryingsTo256 : 1;
+ 
++    // Validates loop and indexing in the shader to ensure that they do not exceed the minimum
++    // functionality mandated in GLSL 1.0 spec, Appendix A, Section 4 and 5.  There is no need to
++    // specify this parameter when compiling for WebGL - it is implied.
++    uint64_t validateLoopIndexing : 1;
+     // Emits #line directives in HLSL.
+     uint64_t lineDirectives : 1;
+ 
+@@ -813,7 +816,7 @@ const std::string &GetBuiltInResourcesString(const ShHandle handle);
+ // type: Specifies the type of shader - GL_FRAGMENT_SHADER or GL_VERTEX_SHADER.
+ // spec: Specifies the language spec the compiler must conform to - SH_GLES2_SPEC or SH_WEBGL_SPEC.
+ // output: Specifies the output code type - for example SH_ESSL_OUTPUT, SH_GLSL_OUTPUT,
+-//         or SH_HLSL_4_1_OUTPUT. Note: Each output type may only
++//         SH_HLSL_3_0_OUTPUT or SH_HLSL_4_1_OUTPUT. Note: Each output type may only
+ //         be supported in some configurations.
+ // resources: Specifies the built-in resources.
+ ShHandle ConstructCompiler(sh::GLenum type,
+diff --git a/samples/shader_translator/shader_translator.cpp b/samples/shader_translator/shader_translator.cpp
+index a6e277b580..fb72363f23 100644
+--- a/third_party/angle/samples/shader_translator/shader_translator.cpp
++++ b/third_party/angle/samples/shader_translator/shader_translator.cpp
+@@ -184,7 +184,14 @@ int main(int argc, char *argv[])
+                                 compileOptions.removeInactiveVariables       = true;
+                                 break;
+                             case 'h':
+-                                output = SH_HLSL_4_1_OUTPUT;
++                                if (argv[0][4] == '1' && argv[0][5] == '1')
++                                {
++                                    output = SH_HLSL_4_1_OUTPUT;
++                                }
++                                else
++                                {
++                                    output = SH_HLSL_3_0_OUTPUT;
++                                }
+                                 break;
+                             case 'm':
+                                 output = SH_MSL_METAL_OUTPUT;
+@@ -332,6 +339,7 @@ int main(int argc, char *argv[])
+             {
+                 switch (output)
+                 {
++                    case SH_HLSL_3_0_OUTPUT:
+                     case SH_HLSL_4_1_OUTPUT:
+                         compileOptions.selectViewInNvGLSLVertexShader = false;
+                         break;
+@@ -428,7 +436,7 @@ void usage()
+ {
+     // clang-format off
+     printf(
+-        "Usage: translate [-i -o -u -l -b=e -b=g -b=h11 -x=i -x=d] file1 file2 ...\n"
++        "Usage: translate [-i -o -u -l -b=e -b=g -b=h9 -x=i -x=d] file1 file2 ...\n"
+         "Where: filename : filename ending in .frag*, .vert*, .comp*, .geom*, .tcs* or .tes*\n"
+         "       -i       : print intermediate tree\n"
+         "       -o       : print translated code\n"
+@@ -444,6 +452,7 @@ void usage()
+         "       -b=g     : output GLSL code (version 150)\n"
+         "       -b=g[NUM]: output GLSL code (NUM can be 150, 330, 400, 410, 420, 430, 440, 450)\n"
+         "       -b=v     : output Vulkan SPIR-V code\n"
++        "       -b=h9    : output HLSL9 code\n"
+         "       -b=h11   : output HLSL11 code\n"
+         "       -b=m     : output MSL code\n"
+         "       -x=i     : enable GL_OES_EGL_image_external\n"
+diff --git a/src/compiler/fuzz/translator_fuzzer.cpp b/src/compiler/fuzz/translator_fuzzer.cpp
+index 694bd6a1f9..e7dc3c2dce 100644
+--- a/third_party/angle/src/compiler/fuzz/translator_fuzzer.cpp
++++ b/third_party/angle/src/compiler/fuzz/translator_fuzzer.cpp
+@@ -168,6 +168,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+     validOutputs.push_back(SH_GLSL_440_CORE_OUTPUT);
+     validOutputs.push_back(SH_GLSL_450_CORE_OUTPUT);
+     validOutputs.push_back(SH_SPIRV_VULKAN_OUTPUT);
++    validOutputs.push_back(SH_HLSL_3_0_OUTPUT);
+     validOutputs.push_back(SH_HLSL_4_1_OUTPUT);
+     bool found = false;
+     for (auto valid : validOutputs)
+diff --git a/src/compiler/translator/Compiler.cpp b/src/compiler/translator/Compiler.cpp
+index eb1d6466c1..57f39c60cd 100644
+--- a/third_party/angle/src/compiler/translator/Compiler.cpp
++++ b/third_party/angle/src/compiler/translator/Compiler.cpp
+@@ -413,11 +413,13 @@ TCompiler::TCompiler(sh::GLenum type, ShShaderSpec spec, ShShaderOutput output)
+ 
+ TCompiler::~TCompiler() {}
+ 
+-bool TCompiler::shouldRunLoopAndIndexingValidation() const
++bool TCompiler::shouldRunLoopAndIndexingValidation(const ShCompileOptions &compileOptions) const
+ {
+-    // If compiling an ESSL 1.00 shader for WebGL, validate loop and indexing as well (to verify
+-    // that the shader only uses minimal functionality of ESSL 1.00 as in Appendix A of the spec).
+-    return IsWebGLBasedSpec(mShaderSpec) && mShaderVersion == 100;
++    // If compiling an ESSL 1.00 shader for WebGL, or if its been requested through the API,
++    // validate loop and indexing as well (to verify that the shader only uses minimal functionality
++    // of ESSL 1.00 as in Appendix A of the spec).
++    return (IsWebGLBasedSpec(mShaderSpec) && mShaderVersion == 100) ||
++           compileOptions.validateLoopIndexing;
+ }
+ 
+ bool TCompiler::Init(const ShBuiltInResources &resources)
+@@ -1114,7 +1116,7 @@ bool TCompiler::checkAndSimplifyAST(TIntermBlock *root,
+         // init statements can declare arrays or nameless structs and have multiple
+         // declarations.
+ 
+-        if (!shouldRunLoopAndIndexingValidation())
++        if (!shouldRunLoopAndIndexingValidation(compileOptions))
+         {
+             if (!SimplifyLoopConditions(this, root,
+                                         IntermNodePatternMatcher::kArrayDeclaration |
+diff --git a/src/compiler/translator/Compiler.h b/src/compiler/translator/Compiler.h
+index 425a40f31b..38e543efc5 100644
+--- a/third_party/angle/src/compiler/translator/Compiler.h
++++ b/third_party/angle/src/compiler/translator/Compiler.h
+@@ -135,7 +135,7 @@ class TCompiler : public TShHandleBase
+     const ShBuiltInResources &getBuiltInResources() const { return mResources; }
+     const std::string &getBuiltInResourcesString() const { return mBuiltInResourcesString; }
+ 
+-    bool shouldRunLoopAndIndexingValidation() const;
++    bool shouldRunLoopAndIndexingValidation(const ShCompileOptions &compileOptions) const;
+ 
+     // Get the resources set by InitBuiltInSymbolTable
+     const ShBuiltInResources &getResources() const;
+diff --git a/src/compiler/translator/ParseContext.cpp b/src/compiler/translator/ParseContext.cpp
+index c383f93423..4ca05ffd37 100644
+--- a/third_party/angle/src/compiler/translator/ParseContext.cpp
++++ b/third_party/angle/src/compiler/translator/ParseContext.cpp
+@@ -55,11 +55,14 @@ constexpr size_t kWebGLMaxTotalPrivateVariableSizeInBytes = static_cast<size_t>(
+ // The 1024 character identifier limit, `-2` for the `_u`
+ constexpr size_t kMaxAvailableIdentifierLength = 1022;
+ 
+-bool ShouldEnforceESSL100LoopAndIndexingLimitations(ShShaderSpec spec, int shaderVersion)
++bool ShouldEnforceESSL100LoopAndIndexingLimitations(ShShaderSpec spec,
++                                                    int shaderVersion,
++                                                    const ShCompileOptions &compileOptions)
+ {
+-    // If compiling an ESSL 1.00 shader for WebGL, validate loop and indexing as well (to verify
+-    // that the shader only uses minimal functionality of ESSL 1.00 as in Appendix A of the spec).
+-    return IsWebGLBasedSpec(spec) && shaderVersion == 100;
++    // If compiling an ESSL 1.00 shader for WebGL, or if its been requested through the API,
++    // validate loop and indexing as well (to verify that the shader only uses minimal functionality
++    // of ESSL 1.00 as in Appendix A of the spec).
++    return (IsWebGLBasedSpec(spec) && shaderVersion == 100) || compileOptions.validateLoopIndexing;
+ }
+ 
+ struct IsSamplerFunc
+@@ -543,7 +546,7 @@ TParseContext::TParseContext(TSymbolTable &symt,
+       mMainFunction(nullptr),
+       mIsReturnVisitedInMain(false),
+       mValidateESSL100Limitations(
+-          ShouldEnforceESSL100LoopAndIndexingLimitations(spec, mShaderVersion)),
++          ShouldEnforceESSL100LoopAndIndexingLimitations(spec, mShaderVersion, options)),
+       mFragmentOutputIndex1Used(false),
+       mFragmentOutputFragDepthUsed(false),
+       mMaxFragDataArrayIndexUsed(0),
+@@ -594,8 +597,8 @@ void TParseContext::onShaderVersionDeclared(const TSourceLoc &loc, int version)
+     mShaderVersion = version;
+     checkShaderVersion(loc);
+     // Update cached decisions that depend on the shader version
+-    mValidateESSL100Limitations =
+-        ShouldEnforceESSL100LoopAndIndexingLimitations(mShaderSpec, mShaderVersion);
++    mValidateESSL100Limitations = ShouldEnforceESSL100LoopAndIndexingLimitations(
++        mShaderSpec, mShaderVersion, mCompileOptions);
+ }
+ 
+ void TParseContext::fatal(const TSourceLoc &loc, const char *reason)
+diff --git a/src/compiler/translator/hlsl/OutputHLSL.cpp b/src/compiler/translator/hlsl/OutputHLSL.cpp
+index 39c19d63e3..559be98ed1 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/OutputHLSL.cpp
++++ b/third_party/angle/src/compiler/translator/hlsl/OutputHLSL.cpp
+@@ -332,12 +332,30 @@ OutputHLSL::OutputHLSL(sh::GLenum shaderType,
+     mInsideDiscontinuousLoop = false;
+     mNestedLoopDepth         = 0;
+ 
++    mExcessiveLoopIndex = nullptr;
++
+     mStructureHLSL       = new StructureHLSL;
+     mTextureFunctionHLSL = new TextureFunctionHLSL;
+     mImageFunctionHLSL   = new ImageFunctionHLSL;
+ 
+     unsigned int firstUniformRegister = compileOptions.skipD3DConstantRegisterZero ? 1u : 0u;
+-    mResourcesHLSL = new ResourcesHLSL(mStructureHLSL, uniforms, firstUniformRegister);
++    mResourcesHLSL = new ResourcesHLSL(mStructureHLSL, outputType, uniforms, firstUniformRegister);
++
++    if (mOutputType == SH_HLSL_3_0_OUTPUT)
++    {
++        // Fragment shaders need dx_DepthRange, dx_ViewCoords, dx_DepthFront,
++        // and dx_FragCoordOffset.
++        // Vertex shaders need a slightly different set: dx_DepthRange, dx_ViewCoords and
++        // dx_ViewAdjust.
++        if (mShaderType == GL_VERTEX_SHADER)
++        {
++            mResourcesHLSL->reserveUniformRegisters(3);
++        }
++        else
++        {
++            mResourcesHLSL->reserveUniformRegisters(4);
++        }
++    }
+ 
+     // Reserve registers for the default uniform block and driver constants
+     mResourcesHLSL->reserveUniformBlockRegisters(2);
+@@ -817,17 +835,38 @@ void OutputHLSL::header(TInfoSinkBase &out,
+                 out << "    float2 dx_ViewScale : packoffset(c3.z);\n";
+             }
+ 
+-            out << "    uint dx_Misc : packoffset(c2.w);\n";
+-            const unsigned int registerIndex = 4;
+-            mResourcesHLSL->samplerMetadataUniforms(out, registerIndex);
++            if (mOutputType == SH_HLSL_4_1_OUTPUT)
++            {
++                out << "    uint dx_Misc : packoffset(c2.w);\n";
++                const unsigned int registerIndex = 4;
++                mResourcesHLSL->samplerMetadataUniforms(out, registerIndex);
++            }
+ 
+             out << "};\n";
+ 
+-            if (mResourcesHLSL->hasImages())
++            if (mOutputType == SH_HLSL_4_1_OUTPUT && mResourcesHLSL->hasImages())
+             {
+                 out << kImage2DFunctionString << "\n";
+             }
+         }
++        else
++        {
++            if (mUsesDepthRange)
++            {
++                out << "uniform float3 dx_DepthRange : register(c0);";
++            }
++
++            if (mUsesFragCoord)
++            {
++                out << "uniform float4 dx_ViewCoords : register(c1);\n";
++            }
++
++            if (mUsesFragCoord || mUsesFrontFacing)
++            {
++                out << "uniform float3 dx_DepthFront : register(c2);\n";
++                out << "uniform float2 dx_FragCoordOffset : register(c3);\n";
++            }
++        }
+ 
+         out << "\n";
+ 
+@@ -965,7 +1004,10 @@ void OutputHLSL::header(TInfoSinkBase &out,
+             out << "    float clipControlOrigin : packoffset(c3.z);\n";
+             out << "    float clipControlZeroToOne : packoffset(c3.w);\n";
+ 
+-            mResourcesHLSL->samplerMetadataUniforms(out, 5);
++            if (mOutputType == SH_HLSL_4_1_OUTPUT)
++            {
++                mResourcesHLSL->samplerMetadataUniforms(out, 5);
++            }
+ 
+             if (mUsesVertexID)
+             {
+@@ -980,6 +1022,21 @@ void OutputHLSL::header(TInfoSinkBase &out,
+             out << "};\n"
+                    "\n";
+         }
++        else
++        {
++            if (mUsesDepthRange)
++            {
++                out << "uniform float3 dx_DepthRange : register(c0);\n";
++            }
++
++            out << "uniform float4 dx_ViewAdjust : register(c1);\n";
++            out << "uniform float2 dx_ViewCoords : register(c2);\n";
++
++            out << "static const float clipControlOrigin = -1.0f;\n";
++            out << "static const float clipControlZeroToOne = 0.0f;\n";
++
++            out << "\n";
++        }
+ 
+         if (mUsesDepthRange)
+         {
+@@ -988,7 +1045,7 @@ void OutputHLSL::header(TInfoSinkBase &out,
+                    "\n";
+         }
+ 
+-        if (mResourcesHLSL->hasImages())
++        if (mOutputType == SH_HLSL_4_1_OUTPUT && mResourcesHLSL->hasImages())
+         {
+             out << kImage2DFunctionString << "\n";
+         }
+@@ -2289,7 +2346,8 @@ bool OutputHLSL::visitAggregate(Visit visit, TIntermAggregate *node)
+                                                  nullptr, mSymbolTable);
+                     for (const TVariable *sampler : samplerSymbols)
+                     {
+-                        // This symbol is the sampler index.
++                        // In case of HLSL 4.1+, this symbol is the sampler index, and in case
++                        // of D3D9, it's the sampler variable.
+                         out << ", " << sampler->name();
+                     }
+                 }
+@@ -2616,6 +2674,17 @@ bool OutputHLSL::visitLoop(Visit visit, TIntermLoop *node)
+ 
+     TInfoSinkBase &out = getInfoSink();
+ 
++    if (mOutputType == SH_HLSL_3_0_OUTPUT)
++    {
++        if (handleExcessiveLoop(out, node))
++        {
++            mInsideDiscontinuousLoop = wasDiscontinuous;
++            mNestedLoopDepth--;
++
++            return false;
++        }
++    }
++
+     const char *unroll = mCurrentFunctionMetadata->hasGradientInCallGraph(node) ? "LOOP" : "";
+     if (node->getType() == ELoopDoWhile)
+     {
+@@ -2691,7 +2760,16 @@ bool OutputHLSL::visitBranch(Visit visit, TIntermBranch *node)
+                     mUsesNestedBreak = true;
+                 }
+ 
+-                out << "break";
++                if (mExcessiveLoopIndex)
++                {
++                    out << "{Break";
++                    mExcessiveLoopIndex->traverse(this);
++                    out << " = true; break;}\n";
++                }
++                else
++                {
++                    out << "break";
++                }
+                 break;
+             case EOpContinue:
+                 out << "continue";
+@@ -2722,6 +2800,225 @@ bool OutputHLSL::visitBranch(Visit visit, TIntermBranch *node)
+     return true;
+ }
+ 
++// Handle loops with more than 254 iterations (unsupported by D3D9) by splitting them
++// (The D3D documentation says 255 iterations, but the compiler complains at anything more than
++// 254).
++bool OutputHLSL::handleExcessiveLoop(TInfoSinkBase &out, TIntermLoop *node)
++{
++    const int MAX_LOOP_ITERATIONS = 254;
++
++    // Parse loops of the form:
++    // for(int index = initial; index [comparator] limit; index += increment)
++    TIntermSymbol *index = nullptr;
++    TOperator comparator = EOpNull;
++    int initial          = 0;
++    int limit            = 0;
++    int increment        = 0;
++
++    // Parse index name and intial value
++    if (node->getInit())
++    {
++        TIntermDeclaration *init = node->getInit()->getAsDeclarationNode();
++
++        if (init)
++        {
++            TIntermSequence *sequence = init->getSequence();
++            TIntermTyped *variable    = (*sequence)[0]->getAsTyped();
++
++            if (variable && variable->getQualifier() == EvqTemporary)
++            {
++                TIntermBinary *assign = variable->getAsBinaryNode();
++
++                if (assign != nullptr && assign->getOp() == EOpInitialize)
++                {
++                    TIntermSymbol *symbol          = assign->getLeft()->getAsSymbolNode();
++                    TIntermConstantUnion *constant = assign->getRight()->getAsConstantUnion();
++
++                    if (symbol && constant)
++                    {
++                        if (constant->getBasicType() == EbtInt && constant->isScalar())
++                        {
++                            index   = symbol;
++                            initial = constant->getIConst(0);
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    // Parse comparator and limit value
++    if (index != nullptr && node->getCondition())
++    {
++        TIntermBinary *test = node->getCondition()->getAsBinaryNode();
++
++        if (test && test->getLeft()->getAsSymbolNode()->uniqueId() == index->uniqueId())
++        {
++            TIntermConstantUnion *constant = test->getRight()->getAsConstantUnion();
++
++            if (constant)
++            {
++                if (constant->getBasicType() == EbtInt && constant->isScalar())
++                {
++                    comparator = test->getOp();
++                    limit      = constant->getIConst(0);
++                }
++            }
++        }
++    }
++
++    // Parse increment
++    if (index != nullptr && comparator != EOpNull && node->getExpression())
++    {
++        TIntermBinary *binaryTerminal = node->getExpression()->getAsBinaryNode();
++        TIntermUnary *unaryTerminal   = node->getExpression()->getAsUnaryNode();
++
++        if (binaryTerminal)
++        {
++            TOperator op                   = binaryTerminal->getOp();
++            TIntermConstantUnion *constant = binaryTerminal->getRight()->getAsConstantUnion();
++
++            if (constant)
++            {
++                if (constant->getBasicType() == EbtInt && constant->isScalar())
++                {
++                    int value = constant->getIConst(0);
++
++                    switch (op)
++                    {
++                        case EOpAddAssign:
++                            increment = value;
++                            break;
++                        case EOpSubAssign:
++                            increment = -value;
++                            break;
++                        default:
++                            UNIMPLEMENTED();
++                    }
++                }
++            }
++        }
++        else if (unaryTerminal)
++        {
++            TOperator op = unaryTerminal->getOp();
++
++            switch (op)
++            {
++                case EOpPostIncrement:
++                    increment = 1;
++                    break;
++                case EOpPostDecrement:
++                    increment = -1;
++                    break;
++                case EOpPreIncrement:
++                    increment = 1;
++                    break;
++                case EOpPreDecrement:
++                    increment = -1;
++                    break;
++                default:
++                    UNIMPLEMENTED();
++            }
++        }
++    }
++
++    if (index != nullptr && comparator != EOpNull && increment != 0)
++    {
++        if (comparator == EOpLessThanEqual)
++        {
++            comparator = EOpLessThan;
++            limit += 1;
++        }
++
++        if (comparator == EOpLessThan)
++        {
++            int iterations = (limit - initial) / increment;
++
++            if (iterations <= MAX_LOOP_ITERATIONS)
++            {
++                return false;  // Not an excessive loop
++            }
++
++            TIntermSymbol *restoreIndex = mExcessiveLoopIndex;
++            mExcessiveLoopIndex         = index;
++
++            out << "{int ";
++            index->traverse(this);
++            out << ";\n"
++                   "bool Break";
++            index->traverse(this);
++            out << " = false;\n";
++
++            bool firstLoopFragment = true;
++
++            while (iterations > 0)
++            {
++                int clampedLimit = initial + increment * std::min(MAX_LOOP_ITERATIONS, iterations);
++
++                if (!firstLoopFragment)
++                {
++                    out << "if (!Break";
++                    index->traverse(this);
++                    out << ") {\n";
++                }
++
++                if (iterations <= MAX_LOOP_ITERATIONS)  // Last loop fragment
++                {
++                    mExcessiveLoopIndex = nullptr;  // Stops setting the Break flag
++                }
++
++                // for(int index = initial; index < clampedLimit; index += increment)
++                const char *unroll =
++                    mCurrentFunctionMetadata->hasGradientInCallGraph(node) ? "LOOP" : "";
++
++                out << unroll << " for(";
++                index->traverse(this);
++                out << " = ";
++                out << initial;
++
++                out << "; ";
++                index->traverse(this);
++                out << " < ";
++                out << clampedLimit;
++
++                out << "; ";
++                index->traverse(this);
++                out << " += ";
++                out << increment;
++                out << ")\n";
++
++                outputLineDirective(out, node->getLine().first_line);
++                out << "{\n";
++
++                node->getBody()->traverse(this);
++
++                outputLineDirective(out, node->getLine().first_line);
++                out << ";}\n";
++
++                if (!firstLoopFragment)
++                {
++                    out << "}\n";
++                }
++
++                firstLoopFragment = false;
++
++                initial += MAX_LOOP_ITERATIONS * increment;
++                iterations -= MAX_LOOP_ITERATIONS;
++            }
++
++            out << "}";
++
++            mExcessiveLoopIndex = restoreIndex;
++
++            return true;
++        }
++        else
++            UNIMPLEMENTED();
++    }
++
++    return false;  // Not handled as an excessive loop
++}
++
+ void OutputHLSL::outputTriplet(TInfoSinkBase &out,
+                                Visit visit,
+                                const char *preString,
+@@ -2768,10 +3065,13 @@ void OutputHLSL::writeParameter(const TVariable *param, TInfoSinkBase &out)
+ 
+     if (IsSampler(type.getBasicType()))
+     {
+-        // Samplers are passed as indices to the sampler array.
+-        ASSERT(qualifier != EvqParamOut && qualifier != EvqParamInOut);
+-        out << "const uint " << nameStr << ArrayString(type);
+-        return;
++        if (mOutputType == SH_HLSL_4_1_OUTPUT)
++        {
++            // Samplers are passed as indices to the sampler array.
++            ASSERT(qualifier != EvqParamOut && qualifier != EvqParamInOut);
++            out << "const uint " << nameStr << ArrayString(type);
++            return;
++        }
+     }
+ 
+     out << QualifierString(qualifier) << " " << TypeString(type) << " " << nameStr
+@@ -2790,7 +3090,16 @@ void OutputHLSL::writeParameter(const TVariable *param, TInfoSinkBase &out)
+         for (const TVariable *sampler : samplerSymbols)
+         {
+             const TType &samplerType = sampler->getType();
+-            out << ", const uint " << sampler->name() << ArrayString(samplerType);
++            if (mOutputType == SH_HLSL_4_1_OUTPUT)
++            {
++                out << ", const uint " << sampler->name() << ArrayString(samplerType);
++            }
++            else
++            {
++                ASSERT(IsSampler(samplerType.getBasicType()));
++                out << ", " << QualifierString(qualifier) << " " << TypeString(samplerType) << " "
++                    << sampler->name() << ArrayString(samplerType);
++            }
+         }
+     }
+ }
+diff --git a/src/compiler/translator/hlsl/OutputHLSL.h b/src/compiler/translator/hlsl/OutputHLSL.h
+index cdf3c0d69b..59915d7ade 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/OutputHLSL.h
++++ b/third_party/angle/src/compiler/translator/hlsl/OutputHLSL.h
+@@ -113,6 +113,8 @@ class OutputHLSL : public TIntermTraverser
+     bool visitLoop(Visit visit, TIntermLoop *) override;
+     bool visitBranch(Visit visit, TIntermBranch *) override;
+ 
++    bool handleExcessiveLoop(TInfoSinkBase &out, TIntermLoop *node);
++
+     // Emit one of three strings depending on traverse phase. Called with literal strings so using
+     // const char* instead of TString.
+     void outputTriplet(TInfoSinkBase &out,
+@@ -234,6 +236,8 @@ class OutputHLSL : public TIntermTraverser
+     bool mInsideDiscontinuousLoop;
+     int mNestedLoopDepth;
+ 
++    TIntermSymbol *mExcessiveLoopIndex;
++
+     TString structInitializerString(int indent, const TType &type, const TString &name) const;
+ 
+     struct HelperFunction
+diff --git a/src/compiler/translator/hlsl/ResourcesHLSL.cpp b/src/compiler/translator/hlsl/ResourcesHLSL.cpp
+index 10c069c0bd..abf6172e76 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/ResourcesHLSL.cpp
++++ b/third_party/angle/src/compiler/translator/hlsl/ResourcesHLSL.cpp
+@@ -175,6 +175,7 @@ static bool IsAnyRasterOrdered(const TVector<const TVariable *> &imageVars)
+ }  // anonymous namespace
+ 
+ ResourcesHLSL::ResourcesHLSL(StructureHLSL *structureHLSL,
++                             ShShaderOutput outputType,
+                              const std::vector<ShaderVariable> &uniforms,
+                              unsigned int firstUniformRegister)
+     : mUniformRegister(firstUniformRegister),
+@@ -183,9 +184,15 @@ ResourcesHLSL::ResourcesHLSL(StructureHLSL *structureHLSL,
+       mUAVRegister(0),
+       mSamplerCount(0),
+       mStructureHLSL(structureHLSL),
++      mOutputType(outputType),
+       mUniforms(uniforms)
+ {}
+ 
++void ResourcesHLSL::reserveUniformRegisters(unsigned int registerCount)
++{
++    mUniformRegister = registerCount;
++}
++
+ void ResourcesHLSL::reserveUniformBlockRegisters(unsigned int registerCount)
+ {
+     mUniformBlockRegister = registerCount;
+@@ -253,7 +260,7 @@ unsigned int ResourcesHLSL::assignUniformRegister(const TType &type,
+         mUniformRegisterMap[uniform->name] = registerIndex;
+     }
+ 
+-    unsigned int registerCount = HLSLVariableRegisterCount(*uniform);
++    unsigned int registerCount = HLSLVariableRegisterCount(*uniform, mOutputType);
+ 
+     if (IsSampler(type.getBasicType()) ||
+         (IsImage(type.getBasicType()) && type.getMemoryQualifier().readonly))
+@@ -492,11 +499,12 @@ void ResourcesHLSL::uniformsHeader(TInfoSinkBase &out,
+                 const ShaderVariable *uniform = findUniformByName(variable.name());
+                 if (type.getMemoryQualifier().readonly)
+                 {
+-                    reservedReadonlyImageRegisterCount += HLSLVariableRegisterCount(*uniform);
++                    reservedReadonlyImageRegisterCount +=
++                        HLSLVariableRegisterCount(*uniform, mOutputType);
+                 }
+                 else
+                 {
+-                    reservedImageRegisterCount += HLSLVariableRegisterCount(*uniform);
++                    reservedImageRegisterCount += HLSLVariableRegisterCount(*uniform, mOutputType);
+                 }
+                 continue;
+             }
+@@ -529,9 +537,19 @@ void ResourcesHLSL::uniformsHeader(TInfoSinkBase &out,
+                 {
+                     const TType &samplerType = sampler->getType();
+ 
+-                    HLSLTextureGroup group = TextureGroup(samplerType.getBasicType());
+-                    groupedSamplerUniforms[group].push_back(sampler);
+-                    samplerInStructSymbolsToAPINames[sampler] = symbolsToAPINames[sampler];
++                    if (outputType == SH_HLSL_4_1_OUTPUT)
++                    {
++                        HLSLTextureGroup group = TextureGroup(samplerType.getBasicType());
++                        groupedSamplerUniforms[group].push_back(sampler);
++                        samplerInStructSymbolsToAPINames[sampler] = symbolsToAPINames[sampler];
++                    }
++                    else
++                    {
++                        ASSERT(outputType == SH_HLSL_3_0_OUTPUT);
++                        unsigned int registerIndex = assignSamplerInStructUniformRegister(
++                            samplerType, symbolsToAPINames[sampler], nullptr);
++                        outputUniform(out, samplerType, *sampler, registerIndex);
++                    }
+                 }
+             }
+             unsigned int registerIndex = assignUniformRegister(type, variable.name(), nullptr);
+diff --git a/src/compiler/translator/hlsl/ResourcesHLSL.h b/src/compiler/translator/hlsl/ResourcesHLSL.h
+index bbfa45ece5..e95d1b1671 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/ResourcesHLSL.h
++++ b/third_party/angle/src/compiler/translator/hlsl/ResourcesHLSL.h
+@@ -23,9 +23,11 @@ class ResourcesHLSL : angle::NonCopyable
+ {
+   public:
+     ResourcesHLSL(StructureHLSL *structureHLSL,
++                  ShShaderOutput outputType,
+                   const std::vector<ShaderVariable> &uniforms,
+                   unsigned int firstUniformRegister);
+ 
++    void reserveUniformRegisters(unsigned int registerCount);
+     void reserveUniformBlockRegisters(unsigned int registerCount);
+     void uniformsHeader(TInfoSinkBase &out,
+                         ShShaderOutput outputType,
+@@ -118,6 +120,7 @@ class ResourcesHLSL : angle::NonCopyable
+     unsigned int mReadonlyImageCount = 0;
+     unsigned int mImageCount         = 0;
+     StructureHLSL *mStructureHLSL;
++    ShShaderOutput mOutputType;
+ 
+     const std::vector<ShaderVariable> &mUniforms;
+     std::map<std::string, unsigned int> mUniformBlockRegisterMap;
+diff --git a/src/compiler/translator/hlsl/TextureFunctionHLSL.cpp b/src/compiler/translator/hlsl/TextureFunctionHLSL.cpp
+index 359124e13b..25eabd0e08 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/TextureFunctionHLSL.cpp
++++ b/third_party/angle/src/compiler/translator/hlsl/TextureFunctionHLSL.cpp
+@@ -240,30 +240,89 @@ const char *GetSamplerCoordinateTypeString(
+     return "";
+ }
+ 
+-int GetHLSLCoordCount(const TextureFunctionHLSL::TextureFunction &textureFunction)
++int GetHLSLCoordCount(const TextureFunctionHLSL::TextureFunction &textureFunction,
++                      ShShaderOutput outputType)
+ {
+-    if (IsSamplerBuffer(textureFunction.sampler))
++    if (outputType == SH_HLSL_3_0_OUTPUT)
+     {
+-        return 1;
++        int hlslCoords = 2;
++        switch (textureFunction.sampler)
++        {
++            case EbtSamplerBuffer:
++                hlslCoords = 1;
++                break;
++            case EbtSampler2D:
++            case EbtSamplerExternalOES:
++            case EbtSampler2DMS:
++            case EbtSamplerVideoWEBGL:
++                hlslCoords = 2;
++                break;
++            case EbtSamplerCube:
++                hlslCoords = 3;
++                break;
++            default:
++                UNREACHABLE();
++        }
++
++        switch (textureFunction.method)
++        {
++            case TextureFunctionHLSL::TextureFunction::IMPLICIT:
++            case TextureFunctionHLSL::TextureFunction::GRAD:
++                return hlslCoords;
++            case TextureFunctionHLSL::TextureFunction::BIAS:
++            case TextureFunctionHLSL::TextureFunction::LOD:
++            case TextureFunctionHLSL::TextureFunction::LOD0:
++            case TextureFunctionHLSL::TextureFunction::LOD0BIAS:
++                return 4;
++            default:
++                UNREACHABLE();
++        }
+     }
+-    else if (IsSampler3D(textureFunction.sampler) || IsSamplerArray(textureFunction.sampler) ||
+-             IsSamplerCube(textureFunction.sampler))
++    else
+     {
+-        return 3;
++        if (IsSamplerBuffer(textureFunction.sampler))
++        {
++            return 1;
++        }
++        else if (IsSampler3D(textureFunction.sampler) || IsSamplerArray(textureFunction.sampler) ||
++                 IsSamplerCube(textureFunction.sampler))
++        {
++            return 3;
++        }
++        ASSERT(IsSampler2D(textureFunction.sampler));
++        return 2;
+     }
+-    ASSERT(IsSampler2D(textureFunction.sampler));
+-    return 2;
++    return 0;
+ }
+ 
+ void OutputTextureFunctionArgumentList(TInfoSinkBase &out,
+                                        const TextureFunctionHLSL::TextureFunction &textureFunction,
+                                        const ShShaderOutput outputType)
+ {
+-    ASSERT(outputType == SH_HLSL_4_1_OUTPUT);
+-    // A bug in the D3D compiler causes some nested sampling operations to fail.
+-    // See http://anglebug.com/42260714
+-    // TODO(jmadill): Reinstate the const keyword when possible.
+-    out << /*"const"*/ "uint samplerIndex";
++    if (outputType == SH_HLSL_3_0_OUTPUT)
++    {
++        switch (textureFunction.sampler)
++        {
++            case EbtSampler2D:
++            case EbtSamplerVideoWEBGL:
++            case EbtSamplerExternalOES:
++                out << "sampler2D s";
++                break;
++            case EbtSamplerCube:
++                out << "samplerCUBE s";
++                break;
++            default:
++                UNREACHABLE();
++        }
++    }
++    else
++    {
++        ASSERT(outputType == SH_HLSL_4_1_OUTPUT);
++        // A bug in the D3D compiler causes some nested sampling operations to fail.
++        // See http://anglebug.com/42260714
++        // TODO(jmadill): Reinstate the const keyword when possible.
++        out << /*"const"*/ "uint samplerIndex";
++    }
+ 
+     if (textureFunction.method ==
+         TextureFunctionHLSL::TextureFunction::FETCH)  // Integer coordinates
+@@ -902,7 +961,7 @@ void OutputTextureGatherFunctionBody(TInfoSinkBase &out,
+                                      const ImmutableString &texCoordY,
+                                      const ImmutableString &texCoordZ)
+ {
+-    const int hlslCoords = GetHLSLCoordCount(textureFunction);
++    const int hlslCoords = GetHLSLCoordCount(textureFunction, outputType);
+     ImmutableString samplerCoordTypeString(
+         GetSamplerCoordinateTypeString(textureFunction, hlslCoords));
+     ImmutableStringBuilder samplerCoordBuilder(
+@@ -983,14 +1042,54 @@ void OutputTextureSampleFunctionReturnStatement(
+     }
+ 
+     // HLSL intrinsic
+-    if (outputType == SH_HLSL_4_1_OUTPUT)
++    if (outputType == SH_HLSL_3_0_OUTPUT)
++    {
++        switch (textureFunction.sampler)
++        {
++            case EbtSampler2D:
++            case EbtSamplerVideoWEBGL:
++            case EbtSamplerExternalOES:
++                out << "tex2D";
++                break;
++            case EbtSamplerCube:
++                out << "texCUBE";
++                break;
++            default:
++                UNREACHABLE();
++        }
++
++        switch (textureFunction.method)
++        {
++            case TextureFunctionHLSL::TextureFunction::IMPLICIT:
++                out << "(" << samplerReference << ", ";
++                break;
++            case TextureFunctionHLSL::TextureFunction::BIAS:
++                out << "bias(" << samplerReference << ", ";
++                break;
++            case TextureFunctionHLSL::TextureFunction::LOD:
++                out << "lod(" << samplerReference << ", ";
++                break;
++            case TextureFunctionHLSL::TextureFunction::LOD0:
++                out << "lod(" << samplerReference << ", ";
++                break;
++            case TextureFunctionHLSL::TextureFunction::LOD0BIAS:
++                out << "lod(" << samplerReference << ", ";
++                break;
++            case TextureFunctionHLSL::TextureFunction::GRAD:
++                out << "grad(" << samplerReference << ", ";
++                break;
++            default:
++                UNREACHABLE();
++        }
++    }
++    else if (outputType == SH_HLSL_4_1_OUTPUT)
+     {
+         OutputHLSL4SampleFunctionPrefix(out, textureFunction, textureReference, samplerReference);
+     }
+     else
+         UNREACHABLE();
+ 
+-    const int hlslCoords = GetHLSLCoordCount(textureFunction);
++    const int hlslCoords = GetHLSLCoordCount(textureFunction, outputType);
+     out << GetSamplerCoordinateTypeString(textureFunction, hlslCoords);
+ 
+     if (hlslCoords >= 2)
+@@ -1011,7 +1110,44 @@ void OutputTextureSampleFunctionReturnStatement(
+         out << "(";
+     }
+ 
+-    if (outputType == SH_HLSL_4_1_OUTPUT)
++    if (outputType == SH_HLSL_3_0_OUTPUT)
++    {
++        if (hlslCoords >= 3)
++        {
++            if (textureFunction.coords < 3)
++            {
++                out << ", 0";
++            }
++            else
++            {
++                out << ", " << texCoordZ;
++            }
++        }
++
++        if (hlslCoords == 4)
++        {
++            switch (textureFunction.method)
++            {
++                case TextureFunctionHLSL::TextureFunction::BIAS:
++                    out << ", bias";
++                    break;
++                case TextureFunctionHLSL::TextureFunction::LOD:
++                    out << ", lod";
++                    break;
++                case TextureFunctionHLSL::TextureFunction::LOD0:
++                    out << ", 0";
++                    break;
++                case TextureFunctionHLSL::TextureFunction::LOD0BIAS:
++                    out << ", bias";
++                    break;
++                default:
++                    UNREACHABLE();
++            }
++        }
++
++        out << ")";
++    }
++    else if (outputType == SH_HLSL_4_1_OUTPUT)
+     {
+         if (hlslCoords >= 3)
+         {
+diff --git a/src/compiler/translator/hlsl/TranslatorHLSL.cpp b/src/compiler/translator/hlsl/TranslatorHLSL.cpp
+index 2053b29530..53fb8d640a 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/TranslatorHLSL.cpp
++++ b/third_party/angle/src/compiler/translator/hlsl/TranslatorHLSL.cpp
+@@ -117,7 +117,7 @@ bool TranslatorHLSL::translate(TIntermBlock *root,
+         return false;
+     }
+ 
+-    if (!shouldRunLoopAndIndexingValidation())
++    if (!shouldRunLoopAndIndexingValidation(compileOptions))
+     {
+         // HLSL doesn't support dynamic indexing of vectors and matrices.
+         if (!RemoveDynamicIndexingOfNonSSBOVectorOrMatrix(this, root, &getSymbolTable(),
+diff --git a/src/compiler/translator/hlsl/blocklayoutHLSL.cpp b/src/compiler/translator/hlsl/blocklayoutHLSL.cpp
+index c04abb6b28..41905e8977 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/blocklayoutHLSL.cpp
++++ b/third_party/angle/src/compiler/translator/hlsl/blocklayoutHLSL.cpp
+@@ -15,7 +15,8 @@
+ namespace sh
+ {
+ 
+-HLSLBlockEncoder::HLSLBlockEncoder(bool transposeMatrices) : mTransposeMatrices(transposeMatrices)
++HLSLBlockEncoder::HLSLBlockEncoder(HLSLBlockEncoderStrategy strategy, bool transposeMatrices)
++    : mEncoderStrategy(strategy), mTransposeMatrices(transposeMatrices)
+ {}
+ 
+ void HLSLBlockEncoder::enterAggregateType(const ShaderVariable &structVar)
+@@ -40,8 +41,10 @@ void HLSLBlockEncoder::getBlockLayoutInfo(GLenum typeIn,
+     int matrixStride = 0;
+     int arrayStride  = 0;
+ 
+-    // If we're about to pack a matrix or array, skip to the start of the next register.
+-    if (gl::IsMatrixType(type) || !arraySizes.empty())
++    // if variables are not to be packed, or we're about to
++    // pack a matrix or array, skip to the start of the next
++    // register
++    if (!isPacked() || gl::IsMatrixType(type) || !arraySizes.empty())
+     {
+         align(kComponentsPerRegister);
+     }
+@@ -60,7 +63,7 @@ void HLSLBlockEncoder::getBlockLayoutInfo(GLenum typeIn,
+     {
+         arrayStride = kComponentsPerRegister;
+     }
+-    else
++    else if (isPacked())
+     {
+         int numComponents = gl::VariableComponentCount(type);
+         if ((numComponents + (mCurrentOffset % kComponentsPerRegister)) > kComponentsPerRegister)
+@@ -99,10 +102,14 @@ void HLSLBlockEncoder::advanceOffset(GLenum typeIn,
+         mCurrentOffset += kComponentsPerRegister * (numRegisters - 1);
+         mCurrentOffset += numComponents;
+     }
+-    else
++    else if (isPacked())
+     {
+         mCurrentOffset += gl::VariableComponentCount(type);
+     }
++    else
++    {
++        mCurrentOffset += kComponentsPerRegister;
++    }
+ }
+ 
+ void HLSLBlockEncoder::skipRegisters(unsigned int numRegisters)
+@@ -110,6 +117,21 @@ void HLSLBlockEncoder::skipRegisters(unsigned int numRegisters)
+     mCurrentOffset += (numRegisters * kComponentsPerRegister);
+ }
+ 
++HLSLBlockEncoder::HLSLBlockEncoderStrategy HLSLBlockEncoder::GetStrategyFor(
++    ShShaderOutput outputType)
++{
++    switch (outputType)
++    {
++        case SH_HLSL_3_0_OUTPUT:
++            return ENCODE_LOOSE;
++        case SH_HLSL_4_1_OUTPUT:
++            return ENCODE_PACKED;
++        default:
++            UNREACHABLE();
++            return ENCODE_PACKED;
++    }
++}
++
+ template <class ShaderVarType>
+ void HLSLVariableRegisterCount(const ShaderVarType &variable, HLSLBlockEncoder *encoder)
+ {
+@@ -135,9 +157,9 @@ void HLSLVariableRegisterCount(const ShaderVarType &variable, HLSLBlockEncoder *
+     }
+ }
+ 
+-unsigned int HLSLVariableRegisterCount(const ShaderVariable &variable)
++unsigned int HLSLVariableRegisterCount(const ShaderVariable &variable, ShShaderOutput outputType)
+ {
+-    HLSLBlockEncoder encoder(true);
++    HLSLBlockEncoder encoder(HLSLBlockEncoder::GetStrategyFor(outputType), true);
+     HLSLVariableRegisterCount(variable, &encoder);
+ 
+     const size_t registerBytes = (encoder.kBytesPerComponent * encoder.kComponentsPerRegister);
+diff --git a/src/compiler/translator/hlsl/blocklayoutHLSL.h b/src/compiler/translator/hlsl/blocklayoutHLSL.h
+index d5a2288988..c9ddf832e2 100644
+--- a/third_party/angle/src/compiler/translator/hlsl/blocklayoutHLSL.h
++++ b/third_party/angle/src/compiler/translator/hlsl/blocklayoutHLSL.h
+@@ -19,19 +19,30 @@
+ 
+ namespace sh
+ {
+-// Block layout packed according to the default D3D10+ register packing rules
++// Block layout packed according to the D3D9 or default D3D10+ register packing rules
+ // See http://msdn.microsoft.com/en-us/library/windows/desktop/bb509632(v=vs.85).aspx
+-// This applies to D3D10+ constant blocks and all attributes/varyings.
++// The strategy should be ENCODE_LOOSE for D3D9 constant blocks, and ENCODE_PACKED
++// for everything else (D3D10+ constant blocks and all attributes/varyings).
+ 
+ class HLSLBlockEncoder : public BlockLayoutEncoder
+ {
+   public:
+-    explicit HLSLBlockEncoder(bool transposeMatrices);
++    enum HLSLBlockEncoderStrategy
++    {
++        ENCODE_PACKED,
++        ENCODE_LOOSE
++    };
++
++    HLSLBlockEncoder(HLSLBlockEncoderStrategy strategy, bool transposeMatrices);
+ 
+     void enterAggregateType(const ShaderVariable &structVar) override;
+     void exitAggregateType(const ShaderVariable &structVar) override;
+     void skipRegisters(unsigned int numRegisters);
+ 
++    bool isPacked() const { return mEncoderStrategy == ENCODE_PACKED; }
++
++    static HLSLBlockEncoderStrategy GetStrategyFor(ShShaderOutput outputType);
++
+   protected:
+     void getBlockLayoutInfo(GLenum type,
+                             size_t bytesPerComponent,
+@@ -46,13 +57,14 @@ class HLSLBlockEncoder : public BlockLayoutEncoder
+                        int arrayStride,
+                        int matrixStride) override;
+ 
++    HLSLBlockEncoderStrategy mEncoderStrategy;
+     bool mTransposeMatrices;
+ };
+ 
+ // This method returns the number of used registers for a ShaderVariable. It is dependent on the
+ // HLSLBlockEncoder class to count the number of used registers in a struct (which are individually
+ // packed according to the same rules).
+-unsigned int HLSLVariableRegisterCount(const ShaderVariable &variable);
++unsigned int HLSLVariableRegisterCount(const ShaderVariable &variable, ShShaderOutput outputType);
+ }  // namespace sh
+ 
+ #endif  // COMMON_BLOCKLAYOUTHLSL_H_
+diff --git a/src/compiler/translator/ir/src/compile.rs b/src/compiler/translator/ir/src/compile.rs
+index d586b83dc7..3e6e5934bc 100644
+--- a/third_party/angle/src/compiler/translator/ir/src/compile.rs
++++ b/third_party/angle/src/compiler/translator/ir/src/compile.rs
+@@ -26,6 +26,7 @@ mod ffi {
+         Glsl430Core,
+         Glsl440Core,
+         Glsl450Core,
++        Hlsl3,
+         Hlsl41,
+         Spirv,
+         Msl,
+@@ -425,7 +426,7 @@ unsafe fn generate_ast(
+             #[cfg(not(angle_enable_glsl))]
+             panic!("Internal error: GLSL generator is not built");
+         }
+-        OutputLanguage::Hlsl41 => {
++        OutputLanguage::Hlsl3 | OutputLanguage::Hlsl41 => {
+             #[cfg(angle_enable_hlsl)]
+             output::hlsl::generate(&mut ir, options);
+             #[cfg(not(angle_enable_hlsl))]
+diff --git a/src/compiler/translator/ir/src/util.rs b/src/compiler/translator/ir/src/util.rs
+index 44119c7b15..4444201979 100644
+--- a/third_party/angle/src/compiler/translator/ir/src/util.rs
++++ b/third_party/angle/src/compiler/translator/ir/src/util.rs
+@@ -534,6 +534,7 @@ pub fn trace_back_to_variable(ir_meta: &IRMeta, id: Id) -> Option<VariableId> {
+ // into `while` loops.  In particular:
+ //
+ // * ESSL 100 needs this to comply with the spec, as the output is passed to the OpenGL ES driver.
++// * HLSL needs this for D3D9.
+ //
+ // This function checks whether the block ends in loop in the above form.  If so, the information
+ // needed to reconstruct the for loop is returned.
+diff --git a/src/compiler/translator/util.cpp b/src/compiler/translator/util.cpp
+index 30305ec9b1..72276320bd 100644
+--- a/third_party/angle/src/compiler/translator/util.cpp
++++ b/third_party/angle/src/compiler/translator/util.cpp
+@@ -858,6 +858,7 @@ bool IsOutputHLSL(ShShaderOutput output)
+ {
+     switch (output)
+     {
++        case SH_HLSL_3_0_OUTPUT:
+         case SH_HLSL_4_1_OUTPUT:
+             return true;
+         default:
+diff --git a/src/libANGLE/renderer/d3d/ProgramD3D.cpp b/src/libANGLE/renderer/d3d/ProgramD3D.cpp
+index a5eb2253c0..92d1ce63f5 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/ProgramD3D.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/ProgramD3D.cpp
+@@ -88,7 +88,10 @@ bool FindFlatInterpolationVarying(const gl::ShaderMap<gl::SharedCompiledShaderSt
+ class HLSLBlockLayoutEncoderFactory : public gl::CustomBlockLayoutEncoderFactory
+ {
+   public:
+-    sh::BlockLayoutEncoder *makeEncoder() override { return new sh::HLSLBlockEncoder(false); }
++    sh::BlockLayoutEncoder *makeEncoder() override
++    {
++        return new sh::HLSLBlockEncoder(sh::HLSLBlockEncoder::ENCODE_PACKED, false);
++    }
+ };
+ 
+ // GetExecutableTask class
+diff --git a/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp b/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
+index 506eabdb4f..b9c477fa94 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
+@@ -1817,7 +1817,8 @@ void ProgramExecutableD3D::defineUniformBase(gl::ShaderType shaderType,
+     }
+ 
+     unsigned int startRegister = shaderD3D->getUniformRegister(uniform.name);
+-    sh::HLSLBlockEncoder encoder(true);
++    ShShaderOutput outputType  = shaderD3D->compilerOutputType;
++    sh::HLSLBlockEncoder encoder(sh::HLSLBlockEncoder::GetStrategyFor(outputType), true);
+     encoder.skipRegisters(startRegister);
+ 
+     UniformEncodingVisitorD3D visitor(shaderType, HLSLRegisterType::None, &encoder, uniformMap);
+diff --git a/src/tests/perf_tests/CompilerPerf.cpp b/src/tests/perf_tests/CompilerPerf.cpp
+index f73c83194b..f5357269ff 100644
+--- a/third_party/angle/src/tests/perf_tests/CompilerPerf.cpp
++++ b/third_party/angle/src/tests/perf_tests/CompilerPerf.cpp
+@@ -194,6 +194,7 @@ bool IsPlatformAvailable(const CompilerParameters &param)
+     switch (param.output)
+     {
+         case SH_HLSL_4_1_OUTPUT:
++        case SH_HLSL_3_0_OUTPUT:
+         {
+             angle::PoolAllocator allocator;
+             InitializePoolIndex();

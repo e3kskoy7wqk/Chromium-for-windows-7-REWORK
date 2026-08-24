@@ -1,0 +1,54 @@
+diff --git a/content/browser/gpu/gpu_process_host.cc b/content/browser/gpu/gpu_process_host.cc
+index b3beaa1859443..74b923602d3be 100644
+--- a/content/browser/gpu/gpu_process_host.cc
++++ b/content/browser/gpu/gpu_process_host.cc
+@@ -510,8 +510,8 @@ class GpuSandboxedProcessLauncherDelegate
+   };
+ 
+   bool UseOpenGLRenderer() {
+-    // TODO(crbug.com/40848940): Remove this function.
+-    return false;
++    return cmd_line_.GetSwitchValueASCII(switches::kUseGL) ==
++           gl::kGLImplementationDesktopName;
+   }
+ 
+   bool CanLowIntegrityAccessDesktop() {
+diff --git a/gpu/config/gpu_switching.cc b/gpu/config/gpu_switching.cc
+index 2f24b919559cd..f6a16c25cde19 100644
+--- a/gpu/config/gpu_switching.cc
++++ b/gpu/config/gpu_switching.cc
+@@ -56,6 +56,8 @@ bool SwitchableGPUsSupported(const GPUInfo& gpu_info,
+ #if BUILDFLAG(IS_MAC)
+   if (command_line.HasSwitch(switches::kUseGL) &&
+       (command_line.GetSwitchValueASCII(switches::kUseGL) !=
++           gl::kGLImplementationDesktopName &&
++       command_line.GetSwitchValueASCII(switches::kUseGL) !=
+            gl::kGLImplementationANGLEName)) {
+     return false;
+   }
+diff --git a/ui/gl/gl_switches.cc b/ui/gl/gl_switches.cc
+index 6f0bde6c4a318..d4c8211a548c8 100644
+--- a/ui/gl/gl_switches.cc
++++ b/ui/gl/gl_switches.cc
+@@ -18,6 +18,8 @@
+ 
+ namespace gl {
+ 
++const char kGLImplementationDesktopName[] = "desktop";
++const char kGLImplementationAppleName[] = "apple";
+ const char kGLImplementationEGLName[] = "egl";
+ const char kGLImplementationANGLEName[] = "angle";
+ const char kGLImplementationMockName[] = "mock";
+diff --git a/ui/gl/gl_switches.h b/ui/gl/gl_switches.h
+index a30aed9f058e0..f659a5dd81065 100644
+--- a/ui/gl/gl_switches.h
++++ b/ui/gl/gl_switches.h
+@@ -16,6 +16,8 @@
+ namespace gl {
+ 
+ // The GL implementation names that can be passed to --use-gl.
++GL_EXPORT extern const char kGLImplementationDesktopName[];
++GL_EXPORT extern const char kGLImplementationAppleName[];
+ GL_EXPORT extern const char kGLImplementationEGLName[];
+ GL_EXPORT extern const char kGLImplementationANGLEName[];
+ GL_EXPORT extern const char kGLImplementationMockName[];
