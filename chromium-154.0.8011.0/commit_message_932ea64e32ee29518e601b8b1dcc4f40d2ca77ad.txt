@@ -1,0 +1,1 @@
+Make hardware configuration and initialization guards (re)setable.    2026/6/3 18:14:53    932ea64e32ee29518e601b8b1dcc4f40d2ca77ad

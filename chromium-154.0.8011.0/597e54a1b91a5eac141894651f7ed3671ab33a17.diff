@@ -1,0 +1,749 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 1e27b461a412b..299c118912ed5 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1447,6 +1447,7 @@ source_set("core") {
+       "//chrome/browser/win:chrome_process_finder",
+       "//chrome/browser/win:cloud_synced_folder_checker",
+       "//chrome/browser/win:isolated_browser_support",
++      "//chrome/browser/win:mica_titlebar",
+       "//chrome/browser/win:registry_watcher",
+       "//chrome/browser/win/conflicts:module_info",
+       "//chrome/chrome_elf:constants",
+diff --git a/chrome/browser/themes/BUILD.gn b/chrome/browser/themes/BUILD.gn
+index 73f2984811f4e..13a967a76384d 100644
+--- a/chrome/browser/themes/BUILD.gn
++++ b/chrome/browser/themes/BUILD.gn
+@@ -84,6 +84,7 @@ source_set("themes") {
+       "theme_helper_win.cc",
+       "theme_helper_win.h",
+     ]
++    deps += [ "//chrome/browser/win:mica_titlebar" ]
+   }
+   if (is_linux) {
+     public += [ "theme_service_aura_linux.h" ]
+diff --git a/chrome/browser/themes/theme_helper_win.cc b/chrome/browser/themes/theme_helper_win.cc
+index b80fd78c52bab..c78bb18ef2703 100644
+--- a/chrome/browser/themes/theme_helper_win.cc
++++ b/chrome/browser/themes/theme_helper_win.cc
+@@ -6,8 +6,17 @@
+ 
+ #include "chrome/browser/themes/custom_theme_supplier.h"
+ #include "chrome/browser/themes/theme_properties.h"
++#include "chrome/browser/win/mica_titlebar.h"
+ #include "chrome/grit/theme_resources.h"
+ 
++int ThemeHelperWin::GetDefaultDisplayProperty(int id) const {
++  if (id == ThemeProperties::SHOULD_FILL_BACKGROUND_TAB_COLOR) {
++    return !ShouldDefaultThemeUseMicaTitlebar();
++  }
++
++  return ThemeHelper::GetDefaultDisplayProperty(id);
++}
++
+ bool ThemeHelperWin::ShouldUseNativeFrame(
+     const CustomThemeSupplier* theme_supplier) const {
+   return true;
+diff --git a/chrome/browser/themes/theme_helper_win.h b/chrome/browser/themes/theme_helper_win.h
+index a4b3f3cab2141..33a218e67e7ff 100644
+--- a/chrome/browser/themes/theme_helper_win.h
++++ b/chrome/browser/themes/theme_helper_win.h
+@@ -13,6 +13,8 @@ class ThemeHelperWin : public ThemeHelper {
+   ~ThemeHelperWin() override = default;
+ 
+   // ThemeHelper:
++  int GetDefaultDisplayProperty(int id) const override;
++
+   bool ShouldUseNativeFrame(
+       const CustomThemeSupplier* theme_supplier) const override;
+ };
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index 205574732fe9a..e92ccf7af5bcb 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -2460,6 +2460,7 @@ static_library("ui") {
+       "//chrome/browser/ui/views:critical_notification_bubble_view",
+       "//chrome/browser/ui/views:uninstall_browser_prompt",
+       "//chrome/browser/win:impl",
++      "//chrome/browser/win:mica_titlebar",
+       "//components/search_engines",
+       "//third_party/wtl",
+     ]
+diff --git a/chrome/browser/ui/color/BUILD.gn b/chrome/browser/ui/color/BUILD.gn
+index f3f7ea8c06809..bc471f6f7d1d7 100644
+--- a/chrome/browser/ui/color/BUILD.gn
++++ b/chrome/browser/ui/color/BUILD.gn
+@@ -80,6 +80,7 @@ source_set("mixers") {
+     sources += [ "win/native_chrome_color_mixer_win.cc" ]
+     deps += [
+       "//chrome/browser:titlebar_config",
++      "//chrome/browser/win:mica_titlebar",
+       "//ui/base",
+       "//ui/color:accent_color_observer",
+       "//ui/native_theme",
+diff --git a/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc b/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc
+index 0552379dd864d..4580b3858f1c2 100644
+--- a/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc
++++ b/chrome/browser/ui/color/win/native_chrome_color_mixer_win.cc
+@@ -13,6 +13,7 @@
+ #include "base/win/windows_version.h"
+ #include "chrome/browser/themes/theme_properties.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
++#include "chrome/browser/win/mica_titlebar.h"
+ #include "chrome/grit/theme_resources.h"
+ #include "ui/color/color_id.h"
+ #include "ui/color/color_mixer.h"
+@@ -58,8 +59,19 @@ struct FrameTransforms {
+   std::optional<ui::ColorTransform> inactive;
+ };
+ 
++FrameTransforms GetMicaFrameTransforms(const ui::ColorProviderKey& key) {
++  const auto mica_frame_color =
++      (key.color_mode == ui::ColorProviderKey::ColorMode::kDark)
++          ? SkColorSetRGB(0x20, 0x20, 0x20)
++          : SkColorSetRGB(0xE8, 0xE8, 0xE8);
++  return {mica_frame_color, mica_frame_color};
++}
++
+ FrameTransforms GetSystemFrameTransforms(const ui::ColorProviderKey& key) {
+   FrameTransforms frame_transforms;
++  if (ShouldDefaultThemeUseMicaTitlebar()) {
++    frame_transforms = GetMicaFrameTransforms(key);
++  }
+   if (const auto* const accent_color_observer = ui::AccentColorObserver::Get();
+       accent_color_observer->ShouldUseAccentColorForWindowFrame()) {
+     if (const std::optional<SkColor> dwm_frame_color =
+@@ -234,6 +246,15 @@ void AddNativeNonHighContrastColors(ui::ColorMixer& mixer,
+         ui::AlphaBlend(ui::kColorSysBase, ui::kColorSysHeaderInactive, 0x66);
+     mixer[ui::kColorSysHeaderContainerInactive] = {ui::kColorSysBase};
+   }
++
++  if (ShouldDefaultThemeUseMicaTitlebar() && !key.app_controller) {
++    mixer[kColorNewTabButtonBackgroundFrameActive] = {SK_ColorTRANSPARENT};
++    mixer[kColorNewTabButtonBackgroundFrameInactive] = {SK_ColorTRANSPARENT};
++    mixer[kColorNewTabButtonInkDropFrameActive] =
++        ui::GetColorWithMaxContrast(ui::kColorFrameActive);
++    mixer[kColorNewTabButtonInkDropFrameInactive] =
++        ui::GetColorWithMaxContrast(ui::kColorFrameInactive);
++  }
+ }
+ 
+ }  // namespace
+diff --git a/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc b/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc
+index d0f0f711eaa58..cfe5d2c3d0bb0 100644
+--- a/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc
++++ b/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc
+@@ -195,6 +195,14 @@ void BrowserCaptionButtonContainer::OnWidgetBoundsChanged(
+ }
+ 
+ void BrowserCaptionButtonContainer::UpdateButtons() {
++  if (!ShouldBrowserCustomDrawTitlebar(frame_view_->GetBrowserView())) {
++    minimize_button_->SetVisible(false);
++    maximize_button_->SetVisible(false);
++    restore_button_->SetVisible(false);
++    close_button_->SetVisible(false);
++    return;
++  }
++
+   minimize_button_->SetVisible(frame_view_->GetBrowserView()->CanMinimize());
+ 
+   const bool is_maximized = frame_view_->IsMaximized();
+diff --git a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc
+index 49786bd90d798..aee47b704b206 100644
+--- a/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc
++++ b/chrome/browser/ui/views/frame/browser_desktop_window_tree_host_win.cc
+@@ -29,6 +29,7 @@
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/browser_widget.h"
+ #include "chrome/browser/ui/views/frame/browser_window_property_manager_win.h"
++#include "chrome/browser/ui/views/frame/opaque_browser_frame_view.h"
+ #include "chrome/browser/ui/views/frame/system_menu_insertion_delegate_win.h"
+ #include "chrome/browser/ui/views/frame/tab_strip_region_view.h"
+ #include "chrome/browser/ui/views/frame/windows_caption_button.h"
+@@ -49,6 +50,21 @@
+ #include "ui/gfx/win/icon_util.h"
+ #include "ui/gfx/win/msg_util.h"
+ #include "ui/views/controls/menu/native_menu_win.h"
++#include "ui/views/view_utils.h"
++
++namespace {
++
++int GetTopAreaHeight(const BrowserFrameView* frame) {
++  if (auto* const opaque = views::AsViewClass<OpaqueBrowserFrameView>(frame)) {
++    return opaque->GetTopAreaHeight();
++  } else if (auto* const frame_win =
++                 views::AsViewClass<BrowserFrameViewWin>(frame)) {
++    return frame_win->TopAreaHeight(false);
++  }
++  return 0;
++}
++
++}  // namespace
+ 
+ class VirtualDesktopHelper
+     : public base::RefCountedDeleteOnSequence<VirtualDesktopHelper> {
+@@ -335,6 +351,13 @@ bool BrowserDesktopWindowTreeHostWin::GetClientAreaInsets(
+     return false;
+   }
+ 
++  // Use default insets for popups and apps, unless we are custom drawing the
++  // titlebar.
++  if (!ShouldBrowserCustomDrawTitlebar(browser_view_) &&
++      !browser_view_->GetIsNormalType()) {
++    return false;
++  }
++
+   if (GetWidget()->IsFullscreen()) {
+     // In fullscreen mode there is no frame.
+     *insets = gfx::Insets();
+@@ -349,7 +372,8 @@ bool BrowserDesktopWindowTreeHostWin::GetClientAreaInsets(
+     // area, Windows will draw a full native titlebar outside the client area.
+     // (This doesn't occur in the maximized case.)
+     int top_thickness = 0;
+-    if (GetWidget()->IsMaximized()) {
++    if (ShouldBrowserCustomDrawTitlebar(browser_view_) &&
++        GetWidget()->IsMaximized()) {
+       top_thickness = frame_thickness;
+     }
+     *insets = gfx::Insets::TLBR(top_thickness, frame_thickness, frame_thickness,
+@@ -375,7 +399,21 @@ bool BrowserDesktopWindowTreeHostWin::GetDwmFrameInsetsInPixels(
+   }
+ 
+   // Don't extend the glass in at all if it won't be visible.
+-  *insets = gfx::Insets();
++  if (!ShouldUseNativeFrame() || GetWidget()->IsFullscreen() ||
++      ShouldBrowserCustomDrawTitlebar(browser_view_)) {
++    *insets = gfx::Insets();
++  } else {
++    // The glass should extend to the bottom of the tabstrip.
++    auto* const frame = browser_widget_->GetFrameView();
++    const int bottom =
++        GetTopAreaHeight(frame) +
++        browser_view_->GetFrameElementInfo().tabstrip_preferred_height;
++    const int tabstrip_region_bottom =
++        display::win::GetScreenWin()
++            ->DIPToClientPoint(GetHWND(), gfx::Point(0, bottom))
++            .y();
++    *insets = gfx::Insets::TLBR(tabstrip_region_bottom, 0, 0, 0);
++  }
+   return true;
+ }
+ 
+@@ -492,7 +530,9 @@ views::FrameMode BrowserDesktopWindowTreeHostWin::GetFrameMode() const {
+   }
+ 
+   const views::FrameMode system_frame_mode =
+-      views::FrameMode::SYSTEM_DRAWN_NO_CONTROLS;
++      ShouldBrowserCustomDrawTitlebar(browser_view_)
++          ? views::FrameMode::SYSTEM_DRAWN_NO_CONTROLS
++          : views::FrameMode::SYSTEM_DRAWN;
+ 
+   // We don't theme popup or app windows, so regardless of whether or not a
+   // theme is active for normal browser windows, we don't want to use the custom
+@@ -535,7 +575,8 @@ bool BrowserDesktopWindowTreeHostWin::ShouldUseNativeFrame() const {
+ bool BrowserDesktopWindowTreeHostWin::ShouldWindowContentsBeTransparent()
+     const {
+   CHECK(browser_view_);
+-  return false;
++  return !ShouldBrowserCustomDrawTitlebar(browser_view_) &&
++         views::DesktopWindowTreeHostWin::ShouldWindowContentsBeTransparent();
+ }
+ 
+ void BrowserDesktopWindowTreeHostWin::ClientDestroyedWidget() {
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.cc b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+index 207ea26540d4d..b18eb4e7114c9 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+@@ -34,6 +34,7 @@
+ #include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
+ #include "chrome/browser/web_applications/web_app_icon_manager.h"
+ #include "chrome/browser/web_applications/web_app_provider.h"
++#include "chrome/browser/win/mica_titlebar.h"
+ #include "chrome/browser/win/titlebar_config.h"
+ #include "content/public/browser/web_contents.h"
+ #include "skia/ext/image_operations.h"
+@@ -65,6 +66,13 @@ std::array<HICON, BrowserFrameViewWin::kThrobberIconCount>
+ 
+ namespace {
+ 
++// When enabled, a call to BrowserWidget::GetMinimizeButtonOffset() is avoided
++// when not needed. Behind a feature to assess impact
++// (go/chrome-performance-work-should-be-finched).
++// TODO(crbug.com/40897031): Clean up when experiment is complete.
++BASE_FEATURE(kAvoidUnnecessaryGetMinimizeButtonOffset,
++             base::FEATURE_ENABLED_BY_DEFAULT);
++
+ // If nothing has been added to the left of the window title, match native
+ // Windows 10 UWP apps that don't have window icons.
+ // TODO(crbug.com/40890502): Avoid hardcoding sizes like this.
+@@ -78,14 +86,73 @@ constexpr int kIconTitleSpacing = 5;
+ 
+ }  // namespace
+ 
++// Wrapper around MinimizeButtonMetrics so that calls don't need to be routed
++// through the widget, native widget, and desktop window tree host.
++class BrowserFrameViewWin::CaptionButtonMetrics : public views::WidgetObserver {
++ public:
++  explicit CaptionButtonMetrics(BrowserFrameViewWin& frame) : frame_(frame) {}
++  CaptionButtonMetrics(const CaptionButtonMetrics&) = delete;
++  void operator=(const CaptionButtonMetrics&) = delete;
++  ~CaptionButtonMetrics() override = default;
++
++  void Init(views::Widget* widget) {
++    CHECK(widget);
++    widget_ = widget;
++    observation_.Observe(widget);
++
++    // Immediately set up if there is already a HWND.
++    if (HWND hwnd = views::HWNDForWidget(widget_)) {
++      minimize_button_metrics_.Init(hwnd);
++      if (widget->IsActive()) {
++        minimize_button_metrics_.OnHWNDActivated();
++      }
++    }
++  }
+ 
++  void OnDeviceScaleFactorChanged() { minimize_button_metrics_.OnDpiChanged(); }
++
++  int GetCaptionButtonWidth() const {
++    const int offset = minimize_button_metrics_.GetMinimizeButtonOffsetX();
++    if (frame_->CaptionButtonsOnLeadingEdge()) {
++      return offset;
++    }
++    return frame_->width() - offset;
++  }
++
++  // views::WidgetObserver:
++
++  void OnWidgetCreated(views::Widget*) override {
++    HWND hwnd = views::HWNDForWidget(widget_);
++    CHECK(hwnd);
++    minimize_button_metrics_.Init(hwnd);
++  }
++
++  void OnWidgetDestroyed(views::Widget*) override {
++    observation_.Reset();
++    widget_ = nullptr;
++  }
++
++  void OnWidgetActivationChanged(views::Widget*, bool active) override {
++    if (active) {
++      minimize_button_metrics_.OnHWNDActivated();
++    }
++  }
++
++ private:
++  raw_ptr<views::Widget> widget_ = nullptr;
++  base::ScopedObservation<views::Widget, views::WidgetObserver> observation_{
++      this};
++  MinimizeButtonMetrics minimize_button_metrics_;
++  const raw_ref<BrowserFrameViewWin> frame_;
++};
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ // BrowserFrameViewWin, public:
+ 
+ BrowserFrameViewWin::BrowserFrameViewWin(BrowserWidget* widget,
+                                          BrowserView* browser_view)
+-    : BrowserFrameView(widget, browser_view) {
++    : BrowserFrameView(widget, browser_view),
++      caption_button_metrics_(std::make_unique<CaptionButtonMetrics>(*this)) {
+   // We initialize all fields despite some of them being unused in some modes,
+   // since it's possible for modes to flip dynamically (e.g. if the user enables
+   // a high-contrast theme). Throbber icons are only used when ShowSystemIcon()
+@@ -161,14 +228,20 @@ BrowserLayoutParams BrowserFrameViewWin::GetBrowserLayoutParams() const {
+ }
+ 
+ bool BrowserFrameViewWin::CaptionButtonsOnLeadingEdge() const {
+-  return false;
++  // Because we don't set WS_EX_LAYOUTRTL (which would conflict with Chrome's
++  // own RTL layout logic), Windows always draws the caption buttons on the
++  // right, even when we want to be RTL. See crbug.com/41222096.
++  return !ShouldBrowserCustomDrawTitlebar(GetBrowserView()) &&
++         base::i18n::IsRTL();
+ }
+ 
+ int BrowserFrameViewWin::GetTopInset(bool restored) const {
+   if (GetBrowserView()->GetTabStripVisible()) {
+     return TopAreaHeight(restored);
+   }
+-  return TitlebarHeight(restored);
++  return ShouldBrowserCustomDrawTitlebar(GetBrowserView())
++             ? TitlebarHeight(restored)
++             : 0;
+ }
+ 
+ SkColor BrowserFrameViewWin::GetCaptionColor(
+@@ -281,6 +354,13 @@ int BrowserFrameViewWin::NonClientHitTest(const gfx::Point& point) {
+     return super_component;
+   }
+ 
++  // For app windows and popups without a custom titlebar we haven't customized
++  // the frame at all so Windows can figure it out.
++  if (!ShouldBrowserCustomDrawTitlebar(GetBrowserView()) &&
++      !GetBrowserView()->GetIsNormalType()) {
++    return HTNOWHERE;
++  }
++
+   // If the point isn't within our bounds, then it's in the native portion of
+   // the frame so again Windows can figure it out.
+   if (!bounds().Contains(point)) {
+@@ -413,6 +493,9 @@ void BrowserFrameViewWin::ResetWindowControls() {
+ 
+ void BrowserFrameViewWin::OnThemeChanged() {
+   BrowserFrameView::OnThemeChanged();
++  if (!ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
++    SetSystemMicaTitlebarAttributes();
++  }
+ }
+ 
+ gfx::RoundedCornersF BrowserFrameViewWin::GetWindowRoundedCorners() const {
+@@ -463,7 +546,9 @@ bool BrowserFrameViewWin::IsMaximized() const {
+ 
+ void BrowserFrameViewWin::OnPaint(gfx::Canvas* canvas) {
+   TRACE_EVENT0("views.frame", "BrowserFrameViewWin::OnPaint");
+-  PaintTitlebar(canvas);
++  if (ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
++    PaintTitlebar(canvas);
++  }
+ }
+ 
+ void BrowserFrameViewWin::Layout(PassKey) {
+@@ -477,6 +562,17 @@ void BrowserFrameViewWin::Layout(PassKey) {
+   LayoutSuperclass<BrowserFrameView>(this);
+ }
+ 
++void BrowserFrameViewWin::AddedToWidget() {
++  caption_button_metrics_->Init(GetWidget());
++}
++
++void BrowserFrameViewWin::OnDeviceScaleFactorChanged(
++    float old_device_scale_factor,
++    float new_device_scale_factor) {
++  BrowserFrameView::OnDeviceScaleFactorChanged(old_device_scale_factor,
++                                               new_device_scale_factor);
++  caption_button_metrics_->OnDeviceScaleFactorChanged();
++}
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ // BrowserFrameViewWin, private:
+@@ -582,11 +678,31 @@ int BrowserFrameViewWin::WindowTopY() const {
+ }
+ 
+ int BrowserFrameViewWin::CaptionButtonsRegionWidth() const {
+-  return caption_button_container_->size().width();
++  std::optional<int> system_caption_buttons_width;
++  if (!base::FeatureList::IsEnabled(kAvoidUnnecessaryGetMinimizeButtonOffset)) {
++    system_caption_buttons_width =
++        caption_button_metrics_->GetCaptionButtonWidth();
++  }
++
++  int total_width = caption_button_container_->size().width();
++  if (!ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
++    if (!system_caption_buttons_width.has_value()) {
++      system_caption_buttons_width =
++          caption_button_metrics_->GetCaptionButtonWidth();
++    }
++    total_width += system_caption_buttons_width.value();
++  }
++
++  return total_width;
+ }
+ 
+ bool BrowserFrameViewWin::ShouldShowWindowIcon(TitlebarType type) const {
+-  if (type == TitlebarType::kSystem) {
++  if (type == TitlebarType::kCustom &&
++      !ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
++    return false;
++  }
++  if (type == TitlebarType::kSystem &&
++      ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
+     return false;
+   }
+   if (browser_widget()->IsFullscreen()) {
+@@ -596,7 +712,12 @@ bool BrowserFrameViewWin::ShouldShowWindowIcon(TitlebarType type) const {
+ }
+ 
+ bool BrowserFrameViewWin::ShouldShowWindowTitle(TitlebarType type) const {
+-  if (type == TitlebarType::kSystem) {
++  if (type == TitlebarType::kCustom &&
++      !ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
++    return false;
++  }
++  if (type == TitlebarType::kSystem &&
++      ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
+     return false;
+   }
+   if (browser_widget()->IsFullscreen()) {
+@@ -605,6 +726,29 @@ bool BrowserFrameViewWin::ShouldShowWindowTitle(TitlebarType type) const {
+   return GetBrowserView()->ShouldShowWindowTitle();
+ }
+ 
++void BrowserFrameViewWin::TabletModeChanged() {
++  if (!ShouldBrowserCustomDrawTitlebar(GetBrowserView())) {
++    SetSystemMicaTitlebarAttributes();
++  }
++}
++
++void BrowserFrameViewWin::SetSystemMicaTitlebarAttributes() {
++  CHECK(SystemTitlebarCanUseMicaMaterial());
++
++  const BOOL dark_titlebar_enabled = browser_widget()->GetColorMode() ==
++                                     ui::ColorProviderKey::ColorMode::kDark;
++  DwmSetWindowAttribute(views::HWNDForWidget(browser_widget()),
++                        DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_titlebar_enabled,
++                        sizeof(dark_titlebar_enabled));
++
++  const DWM_SYSTEMBACKDROP_TYPE dwm_backdrop_type =
++      GetBrowserView()->GetTabStripVisible() ? DWMSBT_TABBEDWINDOW
++                                             : DWMSBT_MAINWINDOW;
++  DwmSetWindowAttribute(views::HWNDForWidget(browser_widget()),
++                        DWMWA_SYSTEMBACKDROP_TYPE, &dwm_backdrop_type,
++                        sizeof(dwm_backdrop_type));
++}
++
+ SkColor BrowserFrameViewWin::GetTitlebarColor() const {
+   return GetFrameColor(BrowserFrameActiveState::kUseCurrent);
+ }
+@@ -737,14 +881,21 @@ void BrowserFrameViewWin::LayoutCaptionButtons() {
+   const gfx::Size preferred_size =
+       caption_button_container_->GetPreferredSize();
+ 
++  const int system_caption_buttons_width =
++      ShouldBrowserCustomDrawTitlebar(GetBrowserView())
++          ? 0
++          : caption_button_metrics_->GetCaptionButtonWidth();
++
+   const int height =
+       !GetBrowserView()->GetWebAppFrameToolbarPreferredSize().IsEmpty()
+           ? (TitlebarHeight(false) - WindowTopY())
+           : GetFrameHeight();
+ 
+-  caption_button_container_->SetBounds(width() - preferred_size.width(),
+-                                       WindowTopY(), preferred_size.width(),
+-                                       height);
++  caption_button_container_->SetBounds(
++      CaptionButtonsOnLeadingEdge()
++          ? system_caption_buttons_width
++          : width() - system_caption_buttons_width - preferred_size.width(),
++      WindowTopY(), preferred_size.width(), height);
+ }
+ 
+ void BrowserFrameViewWin::LayoutClientView() {
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.h b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+index e731b2c4c161f..0d3be37f68c7c 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+@@ -7,6 +7,7 @@
+ 
+ #include <array>
+ 
++#include "base/callback_list.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/win/scoped_gdi_object.h"
+ #include "chrome/browser/ui/views/frame/browser_frame_view.h"
+@@ -14,6 +15,7 @@
+ #include "chrome/browser/ui/views/tab_icon_view.h"
+ #include "chrome/browser/ui/views/tab_icon_view_model.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/pointer/touch_ui_controller.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/views/window/frame_view.h"
+ 
+@@ -94,10 +96,15 @@ class BrowserFrameViewWin : public BrowserFrameView, public TabIconViewModel {
+   // views::View:
+   void OnPaint(gfx::Canvas* canvas) override;
+   void Layout(PassKey) override;
++  void AddedToWidget() override;
++  void OnDeviceScaleFactorChanged(float old_device_scale_factor,
++                                  float new_device_scale_factor) override;
+ 
+  private:
+   friend class BrowserCaptionButtonContainer;
+ 
++  class CaptionButtonMetrics;
++
+   // Describes the type of titlebar that a window might have; used to query
+   // whether specific elements may be present.
+   enum class TitlebarType {
+@@ -140,6 +147,12 @@ class BrowserFrameViewWin : public BrowserFrameView, public TabIconViewModel {
+   // |type|.
+   bool ShouldShowWindowTitle(TitlebarType type) const;
+ 
++  // Called when the device enters or exits tablet mode.
++  void TabletModeChanged();
++
++  // Sets DWM attributes for rendering the system-drawn Mica titlebar.
++  void SetSystemMicaTitlebarAttributes();
++
+   // Paint various sub-components of this view.
+   void PaintTitlebar(gfx::Canvas* canvas) const;
+ 
+@@ -176,6 +189,14 @@ class BrowserFrameViewWin : public BrowserFrameView, public TabIconViewModel {
+   // The container holding the caption buttons (minimize, maximize, close, etc.)
+   raw_ptr<BrowserCaptionButtonContainer> caption_button_container_;
+ 
++  base::CallbackListSubscription tablet_mode_subscription_ =
++      ui::TouchUiController::Get()->RegisterCallback(
++          base::BindRepeating(&BrowserFrameViewWin::TabletModeChanged,
++                              base::Unretained(this)));
++
++  // Tracks information about caption button location, size, etc.
++  std::unique_ptr<CaptionButtonMetrics> caption_button_metrics_;
++
+   // Whether or not the window throbber is currently animating.
+   bool throbber_running_ = false;
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_widget.cc b/chrome/browser/ui/views/frame/browser_widget.cc
+index 5bf762de717e0..9907f32947bbe 100644
+--- a/chrome/browser/ui/views/frame/browser_widget.cc
++++ b/chrome/browser/ui/views/frame/browser_widget.cc
+@@ -56,11 +56,13 @@
+ 
+ #if BUILDFLAG(IS_WIN)
+ #include "base/feature_list.h"
++#include "chrome/browser/win/mica_titlebar.h"
+ #include "content/public/browser/desktop_capture_pip_utils.h"
+ #include "media/base/media_switches.h"
+ #include "media/capture/capture_switches.h"
+ #include "ui/wm/core/window_properties.h"
+ #endif
++
+ namespace {
+ 
+ // Helper to track whether a ThemeChange event has been received by the widget.
+@@ -562,9 +564,17 @@ bool BrowserWidget::RegenerateFrameOnThemeChange(
+   // System and user theme changes can both change frame buttons, so the frame
+   // always needs to be regenerated on Linux.
+   need_regenerate = true;
+-#elif BUILDFLAG(IS_WIN)
++#endif
++
++#if BUILDFLAG(IS_WIN)
++  // On Windows, DWM transition does not performed for a frame regeneration in
++  // fullscreen mode, so do a lighweight theme change to refresh a bookmark bar
++  // on new tab. (see crbug.com/40646694)
++  // With Mica, toggling titlebar accent colors in the native theme needs a
++  // frame regen to switch between the system-drawn and custom-drawn titlebars.
+   need_regenerate |=
+-      (theme_change_type == BrowserThemeChangeType::kBrowserTheme) &&
++      (theme_change_type == BrowserThemeChangeType::kBrowserTheme ||
++       SystemTitlebarCanUseMicaMaterial()) &&
+       !IsFullscreen();
+ #else
+   need_regenerate |= theme_change_type == BrowserThemeChangeType::kBrowserTheme;
+diff --git a/chrome/browser/win/BUILD.gn b/chrome/browser/win/BUILD.gn
+index dc7f531c1ba6a..f98e6cb5c2549 100644
+--- a/chrome/browser/win/BUILD.gn
++++ b/chrome/browser/win/BUILD.gn
+@@ -103,6 +103,7 @@ source_set("impl") {
+   ]
+ 
+   deps = [
++    ":mica_titlebar",
+     "//chrome/app:chrome_exe_main_exports",
+     "//chrome/app:generated_resources",
+     "//chrome/app/theme:chrome_unscaled_resources_grit",
+@@ -154,6 +155,18 @@ static_library("chrome_process_finder") {
+   ]
+ }
+ 
++source_set("mica_titlebar") {
++  sources = [
++    "mica_titlebar.cc",
++    "mica_titlebar.h",
++  ]
++  deps = [
++    "//base",
++    "//ui/color:accent_color_observer",
++    "//ui/native_theme",
++  ]
++}
++
+ source_set("cloud_synced_folder_checker") {
+   sources = [
+     "cloud_synced_folder_checker.cc",
+diff --git a/chrome/browser/win/mica_titlebar.cc b/chrome/browser/win/mica_titlebar.cc
+new file mode 100644
+index 0000000000000..2dcd8cfb651f0
+--- /dev/null
++++ b/chrome/browser/win/mica_titlebar.cc
+@@ -0,0 +1,28 @@
++// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/win/mica_titlebar.h"
++
++#include <optional>
++
++#include "base/win/windows_version.h"
++#include "ui/color/win/accent_color_observer.h"
++#include "ui/native_theme/native_theme.h"
++
++// Allows the titlebar to be drawn by the system using the Mica material
++// on Windows 11, version 22H2 and above.
++BASE_FEATURE(kWindows11MicaTitlebar, base::FEATURE_DISABLED_BY_DEFAULT);
++
++bool ShouldDefaultThemeUseMicaTitlebar() {
++  return SystemTitlebarCanUseMicaMaterial() &&
++         !ui::AccentColorObserver::Get()
++              ->ShouldUseAccentColorForWindowFrame() &&
++         ui::NativeTheme::GetInstanceForNativeUi()->preferred_contrast() ==
++             ui::NativeTheme::PreferredContrast::kNoPreference;
++}
++
++bool SystemTitlebarCanUseMicaMaterial() {
++  return base::win::GetVersion() >= base::win::Version::WIN11_22H2 &&
++         base::FeatureList::IsEnabled(kWindows11MicaTitlebar);
++}
+diff --git a/chrome/browser/win/mica_titlebar.h b/chrome/browser/win/mica_titlebar.h
+new file mode 100644
+index 0000000000000..3c5b8f464804c
+--- /dev/null
++++ b/chrome/browser/win/mica_titlebar.h
+@@ -0,0 +1,20 @@
++// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_WIN_MICA_TITLEBAR_H_
++#define CHROME_BROWSER_WIN_MICA_TITLEBAR_H_
++
++#include "base/feature_list.h"
++
++BASE_DECLARE_FEATURE(kWindows11MicaTitlebar);
++
++// Returns whether we should use the Mica titlebar in standard browser windows
++// using the default theme.
++bool ShouldDefaultThemeUseMicaTitlebar();
++
++// Returns whether the system-drawn titlebar can be drawn using the Mica
++// material.
++bool SystemTitlebarCanUseMicaMaterial();
++
++#endif  // CHROME_BROWSER_WIN_MICA_TITLEBAR_H_
+diff --git a/chrome/browser/win/titlebar_config.cc b/chrome/browser/win/titlebar_config.cc
+index 522bbde302b39..65b591832e02d 100644
+--- a/chrome/browser/win/titlebar_config.cc
++++ b/chrome/browser/win/titlebar_config.cc
+@@ -4,6 +4,18 @@
+ 
+ #include "chrome/browser/win/titlebar_config.h"
+ 
++#include "chrome/browser/themes/theme_service.h"
++#include "chrome/browser/themes/theme_service_factory.h"
++#include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/win/mica_titlebar.h"
++
+ bool ShouldBrowserCustomDrawTitlebar(BrowserView* browser_view) {
+-  return true;
++  const BrowserWindowInterface::Type type = browser_view->browser()->GetType();
++  return !ShouldDefaultThemeUseMicaTitlebar() ||
++         !ThemeServiceFactory::GetForProfile(browser_view->GetProfile())
++              ->UsingSystemTheme() ||
++         (type != BrowserWindowInterface::Type::TYPE_NORMAL &&
++          type != BrowserWindowInterface::Type::TYPE_POPUP &&
++          type != BrowserWindowInterface::Type::TYPE_DEVTOOLS);
+ }

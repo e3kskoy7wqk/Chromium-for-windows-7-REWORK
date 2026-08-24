@@ -1,0 +1,101 @@
+diff --git a/base/files/file_util.cc b/base/files/file_util.cc
+index bd6fb6d30d18d..bb69d4779c52c 100644
+--- a/base/files/file_util.cc
++++ b/base/files/file_util.cc
+@@ -11,6 +11,43 @@
+ #if BUILDFLAG(IS_WIN)
+ #include <windows.h>
+ #endif
++#include "base/win/windows_version.h"
++#include "base/logging.h"
++#include "base/scoped_native_library.h"
++#include "base/win/pe_image.h"
++
++namespace {
++
++// A helper function to touch all pages in the range
++// [base_addr, base_addr + length).
++void TouchPagesInRange(const void* base_addr, uint32_t length) {
++  DCHECK(base_addr);
++  DCHECK_GT(length, static_cast<uint32_t>(0));
++
++  // Get the system info so we know the page size. Also, make sure we use a
++  // non-zero value for the page size; GetSystemInfo() is hookable/patchable,
++  // and you never know what shenanigans someone could get up to.
++  SYSTEM_INFO system_info = {};
++  ::GetSystemInfo(&system_info);
++  if (system_info.dwPageSize == 0)
++    system_info.dwPageSize = 4096;
++
++  // We don't want to read outside the byte range (which could trigger an
++  // access violation), so let's figure out the exact locations of the first
++  // and final bytes we want to read.
++  volatile uint8_t const* touch_ptr =
++      reinterpret_cast<uint8_t const*>(base_addr);
++  volatile uint8_t const* final_touch_ptr = touch_ptr + length - 1;
++
++  // Read the memory in the range [touch_ptr, final_touch_ptr] with a stride
++  // of the system page size, to ensure that it's been paged in.
++  uint8_t dummy;
++  for (; touch_ptr < final_touch_ptr; touch_ptr += system_info.dwPageSize)
++    dummy = *touch_ptr;
++  dummy = *final_touch_ptr;
++}
++
++}  // namespace
+ 
+ namespace base {
+ 
+@@ -21,6 +57,9 @@ void PreReadFile(const base::FilePath& file_path) {
+ bool PreReadFileSlow(const FilePath& file_path, int64_t max_bytes) {
+   DCHECK_GE(max_bytes, 0);
+ 
++  if (base::win::GetVersion() > base::win::Version::XP) {
++    // Vista+ branch. On these OSes, the forced reads through the file actually
++    // slows warm starts. The solution is to sequentially read file contents.
+   File file(file_path, File::FLAG_OPEN | File::FLAG_READ |
+                            File::FLAG_WIN_SEQUENTIAL_SCAN |
+                            File::FLAG_WIN_SHARE_DELETE);
+@@ -40,6 +79,42 @@ void PreReadFile(const base::FilePath& file_path) {
+   }
+ 
+   return true;
++  } else {
++    // WinXP branch. Here, reading the DLL from disk doesn't do what we want so
++    // instead we pull the pages into memory and touch pages at a stride. We use
++    // the system's page size as the stride, to make sure each page in the range
++    // is touched.
++
++    // Don't show an error popup when |file_path| is not a valid PE file.
++    UINT previous_error_mode = ::SetErrorMode(SEM_FAILCRITICALERRORS);
++    ::SetErrorMode(previous_error_mode | SEM_FAILCRITICALERRORS);
++
++    base::ScopedNativeLibrary dll_module(::LoadLibraryExW(
++        file_path.value().c_str(), NULL,
++        LOAD_WITH_ALTERED_SEARCH_PATH | DONT_RESOLVE_DLL_REFERENCES));
++
++    ::SetErrorMode(previous_error_mode);
++
++    // Pre-reading non-PE files is not supported on XP.
++    if (!dll_module.is_valid())
++      return false;
++
++    base::win::PEImage pe_image(dll_module.get());
++    if (!pe_image.VerifyMagic())
++      return false;
++
++    // We don't want to read past the end of the module (which could trigger
++    // an access violation), so make sure to check the image size.
++    PIMAGE_NT_HEADERS nt_headers = pe_image.GetNTHeaders();
++    const uint32_t dll_module_length = nt_headers->OptionalHeader.SizeOfImage;
++
++    // Page in the module.
++   __try {
++    TouchPagesInRange(dll_module.get(), dll_module_length);
++   } __except(EXCEPTION_EXECUTE_HANDLER) {
++   }
++  return true;
++  }
+ }
+ 
+ }  // namespace internal

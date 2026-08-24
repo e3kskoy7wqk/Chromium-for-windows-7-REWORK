@@ -1,0 +1,62 @@
+diff --git a/content/browser/renderer_host/legacy_render_widget_host_win.cc b/content/browser/renderer_host/legacy_render_widget_host_win.cc
+index 475629d48e880..61e1ff3af5a04 100644
+--- a/content/browser/renderer_host/legacy_render_widget_host_win.cc
++++ b/content/browser/renderer_host/legacy_render_widget_host_win.cc
+@@ -609,7 +609,25 @@ LRESULT LegacyRenderWidgetHostHWND::OnSize(UINT message,
+ 
+ void UiaDisconnectProviderInTask(
+     Microsoft::WRL::ComPtr<IRawElementProviderSimple> provider) {
+-  ::UiaDisconnectProvider(provider.Get());
++typedef HRESULT (__cdecl *MYPROC)(IRawElementProviderSimple *); 
++ 
++    HINSTANCE hinstLib; 
++    MYPROC ProcAdd = NULL; 
++ 
++    // Get a handle to the DLL module.
++ 
++    hinstLib = LoadLibraryW(L"Uiautomationcore.dll"); 
++ 
++    // If the handle is valid, try to get the function address.
++ 
++    if (hinstLib != NULL) 
++    { 
++        ProcAdd = (MYPROC) GetProcAddress(hinstLib, "UiaDisconnectProvider"); 
++    } 
++
++    if (NULL != ProcAdd) {
++  ProcAdd(provider.Get());
++    }
+ }
+ 
+ }  // namespace
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 42c9a58a65b0f..d14410173e902 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -1944,7 +1944,25 @@ void HWNDMessageHandler::OnDestroy() {
+ 
+ void UiaDisconnectProviderInTask(
+     Microsoft::WRL::ComPtr<IRawElementProviderSimple> provider) {
+-  ::UiaDisconnectProvider(provider.Get());
++typedef HRESULT (__cdecl *MYPROC)(IRawElementProviderSimple *); 
++ 
++    HINSTANCE hinstLib; 
++    MYPROC ProcAdd = NULL; 
++ 
++    // Get a handle to the DLL module.
++ 
++    hinstLib = LoadLibraryW(L"Uiautomationcore.dll"); 
++ 
++    // If the handle is valid, try to get the function address.
++ 
++    if (hinstLib != NULL) 
++    { 
++        ProcAdd = (MYPROC) GetProcAddress(hinstLib, "UiaDisconnectProvider"); 
++    } 
++
++    if (NULL != ProcAdd) {
++  ProcAdd(provider.Get());
++    }
+ }
+ 
+ }  // namespace

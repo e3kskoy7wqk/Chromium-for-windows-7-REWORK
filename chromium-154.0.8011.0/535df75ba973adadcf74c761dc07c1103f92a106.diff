@@ -1,0 +1,42 @@
+diff --git a/sandbox/win/src/handle_closer_agent.cc b/sandbox/win/src/handle_closer_agent.cc
+index 65410b198159e..f8e128aa4b695 100644
+--- a/sandbox/win/src/handle_closer_agent.cc
++++ b/sandbox/win/src/handle_closer_agent.cc
+@@ -48,6 +48,28 @@ HandleCloserAgent::HandleCloserAgent()
+ 
+ HandleCloserAgent::~HandleCloserAgent() {}
+ 
++static DWORD rtThreadGetCurrentProcessorNumber(void)
++{
++    static bool           fInitialized = false;
++    static DWORD (WINAPI *pfnGetCurrentProcessorNumber)(void) = NULL;
++    if (!fInitialized)
++    {
++        HMODULE hmodKernel32 = GetModuleHandleW(L"kernel32.dll");
++        if (hmodKernel32)
++            pfnGetCurrentProcessorNumber = (DWORD (WINAPI*)(void))GetProcAddress(hmodKernel32, "GetCurrentProcessorNumber");
++        fInitialized = true;
++    }
++    if (pfnGetCurrentProcessorNumber)
++        return pfnGetCurrentProcessorNumber();
++    DWORD_PTR xBX;
++    __asm
++    {
++        mov     eax, 1
++        cpuid
++        mov     [xBX], ebx
++    }
++    return (DWORD)(xBX);
++}
+ // Attempts to stuff |closed_handle| with a duplicated handle for a dummy Event
+ // with no access. This should allow the handle to be closed, to avoid
+ // generating EXCEPTION_INVALID_HANDLE on shutdown, but nothing else. For now
+@@ -67,7 +91,7 @@ bool HandleCloserAgent::AttemptToStuffHandleSlot(HANDLE closed_handle,
+ 
+   std::vector<HANDLE> to_close;
+ 
+-  const DWORD original_proc_num = ::GetCurrentProcessorNumber();
++  const DWORD original_proc_num = rtThreadGetCurrentProcessorNumber();
+   DWORD proc_num = original_proc_num;
+   DWORD_PTR original_affinity_mask =
+       ::SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{1} << proc_num);
