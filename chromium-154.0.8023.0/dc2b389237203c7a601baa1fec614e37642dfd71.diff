@@ -1,0 +1,2230 @@
+diff --git a/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm b/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm
+index f689b344c96e4..817a976be58ad 100644
+--- a/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm
++++ b/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm
+@@ -153,26 +153,32 @@ TestShimClient::TestShimClient() {
+        base::HexEncode(crypto::hash::Sha256(user_data_dir.value()))});
+   mojo::PlatformChannelEndpoint endpoint = ConnectToBrowser(name_fragment);
+ 
+-  // We need to set up a secondary node in order to simulate an external shim
+-  // connection.
+-  mojo::ScopedMessagePipeHandle message_pipe =
+-      ConnectIcpzToShim(std::move(endpoint));
+-
+-  // It's important for the AppShimHost interface portals to be created on the
+-  // secondary node too, since the fake shim passes the receiver endpoint back
+-  // to the host in a reply over the primordial AppShim interface connecting
+-  // the two nodes.
+-  const IpczAPI& ipcz = mojo::core::GetIpczAPIForMojo();
+-  IpczHandle remote, receiver;
+-  const IpczResult result =
+-      ipcz.OpenPortals(secondary_ipcz_broker_->value(), IPCZ_NO_FLAGS, nullptr,
+-                       &remote, &receiver);
+-  CHECK_EQ(IPCZ_RESULT_OK, result);
+-  host_.Bind(mojo::PendingRemote<chrome::mojom::AppShimHost>(
+-      mojo::ScopedMessagePipeHandle(mojo::MessagePipeHandle(remote)), 0));
+-  host_receiver_ = mojo::PendingReceiver<chrome::mojom::AppShimHost>(
+-      mojo::ScopedMessagePipeHandle(mojo::MessagePipeHandle(receiver)));
+-
++  mojo::ScopedMessagePipeHandle message_pipe;
++  if (mojo::core::IsMojoIpczEnabled()) {
++    // With MojoIpcz, we need to set up a secondary node in order to simulate an
++    // external shim connection.
++    message_pipe = ConnectIcpzToShim(std::move(endpoint));
++
++    // It's important for the AppShimHost interface portals to be created on the
++    // secondary node too, since the fake shim passes the receiver endpoint back
++    // to the host in a reply over the primordial AppShim interface connecting
++    // the two nodes.
++    const IpczAPI& ipcz = mojo::core::GetIpczAPIForMojo();
++    IpczHandle remote, receiver;
++    const IpczResult result =
++        ipcz.OpenPortals(secondary_ipcz_broker_->value(), IPCZ_NO_FLAGS,
++                         nullptr, &remote, &receiver);
++    CHECK_EQ(IPCZ_RESULT_OK, result);
++    host_.Bind(mojo::PendingRemote<chrome::mojom::AppShimHost>(
++        mojo::ScopedMessagePipeHandle(mojo::MessagePipeHandle(remote)), 0));
++    host_receiver_ = mojo::PendingReceiver<chrome::mojom::AppShimHost>(
++        mojo::ScopedMessagePipeHandle(mojo::MessagePipeHandle(receiver)));
++  } else {
++    // Non-ipcz Mojo supports processes establishing IsolatedConnections to
++    // themselves.
++    message_pipe = mojo_connection_.Connect(std::move(endpoint));
++    host_receiver_ = host_.BindNewPipeAndPassReceiver();
++  }
+   host_bootstrap_ = mojo::Remote<chrome::mojom::AppShimHostBootstrap>(
+       mojo::PendingRemote<chrome::mojom::AppShimHostBootstrap>(
+           std::move(message_pipe), 0));
+@@ -354,5 +360,5 @@ IN_PROC_BROWSER_TEST_F(AppShimListenerBrowserTestSymlink,
+   auto config =
+       app_mode::ChromeConnectionConfig::DecodeFromPath(encoded_config);
+   EXPECT_EQ(version_info::GetVersionNumber(), config.framework_version);
+-  EXPECT_TRUE(config.is_mojo_ipcz_enabled);
++  EXPECT_EQ(mojo::core::IsMojoIpczEnabled(), config.is_mojo_ipcz_enabled);
+ }
+diff --git a/chrome/common/mac/app_mode_common.h b/chrome/common/mac/app_mode_common.h
+index 37849384d5fc9..c73dd004b568c 100644
+--- a/chrome/common/mac/app_mode_common.h
++++ b/chrome/common/mac/app_mode_common.h
+@@ -246,8 +246,6 @@ struct ChromeConnectionConfig {
+   std::string framework_version;
+ 
+   // Indicates whether or not the MojoIpcz feature must be enabled.
+-  // TODO(crbug.com/359926651): This is now always true. Remove the field
+-  // and its bit in the encoded path.
+   bool is_mojo_ipcz_enabled;
+ 
+   // Returns a new configuration appropriate for the calling Chrome process to
+diff --git a/chrome/common/mac/app_mode_common.mm b/chrome/common/mac/app_mode_common.mm
+index d27f812a12484..0218f9c9fa39a 100644
+--- a/chrome/common/mac/app_mode_common.mm
++++ b/chrome/common/mac/app_mode_common.mm
+@@ -12,6 +12,7 @@
+ #include "base/strings/strcat.h"
+ #include "base/strings/string_split.h"
+ #include "components/version_info/version_info.h"
++#include "mojo/core/embedder/embedder.h"
+ 
+ namespace app_mode {
+ 
+@@ -76,7 +77,7 @@ static_assert(
+ ChromeConnectionConfig ChromeConnectionConfig::GenerateForCurrentProcess() {
+   return {
+       .framework_version = std::string(version_info::GetVersionNumber()),
+-      .is_mojo_ipcz_enabled = true,
++      .is_mojo_ipcz_enabled = mojo::core::IsMojoIpczEnabled(),
+   };
+ }
+ 
+diff --git a/components/named_mojo_ipc_server/named_mojo_ipc_server_unittest.cc b/components/named_mojo_ipc_server/named_mojo_ipc_server_unittest.cc
+index 739a0dfac8ca8..17438b1924ed2 100644
+--- a/components/named_mojo_ipc_server/named_mojo_ipc_server_unittest.cc
++++ b/components/named_mojo_ipc_server/named_mojo_ipc_server_unittest.cc
+@@ -36,6 +36,7 @@
+ #include "components/named_mojo_ipc_server/named_mojo_ipc_test_util.h"
+ #include "components/named_mojo_ipc_server/testing.test-mojom.h"
+ #include "components/test/test_switches.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/embedder/scoped_ipc_support.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/receiver_set.h"
+@@ -216,8 +217,10 @@ base::Process NamedMojoIpcServerTest::LaunchClientProcess(
+                              MessagePipeTypeToString(GetParam()));
+   if (GetParam() == MessagePipeType::ISOLATED) {
+     // Make sure the new process is a broker, because isolated connections are
+-    // only supported between two brokers.
+-    cmd_line.AppendSwitch(switches::kInitializeMojoAsBroker);
++    // only supported between two brokers when ipcz is enabled.
++    if (mojo::core::IsMojoIpczEnabled()) {
++      cmd_line.AppendSwitch(switches::kInitializeMojoAsBroker);
++    }
+   }
+   return base::SpawnMultiProcessTestChild(kEchoClientName, cmd_line,
+                                           /* options= */ {});
+diff --git a/components/named_mojo_ipc_server/named_mojo_message_pipe_server.cc b/components/named_mojo_ipc_server/named_mojo_message_pipe_server.cc
+index 390ccd32970a8..36947b368c1b2 100644
+--- a/components/named_mojo_ipc_server/named_mojo_message_pipe_server.cc
++++ b/components/named_mojo_ipc_server/named_mojo_message_pipe_server.cc
+@@ -19,6 +19,7 @@
+ #include "components/named_mojo_ipc_server/connection_info.h"
+ #include "components/named_mojo_ipc_server/endpoint_options.h"
+ #include "components/named_mojo_ipc_server/named_mojo_server_endpoint_connector.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/public/cpp/platform/platform_channel_endpoint.h"
+ #include "mojo/public/cpp/system/invitation.h"
+ #include "mojo/public/cpp/system/isolated_connection.h"
+@@ -126,24 +127,30 @@ void NamedMojoMessagePipeServer::OnClientConnected(
+       std::holds_alternative<std::monostate>(options_.message_pipe_id);
+ 
+   base::Process peer_process;
++  // A peer process is not needed to open a non-MojoIpcz isolated connection,
++  // and in fact some callers don't have the right ACL to open the peer process
++  // yet, so we only open the peer process if the connection is non-isolated, or
++  // MojoIpcz is enabled.
++  if (!is_isolated || mojo::core::IsMojoIpczEnabled()) {
+ #if BUILDFLAG(IS_WIN)
+-  // Open process with minimum permissions since the client process might have
+-  // restricted its access with DACL.
+-  peer_process = base::Process::OpenWithAccess(peer_pid, PROCESS_DUP_HANDLE);
++    // Open process with minimum permissions since the client process might have
++    // restricted its access with DACL.
++    peer_process = base::Process::OpenWithAccess(peer_pid, PROCESS_DUP_HANDLE);
+ // Windows opens the process with a system call so we use PLOG to extract more
+ // info. Other OSes (i.e. POSIX) don't do that.
+ #define INVALID_PROCESS_LOG PLOG
+ #else
+-  peer_process = base::Process::Open(peer_pid);
++    peer_process = base::Process::Open(peer_pid);
+ #define INVALID_PROCESS_LOG LOG
+ #endif
+-  if (!peer_process.IsValid()) {
+-    // Connections can be made without a process handle to the client, as long
+-    // as the client has a process handle to the server, so we don't return
+-    // here.
+-    INVALID_PROCESS_LOG(WARNING) << "Failed to open peer process";
+-  }
++    if (!peer_process.IsValid()) {
++      // With MojoIpcz, connections can be made without a process handle to the
++      // client, as long as the client has a process handle to the server, so we
++      // don't return here.
++      INVALID_PROCESS_LOG(WARNING) << "Failed to open peer process";
++    }
+ #undef INVALID_PROCESS_LOG
++  }
+ 
+   if (is_isolated) {
+     // Create isolated connection.
+diff --git a/content/browser/service_host/utility_process_host_browsertest.cc b/content/browser/service_host/utility_process_host_browsertest.cc
+index 14935935db051..1fbba3eb2ec63 100644
+--- a/content/browser/service_host/utility_process_host_browsertest.cc
++++ b/content/browser/service_host/utility_process_host_browsertest.cc
+@@ -38,6 +38,7 @@
+ #include "content/public/test/content_browser_test.h"
+ #include "content/public/test/content_browser_test_utils.h"
+ #include "content/public/test/test_service.mojom.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ 
+ #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+@@ -153,7 +154,8 @@ class UtilityProcessHostBrowserTest : public BrowserChildProcessObserver,
+   void RunSharedMemoryHandleTest() {
+     DCHECK_CURRENTLY_ON(BrowserThread::UI);
+     // Verify that shared memory handles can be transferred to and from the
+-    // elevated process.
++    // elevated process. This is only supported with MojoIpcz enabled.
++    DCHECK(mojo::core::IsMojoIpczEnabled());
+     auto region = base::WritableSharedMemoryRegion::Create(kTestMessage.size());
+     auto mapping = region.Map();
+     mapping.GetMemoryAsSpan<char>().copy_from(kTestMessage);
+@@ -489,8 +491,12 @@ IN_PROC_BROWSER_TEST_F(UtilityProcessHostBrowserTest, LaunchElevatedProcess) {
+           .WithSandboxType(
+               sandbox::mojom::Sandbox::kNoSandboxAndElevatedPrivileges)
+           .Pass(),
+-      base::BindOnce(&UtilityProcessHostBrowserTest::RunSharedMemoryHandleTest,
+-                     base::Unretained(this)));
++      mojo::core::IsMojoIpczEnabled()
++          ? base::BindOnce(
++                &UtilityProcessHostBrowserTest::RunSharedMemoryHandleTest,
++                base::Unretained(this))
++          : base::BindOnce(&UtilityProcessHostBrowserTest::RunBasicPingPongTest,
++                           base::Unretained(this)));
+ }
+ 
+ // Disabled because currently this causes a WER dialog to appear.
+diff --git a/mojo/core/core_ipcz_test.cc b/mojo/core/core_ipcz_test.cc
+index ea6ae1614658d..f5f36f1f562ff 100644
+--- a/mojo/core/core_ipcz_test.cc
++++ b/mojo/core/core_ipcz_test.cc
+@@ -8,11 +8,14 @@
+ #include <cstring>
+ #include <string_view>
+ 
++#include "base/check.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/synchronization/waitable_event.h"
++#include "build/blink_buildflags.h"
+ #include "build/build_config.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/ipcz_api.h"
+ #include "mojo/core/ipcz_driver/transport.h"
+ #include "mojo/core/test/mojo_test_base.h"
+@@ -45,7 +48,11 @@ class CoreIpczTest : public test::MojoTestBase {
+   explicit CoreIpczTest(decltype(kForClient))
+       : CoreIpczTest(/*is_broker=*/false) {}
+ 
+-  ~CoreIpczTest() override = default;
++  ~CoreIpczTest() override {
++    if (!IsMojoIpczEnabled()) {
++      DestroyIpczNodeForProcess();
++    }
++  }
+ 
+   MojoMessageHandle CreateMessage(std::string_view contents,
+                                   base::span<MojoHandle> handles = {}) {
+@@ -196,7 +203,13 @@ class CoreIpczTest : public test::MojoTestBase {
+   }
+ 
+  private:
+-  explicit CoreIpczTest(bool is_broker) {}
++  explicit CoreIpczTest(bool is_broker) {
++    // If MojoIpcz is enabled, there's no need for the fixture to try to
++    // initialize it again.
++    if (!IsMojoIpczEnabled()) {
++      CHECK(InitializeIpczNodeForProcess({.is_broker = is_broker}));
++    }
++  }
+ 
+   const raw_ptr<const MojoSystemThunks2> mojo_{GetMojoIpczImpl()};
+ };
+@@ -722,5 +735,227 @@ TEST_F(CoreIpczTest, DataPipeTwoPhase) {
+   EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(c));
+ }
+ 
++#if BUILDFLAG(USE_BLINK)
++
++constexpr std::string_view kAttachmentName = "interesting pipe name";
++
++constexpr auto kTestMessages = std::to_array<std::string_view>({
++    "hello hello",
++    "i don't know why you say goodbye",
++    "actually nvm i do",
++    "lol bye",
++});
++
++DEFINE_TEST_CLIENT_TEST_WITH_PIPE(InvitationSingleAttachmentClient,
++                                  CoreIpczTestClient,
++                                  h) {
++  InvitationDetails details;
++  ReceiveInvitationTransport(h, details);
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
++
++  MojoHandle invitation;
++  EXPECT_EQ(MOJO_RESULT_OK,
++            mojo().AcceptInvitation(&details.endpoint, nullptr, &invitation));
++
++  MojoHandle new_pipe;
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().ExtractMessagePipeFromInvitation(
++                                invitation, kAttachmentName.data(),
++                                kAttachmentName.size(), nullptr, &new_pipe));
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(invitation));
++
++  WriteToMessagePipe(new_pipe, kTestMessages[3]);
++  EXPECT_EQ(kTestMessages[0], ReadFromMessagePipe(new_pipe));
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(new_pipe));
++}
++
++TEST_F(CoreIpczTest, InvitationSingleAttachment) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This is does not work with the MojoIpcz feature enabled, "
++                 << "since its setup conflicts with normal Mojo initialization "
++                 << "in that case. It is also redundant in that case since "
++                 << "various invitation unittests cover the same code paths.";
++  }
++
++  RunTestClientWithController(
++      "InvitationSingleAttachmentClient", [&](ClientController& c) {
++        InvitationDetails details;
++        CreateAndShareInvitationTransport(c.pipe(), c.process(), details);
++
++        MojoHandle new_pipe;
++        MojoHandle invitation;
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  mojo().CreateInvitation(nullptr, &invitation));
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  mojo().AttachMessagePipeToInvitation(
++                      invitation, kAttachmentName.data(),
++                      kAttachmentName.size(), nullptr, &new_pipe));
++        EXPECT_EQ(MOJO_RESULT_OK, mojo().SendInvitation(
++                                      invitation, &details.process,
++                                      &details.endpoint, nullptr, 0, nullptr));
++        EXPECT_EQ(kTestMessages[3], ReadFromMessagePipe(new_pipe));
++        WriteToMessagePipe(new_pipe, kTestMessages[0]);
++        EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(new_pipe));
++      });
++}
++
++DEFINE_TEST_CLIENT_TEST_WITH_PIPE(InvitationMultipleAttachmentsClient,
++                                  CoreIpczTestClient,
++                                  h) {
++  InvitationDetails details;
++  ReceiveInvitationTransport(h, details);
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
++
++  MojoHandle invitation;
++  EXPECT_EQ(MOJO_RESULT_OK,
++            mojo().AcceptInvitation(&details.endpoint, nullptr, &invitation));
++
++  for (uint32_t i = 0; i < std::size(kTestMessages); ++i) {
++    MojoHandle pipe;
++    EXPECT_EQ(MOJO_RESULT_OK, mojo().ExtractMessagePipeFromInvitation(
++                                  invitation, &i, sizeof(i), nullptr, &pipe));
++    WriteToMessagePipe(pipe, kTestMessages[i]);
++    EXPECT_EQ(kTestMessages[i], ReadFromMessagePipe(pipe));
++    EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(pipe));
++  }
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(invitation));
++}
++
++TEST_F(CoreIpczTest, InvitationMultipleAttachments) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This is does not work with the MojoIpcz feature enabled, "
++                 << "since its setup conflicts with normal Mojo initialization "
++                 << "in that case. It is also redundant in that case since "
++                 << "various invitation unittests cover the same code paths.";
++  }
++
++  RunTestClientWithController(
++      "InvitationMultipleAttachmentsClient", [&](ClientController& c) {
++        InvitationDetails details;
++        CreateAndShareInvitationTransport(c.pipe(), c.process(), details);
++
++        MojoHandle invitation;
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  mojo().CreateInvitation(nullptr, &invitation));
++
++        std::array<MojoHandle, std::size(kTestMessages)> pipes;
++        for (uint32_t i = 0; i < std::size(pipes); ++i) {
++          EXPECT_EQ(MOJO_RESULT_OK,
++                    mojo().AttachMessagePipeToInvitation(
++                        invitation, &i, sizeof(i), nullptr, &pipes[i]));
++        }
++        EXPECT_EQ(MOJO_RESULT_OK, mojo().SendInvitation(
++                                      invitation, &details.process,
++                                      &details.endpoint, nullptr, 0, nullptr));
++
++        for (size_t i = 0; i < std::size(pipes); ++i) {
++          EXPECT_EQ(kTestMessages[i], ReadFromMessagePipe(pipes[i]));
++          WriteToMessagePipe(pipes[i], kTestMessages[i]);
++          EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(pipes[i]));
++        }
++      });
++}
++
++constexpr std::string_view kDataPipeMessage = "hello, world!";
++constexpr size_t kDataPipeCapacity = 8;
++static_assert(kDataPipeCapacity < kDataPipeMessage.size(),
++              "Test requires a data pipe smaller than the test message.");
++
++DEFINE_TEST_CLIENT_TEST_WITH_PIPE(DataPipeTransferClient,
++                                  CoreIpczTestClient,
++                                  h) {
++  InvitationDetails details;
++  ReceiveInvitationTransport(h, details);
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
++
++  MojoHandle invitation;
++  EXPECT_EQ(MOJO_RESULT_OK,
++            mojo().AcceptInvitation(&details.endpoint, nullptr, &invitation));
++
++  MojoHandle new_pipe;
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().ExtractMessagePipeFromInvitation(
++                                invitation, kAttachmentName.data(),
++                                kAttachmentName.size(), nullptr, &new_pipe));
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(invitation));
++
++  MojoHandle consumer;
++  UNSAFE_TODO(EXPECT_EQ("", ReadFromMessagePipe(new_pipe, {&consumer, 1u})));
++  EXPECT_NE(MOJO_HANDLE_INVALID, consumer);
++
++  WaitForReadable(consumer);
++
++  const void* data;
++  uint32_t num_bytes;
++  EXPECT_EQ(MOJO_RESULT_OK,
++            mojo().BeginReadData(consumer, nullptr, &data, &num_bytes));
++  EXPECT_EQ(kDataPipeCapacity, num_bytes);
++  EXPECT_EQ(kDataPipeMessage.substr(0, kDataPipeCapacity),
++            std::string(static_cast<const char*>(data), num_bytes));
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().EndReadData(consumer, 0, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(consumer));
++  EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(new_pipe));
++}
++
++TEST_F(CoreIpczTest, DataPipeTransfer) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This is does not work with the MojoIpcz feature enabled, "
++                 << "since its setup conflicts with normal Mojo initialization "
++                 << "in that case. It is also redundant in that case since "
++                 << "various invitation unittests cover the same code paths.";
++  }
++
++  RunTestClientWithController(
++      "DataPipeTransferClient", [&](ClientController& c) {
++        InvitationDetails details;
++        CreateAndShareInvitationTransport(c.pipe(), c.process(), details);
++
++        MojoHandle new_pipe;
++        MojoHandle invitation;
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  mojo().CreateInvitation(nullptr, &invitation));
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  mojo().AttachMessagePipeToInvitation(
++                      invitation, kAttachmentName.data(),
++                      kAttachmentName.size(), nullptr, &new_pipe));
++        EXPECT_EQ(MOJO_RESULT_OK, mojo().SendInvitation(
++                                      invitation, &details.process,
++                                      &details.endpoint, nullptr, 0, nullptr));
++
++        const MojoCreateDataPipeOptions options = {
++            .struct_size = sizeof(options),
++            .element_num_bytes = 1,
++            .capacity_num_bytes = kDataPipeCapacity,
++        };
++        MojoHandle producer;
++        MojoHandle consumer;
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  mojo().CreateDataPipe(&options, &producer, &consumer));
++        UNSAFE_TODO(EXPECT_EQ(
++            MOJO_RESULT_OK,
++            mojo().WriteMessage(new_pipe, CreateMessage("", {&consumer, 1u}),
++                                nullptr)));
++        EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(new_pipe));
++
++        // First attempt an oversized write, which should fail because this
++        // producer has a smaller capacity than required.
++        const MojoWriteDataOptions write_all = {
++            .struct_size = sizeof(options),
++            .flags = MOJO_WRITE_DATA_FLAG_ALL_OR_NONE,
++        };
++        uint32_t num_bytes = static_cast<uint32_t>(kDataPipeMessage.size());
++        EXPECT_EQ(MOJO_RESULT_OUT_OF_RANGE,
++                  mojo().WriteData(producer, kDataPipeMessage.data(),
++                                   &num_bytes, &write_all));
++
++        // Now let the write proceed with as much data as possible.
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  mojo().WriteData(producer, kDataPipeMessage.data(),
++                                   &num_bytes, nullptr));
++        EXPECT_EQ(kDataPipeCapacity, num_bytes);
++        EXPECT_EQ(MOJO_RESULT_OK, mojo().Close(producer));
++      });
++}
++
++#endif  // BUILDFLAG(USE_BLINK)
++
+ }  // namespace
+ }  // namespace mojo::core
+diff --git a/mojo/core/data_pipe_unittest.cc b/mojo/core/data_pipe_unittest.cc
+index 0be988d3982a7..a9710497f1696 100644
+--- a/mojo/core/data_pipe_unittest.cc
++++ b/mojo/core/data_pipe_unittest.cc
+@@ -21,6 +21,7 @@
+ #include "base/test/bind.h"
+ #include "base/test/task_environment.h"
+ #include "build/build_config.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/public/c/system/functions.h"
+ #include "mojo/public/c/system/message_pipe.h"
+@@ -47,6 +48,9 @@ const size_t kMultiprocessCapacity = 37;
+ const char kMultiprocessTestData[] = "hello i'm a string that is 36 bytes";
+ const int kMultiprocessMaxIter = 5;
+ 
++// Capacity that will cause data pipe creation to fail.
++constexpr size_t kOversizedCapacity = std::numeric_limits<uint32_t>::max();
++
+ // A timeout smaller than |TestTimeouts::tiny_timeout()|, as a |MojoDeadline|.
+ // Warning: This may lead to flakiness, but this is unavoidable if, e.g., you're
+ // trying to ensure that functions with timeouts are reasonably accurate. We
+@@ -1044,6 +1048,103 @@ TEST_F(DataPipeTest, AllOrNone) {
+   ASSERT_EQ(0u, num_bytes);
+ }
+ 
++// Tests that |ProducerWriteData()| and |ConsumerReadData()| writes and reads,
++// respectively, as much as possible, even if it may have to "wrap around" the
++// internal circular buffer. (Note that the two-phase write and read need not do
++// this.)
++TEST_F(DataPipeTest, WrapAround) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This test covers implementation details that are only "
++                 << "relevant with MojoIpcz disabled; namely that a data pipe "
++                 << "is backed by a circular ring buffer.";
++  }
++
++  std::array<unsigned char, 1000> test_data;
++  for (size_t i = 0; i < std::size(test_data); i++) {
++    test_data[i] = static_cast<unsigned char>(i);
++  }
++
++  const MojoCreateDataPipeOptions options = {
++      kSizeOfOptions,                   // |struct_size|.
++      MOJO_CREATE_DATA_PIPE_FLAG_NONE,  // |flags|.
++      1u,                               // |element_num_bytes|.
++      100u                              // |capacity_num_bytes|.
++  };
++
++  ASSERT_EQ(MOJO_RESULT_OK, Create(&options));
++  MojoHandleSignalsState hss;
++
++  // Write 20 bytes.
++  uint32_t num_bytes = 20u;
++  ASSERT_EQ(MOJO_RESULT_OK, WriteData(&test_data[0], &num_bytes, true));
++  ASSERT_EQ(20u, num_bytes);
++
++  // Wait for data.
++  ASSERT_EQ(MOJO_RESULT_OK,
++            WaitForSignals(consumer_, MOJO_HANDLE_SIGNAL_READABLE, &hss));
++  EXPECT_TRUE(hss.satisfied_signals & MOJO_HANDLE_SIGNAL_READABLE);
++  EXPECT_EQ(MOJO_HANDLE_SIGNAL_READABLE | MOJO_HANDLE_SIGNAL_PEER_CLOSED |
++                MOJO_HANDLE_SIGNAL_NEW_DATA_READABLE |
++                MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++            hss.satisfiable_signals);
++
++  // Read 10 bytes.
++  unsigned char read_buffer[1000] = {};
++  num_bytes = 10u;
++  ASSERT_EQ(MOJO_RESULT_OK, ReadData(read_buffer, &num_bytes, true));
++  ASSERT_EQ(10u, num_bytes);
++  UNSAFE_TODO(ASSERT_EQ(0, memcmp(read_buffer, &test_data[0], 10u)));
++
++  // Check that a two-phase write can now only write (at most) 80 bytes. (This
++  // checks an implementation detail; this behavior is not guaranteed.)
++  void* write_buffer_ptr = nullptr;
++  num_bytes = 0u;
++  ASSERT_EQ(MOJO_RESULT_OK, BeginWriteData(&write_buffer_ptr, &num_bytes));
++  EXPECT_TRUE(write_buffer_ptr);
++  ASSERT_EQ(80u, num_bytes);
++  ASSERT_EQ(MOJO_RESULT_OK, EndWriteData(0));
++
++  size_t total_num_bytes = 0;
++  while (total_num_bytes < 90) {
++    // Wait to write.
++    ASSERT_EQ(MOJO_RESULT_OK,
++              WaitForSignals(producer_, MOJO_HANDLE_SIGNAL_WRITABLE, &hss));
++    ASSERT_EQ(hss.satisfied_signals, MOJO_HANDLE_SIGNAL_WRITABLE);
++    ASSERT_EQ(hss.satisfiable_signals, MOJO_HANDLE_SIGNAL_WRITABLE |
++                                           MOJO_HANDLE_SIGNAL_PEER_CLOSED |
++                                           MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++
++    // Write as much as we can.
++    num_bytes = 100;
++    ASSERT_EQ(MOJO_RESULT_OK,
++              WriteData(&test_data[20 + total_num_bytes], &num_bytes, false));
++    total_num_bytes += num_bytes;
++  }
++
++  ASSERT_EQ(90u, total_num_bytes);
++
++  num_bytes = 0;
++  ASSERT_EQ(MOJO_RESULT_OK, QueryData(&num_bytes));
++  ASSERT_EQ(100u, num_bytes);
++
++  // Check that a two-phase read can now only read (at most) 90 bytes. (This
++  // checks an implementation detail; this behavior is not guaranteed.)
++  const void* read_buffer_ptr = nullptr;
++  num_bytes = 0;
++  ASSERT_EQ(MOJO_RESULT_OK, BeginReadData(&read_buffer_ptr, &num_bytes));
++  EXPECT_TRUE(read_buffer_ptr);
++  ASSERT_EQ(90u, num_bytes);
++  ASSERT_EQ(MOJO_RESULT_OK, EndReadData(0));
++
++  // Read as much as possible. We should read 100 bytes.
++  num_bytes =
++      static_cast<uint32_t>(std::size(read_buffer) * sizeof(read_buffer[0]));
++  UNSAFE_TODO(memset(read_buffer, 0, num_bytes));
++  ASSERT_EQ(MOJO_RESULT_OK, ReadData(read_buffer, &num_bytes));
++  ASSERT_EQ(100u, num_bytes);
++  UNSAFE_TODO(ASSERT_EQ(0, memcmp(read_buffer, &test_data[10], 100u)));
++}
++
+ // Tests the behavior of writing (simple and two-phase), closing the producer,
+ // then reading (simple and two-phase).
+ TEST_F(DataPipeTest, WriteCloseProducerRead) {
+@@ -1661,6 +1762,23 @@ bool ReadAllData(MojoHandle consumer,
+   return num_bytes == 0;
+ }
+ 
++TEST_F(DataPipeTest, CreateOversized) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "Data pipes do not allocate dedicated capacity when "
++                 << "MojoIpcz is enabled, so capacity limits are not enforced "
++                 << "and therefore cannot be tested.";
++  }
++
++  const MojoCreateDataPipeOptions options = {
++      kSizeOfOptions,                   // |struct_size|.
++      MOJO_CREATE_DATA_PIPE_FLAG_NONE,  // |flags|.
++      1,                                // |element_num_bytes|.
++      kOversizedCapacity,               // |capacity_num_bytes|.
++  };
++
++  ASSERT_EQ(MOJO_RESULT_RESOURCE_EXHAUSTED, Create(&options));
++}
++
+ #if BUILDFLAG(USE_BLINK)
+ 
+ constexpr size_t kNoSpuriousEvents_NumIterations = 1000;
+@@ -2084,6 +2202,40 @@ TEST_F(DataPipeTest, StatusChangeInTransit) {
+   });
+ }
+ 
++DEFINE_TEST_CLIENT_TEST_WITH_PIPE(CreateOversizedChild, DataPipeTest, h) {
++  const MojoCreateDataPipeOptions options = {
++      kSizeOfOptions,                   // |struct_size|.
++      MOJO_CREATE_DATA_PIPE_FLAG_NONE,  // |flags|.
++      1,                                // |element_num_bytes|.
++      kOversizedCapacity                // |capacity_num_bytes|.
++  };
++
++  MojoHandle p, c;
++  ASSERT_EQ(MOJO_RESULT_RESOURCE_EXHAUSTED,
++            MojoCreateDataPipe(&options, &p, &c));
++  WriteMessage(h, "success");
++
++  // Wait for a quit message.
++  EXPECT_EQ("quit", ReadMessage(h));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
++}
++
++TEST_F(DataPipeTest, CreateOversizedInChild) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "Data pipes do not allocate dedicated capacity when "
++                 << "MojoIpcz is enabled, so capacity limits are not enforced "
++                 << "and therefore cannot be tested.";
++  }
++
++  RunTestClient("CreateOversizedChild", [&](MojoHandle child) {
++    // Wait for the child to finish the test.
++    std::string expected_message = ReadMessage(child);
++    EXPECT_EQ("success", expected_message);
++
++    WriteMessage(child, "quit");
++  });
++}
++
+ // Helper to fill a data pipe with data up to a given total size, using chunked
+ // two-phase writes. Automatically waits when the pipe is full and resumes as
+ // capacity allows.
+diff --git a/mojo/core/embedder/embedder.cc b/mojo/core/embedder/embedder.cc
+index 74f9820330680..42993027e2a8e 100644
+--- a/mojo/core/embedder/embedder.cc
++++ b/mojo/core/embedder/embedder.cc
+@@ -11,6 +11,7 @@
+ #include "base/check.h"
+ #include "base/feature_list.h"
+ #include "base/memory/ref_counted.h"
++#include "base/notreached.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/task_runner.h"
+ #include "build/build_config.h"
+@@ -66,14 +67,18 @@ void Init(const Configuration& configuration) {
+ 
+   CHECK(!configuration.disable_ipcz);
+ 
+-  CHECK(InitializeIpczNodeForProcess({
+-      .is_broker = configuration.is_broker_process,
+-      .use_local_shared_memory_allocation =
+-          configuration.is_broker_process ||
+-          configuration.force_direct_shared_memory_allocation,
+-      .enable_memv2 = g_enable_memv2,
+-  }));
+-  MojoEmbedderSetSystemThunks(GetMojoIpczImpl());
++  if (IsMojoIpczEnabled()) {
++    CHECK(InitializeIpczNodeForProcess({
++        .is_broker = configuration.is_broker_process,
++        .use_local_shared_memory_allocation =
++            configuration.is_broker_process ||
++            configuration.force_direct_shared_memory_allocation,
++        .enable_memv2 = g_enable_memv2,
++    }));
++    MojoEmbedderSetSystemThunks(GetMojoIpczImpl());
++  } else {
++    NOTREACHED();
++  }
+ }
+ 
+ void Init() {
+@@ -81,14 +86,27 @@ void Init() {
+ }
+ 
+ void ShutDown() {
+-  DestroyIpczNodeForProcess();
++  if (IsMojoIpczEnabled()) {
++    DestroyIpczNodeForProcess();
++  } else {
++    NOTREACHED();
++  }
+ }
+ 
+ scoped_refptr<base::SingleThreadTaskRunner> GetIOTaskRunner() {
+-  return ipcz_driver::Transport::GetIOTaskRunner();
++  if (IsMojoIpczEnabled()) {
++    return ipcz_driver::Transport::GetIOTaskRunner();
++  } else {
++    NOTREACHED();
++  }
++}
++
++bool IsMojoIpczEnabled() {
++  return true;
+ }
+ 
+ void InstallMojoIpczBaseSharedMemoryHooks() {
++  DCHECK(IsMojoIpczEnabled());
+   ipcz_driver::BaseSharedMemoryService::InstallHooks();
+ }
+ 
+diff --git a/mojo/core/embedder/embedder.h b/mojo/core/embedder/embedder.h
+index 618b3f8888a93..6b5c4c3685310 100644
+--- a/mojo/core/embedder/embedder.h
++++ b/mojo/core/embedder/embedder.h
+@@ -50,15 +50,19 @@ scoped_refptr<base::SingleThreadTaskRunner> GetIOTaskRunner();
+ // base::Features inside of Mojo.
+ COMPONENT_EXPORT(MOJO_CORE_EMBEDDER) void InitFeatures();
+ 
++// Indicates whether the ipcz-based Mojo implementation is enabled. This is
++// always true: non-ipcz Mojo Core is no longer supported.
++COMPONENT_EXPORT(MOJO_CORE_EMBEDDER) bool IsMojoIpczEnabled();
++
+ // Installs base shared shared memory allocation hooks appropriate for use in
+-// a sandboxed environment on platforms where such processes cannot allocate
+-// shared memory directly through the OS. Must be called before any shared
+-// memory allocation is attempted in the process.
++// a sandboxed environment when MojoIpcz is enabled on platforms where such
++// processes cannot allocate shared memory directly through the OS. Must be
++// called before any shared memory allocation is attempted in the process.
+ COMPONENT_EXPORT(MOJO_CORE_EMBEDDER)
+ void InstallMojoIpczBaseSharedMemoryHooks();
+ 
+ // These functions expose the IpczAPI and IpczDriver structures used internally
+-// by the Mojo Core implementation.
++// by the Mojo Core implementation when MojoIpcz is enabled.
+ COMPONENT_EXPORT(MOJO_CORE_EMBEDDER) const IpczAPI& GetIpczAPIForMojo();
+ COMPONENT_EXPORT(MOJO_CORE_EMBEDDER) const IpczDriver& GetIpczDriverForMojo();
+ 
+diff --git a/mojo/core/embedder/scoped_ipc_support.cc b/mojo/core/embedder/scoped_ipc_support.cc
+index 9554bfff62502..087a590dea482 100644
+--- a/mojo/core/embedder/scoped_ipc_support.cc
++++ b/mojo/core/embedder/scoped_ipc_support.cc
+@@ -4,7 +4,9 @@
+ 
+ #include "mojo/core/embedder/scoped_ipc_support.h"
+ 
++#include "base/notreached.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/ipcz_driver/transport.h"
+ 
+ namespace mojo::core {
+@@ -17,9 +19,15 @@ ScopedIPCSupport::ScopedIPCSupport(
+ }
+ 
+ ScopedIPCSupport::~ScopedIPCSupport() {
+-  // No extra shutdown required for mojo-ipcz.
+-  // Suppress -Wunused-private-field warning.
+-  (void)shutdown_policy_;
++  if (IsMojoIpczEnabled()) {
++    // No extra shutdown required for mojo-ipcz.
++    // Suppress -Wunused-private-field warning, to not leak the buildflags
++    // include into the header.
++    (void)shutdown_policy_;
++    return;
++  }
++
++  NOTREACHED();
+ }
+ 
+ }  // namespace mojo::core
+diff --git a/mojo/core/embedder_unittest.cc b/mojo/core/embedder_unittest.cc
+index 9c2d35ff3779a..acfff0de66724 100644
+--- a/mojo/core/embedder_unittest.cc
++++ b/mojo/core/embedder_unittest.cc
+@@ -19,6 +19,7 @@
+ #include "base/memory/read_only_shared_memory_region.h"
+ #include "base/memory/unsafe_shared_memory_region.h"
+ #include "base/memory/writable_shared_memory_region.h"
++#include "base/notreached.h"
+ #include "base/path_service.h"
+ #include "base/rand_util.h"
+ #include "base/run_loop.h"
+@@ -41,15 +42,25 @@ namespace {
+ 
+ template <typename T>
+ MojoResult CreateSharedBufferFromRegion(T&& region, MojoHandle* handle) {
+-  *handle = ipcz_driver::SharedBuffer::Box(
+-      ipcz_driver::SharedBuffer::MakeForRegion(std::move(region)));
+-  return MOJO_RESULT_OK;
++  if (IsMojoIpczEnabled()) {
++    *handle = ipcz_driver::SharedBuffer::Box(
++        ipcz_driver::SharedBuffer::MakeForRegion(std::move(region)));
++    return MOJO_RESULT_OK;
++  }
++
++  NOTREACHED();
+ }
+ 
+ template <typename T>
+ MojoResult ExtractRegionFromSharedBuffer(MojoHandle handle, T* region) {
+-  base::subtle::PlatformSharedMemoryRegion platform_region =
+-      std::move(ipcz_driver::SharedBuffer::Unbox(handle)->region());
++  base::subtle::PlatformSharedMemoryRegion platform_region;
++  if (IsMojoIpczEnabled()) {
++    platform_region =
++        std::move(ipcz_driver::SharedBuffer::Unbox(handle)->region());
++  } else {
++    NOTREACHED();
++  }
++
+   *region = T::Deserialize(std::move(platform_region));
+   return MOJO_RESULT_OK;
+ }
+diff --git a/mojo/core/invitation_unittest.cc b/mojo/core/invitation_unittest.cc
+index 14c314a721839..c4fca210a429e 100644
+--- a/mojo/core/invitation_unittest.cc
++++ b/mojo/core/invitation_unittest.cc
+@@ -58,6 +58,7 @@ namespace mojo {
+ namespace core {
+ namespace {
+ 
++const char kSecondaryChannelHandleSwitch[] = "test-secondary-channel-handle";
+ 
+ // TODO(crbug.com/40900578): Flaky on Tsan.
+ #if defined(THREAD_SANITIZER)
+@@ -683,6 +684,144 @@ DEFINE_TEST_CLIENT(SendIsolatedInvitationClient) {
+   ASSERT_EQ(MOJO_RESULT_OK, MojoClose(primordial_pipe));
+ }
+ 
++TEST_F(MAYBE_InvitationTest, SendMultipleIsolatedInvitations) {
++  if (mojo::core::IsMojoIpczEnabled()) {
++    // This feature is not particularly useful in a world where isolated
++    // connections are only supported between broker nodes.
++    GTEST_SKIP() << "MojoIpcz does not support multiple isolated invitations "
++                 << "between the same two nodes.";
++  }
++
++  // We send a secondary transport to the client process so we can send a second
++  // isolated invitation.
++  base::CommandLine command_line =
++      base::GetMultiProcessTestChildBaseCommandLine();
++  PlatformChannel secondary_transport;
++  base::LaunchOptions options;
++  PrepareToPassRemoteEndpoint(&secondary_transport, &options, &command_line,
++                              kSecondaryChannelHandleSwitch);
++
++  MojoHandle primordial_pipe;
++  base::Process child_process = LaunchChildTestClient(
++      "SendMultipleIsolatedInvitationsClient",
++      base::span_from_ref(primordial_pipe), MOJO_SEND_INVITATION_FLAG_ISOLATED,
++      nullptr, 0, &command_line, &options);
++  secondary_transport.RemoteProcessLaunchAttempted();
++
++  WriteMessage(primordial_pipe, kTestMessage1);
++  EXPECT_EQ(MOJO_RESULT_OK,
++            WaitForSignals(primordial_pipe, MOJO_HANDLE_SIGNAL_READABLE));
++  EXPECT_EQ(kTestMessage3, ReadMessage(primordial_pipe));
++
++  // Send another invitation over our seconary pipe. This should trample the
++  // original connection, breaking the first pipe.
++  MojoHandle new_pipe;
++  SendInvitationToClient(
++      secondary_transport.TakeLocalEndpoint().TakePlatformHandle(),
++      child_process.Handle(), base::span_from_ref(new_pipe),
++      MOJO_SEND_INVITATION_FLAG_ISOLATED, nullptr, 0, "");
++  WaitForSignals(primordial_pipe, MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(primordial_pipe));
++
++  // And the new pipe should be working.
++  WriteMessage(new_pipe, kTestMessage1);
++  EXPECT_EQ(MOJO_RESULT_OK,
++            WaitForSignals(new_pipe, MOJO_HANDLE_SIGNAL_READABLE));
++  EXPECT_EQ(kTestMessage3, ReadMessage(new_pipe));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(new_pipe));
++
++  WaitForProcessToTerminate(child_process);
++}
++
++DEFINE_TEST_CLIENT(SendMultipleIsolatedInvitationsClient) {
++  MojoHandle invitation =
++      AcceptInvitation(MOJO_ACCEPT_INVITATION_FLAG_ISOLATED);
++  MojoHandle primordial_pipe = ExtractPipeFromInvitation(invitation);
++
++  WaitForSignals(primordial_pipe, MOJO_HANDLE_SIGNAL_READABLE);
++  ASSERT_EQ(kTestMessage1, ReadMessage(primordial_pipe));
++  WriteMessage(primordial_pipe, kTestMessage3);
++
++  // The above pipe should get closed once we accept a new invitation.
++  invitation = AcceptInvitation(MOJO_ACCEPT_INVITATION_FLAG_ISOLATED,
++                                kSecondaryChannelHandleSwitch);
++  WaitForSignals(primordial_pipe, MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(primordial_pipe));
++
++  primordial_pipe = MOJO_HANDLE_INVALID;
++  const uint32_t pipe_name = 0;
++  ASSERT_EQ(MOJO_RESULT_OK,
++            MojoExtractMessagePipeFromInvitation(invitation, &pipe_name, 4,
++                                                 nullptr, &primordial_pipe));
++  ASSERT_EQ(MOJO_RESULT_OK, MojoClose(invitation));
++  WaitForSignals(primordial_pipe, MOJO_HANDLE_SIGNAL_READABLE);
++  ASSERT_EQ(kTestMessage1, ReadMessage(primordial_pipe));
++  WriteMessage(primordial_pipe, kTestMessage3);
++  WaitForSignals(primordial_pipe, MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++
++  ASSERT_EQ(MOJO_RESULT_OK, MojoClose(primordial_pipe));
++}
++
++TEST_F(MAYBE_InvitationTest, SendIsolatedInvitationWithDuplicateName) {
++  if (mojo::core::IsMojoIpczEnabled()) {
++    // This feature is not particularly useful in a world where isolated
++    // connections are only supported between broker nodes.
++    GTEST_SKIP() << "MojoIpcz does not support multiple isolated invitations "
++                 << "between the same two nodes.";
++  }
++
++  PlatformChannel channel1;
++  PlatformChannel channel2;
++  MojoHandle pipe0, pipe1;
++  const char kConnectionName[] = "there can be only one!";
++  SendInvitationToClient(channel1.TakeLocalEndpoint().TakePlatformHandle(),
++                         base::kNullProcessHandle, base::span_from_ref(pipe0),
++                         MOJO_SEND_INVITATION_FLAG_ISOLATED, nullptr, 0,
++                         kConnectionName);
++
++  // Send another invitation with the same connection name. |pipe0| should be
++  // disconnected as the first invitation's connection is torn down.
++  SendInvitationToClient(channel2.TakeLocalEndpoint().TakePlatformHandle(),
++                         base::kNullProcessHandle, base::span_from_ref(pipe1),
++                         MOJO_SEND_INVITATION_FLAG_ISOLATED, nullptr, 0,
++                         kConnectionName);
++
++  WaitForSignals(pipe0, MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(pipe0));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(pipe1));
++}
++
++// TODO(crbug.com/504855187): Flaky due to a race condition in isolated
++// self-connections where MergePortEvent bypasses the channel and arrives before
++// OnAcceptPeer updates the expected peer name. Disabled on ChromeOS devices due
++// to high retry cost on cros_test_platform. Preserves coverage on
++// linux-chromeos-chrome, linux-chromeos-rel, and etc.
++#if BUILDFLAG(IS_CHROMEOS_DEVICE)
++#define MAYBE_SendIsolatedInvitationToSelf DISABLED_SendIsolatedInvitationToSelf
++#else
++#define MAYBE_SendIsolatedInvitationToSelf SendIsolatedInvitationToSelf
++#endif
++TEST_F(MAYBE_InvitationTest, MAYBE_SendIsolatedInvitationToSelf) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "MojoIpcz does not support nodes sending isolated "
++                 << "invitations to themselves.";
++  }
++
++  PlatformChannel channel;
++  MojoHandle pipe0, pipe1;
++  SendInvitationToClient(channel.TakeLocalEndpoint().TakePlatformHandle(),
++                         base::kNullProcessHandle, base::span_from_ref(pipe0),
++                         MOJO_SEND_INVITATION_FLAG_ISOLATED, nullptr, 0, "");
++  SendInvitationToClient(channel.TakeRemoteEndpoint().TakePlatformHandle(),
++                         base::kNullProcessHandle, base::span_from_ref(pipe1),
++                         MOJO_SEND_INVITATION_FLAG_ISOLATED, nullptr, 0, "");
++
++  WriteMessage(pipe0, kTestMessage1);
++  EXPECT_EQ(kTestMessage1, ReadMessage(pipe1));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(pipe0));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(pipe1));
++}
++
+ TEST_F(MAYBE_InvitationTest, BrokenInvitationTransportBreaksAttachedPipe) {
+   MojoHandle primordial_pipe;
+   base::Process child_process = LaunchChildTestClient(
+@@ -793,6 +932,12 @@ TEST_F(MAYBE_InvitationTest, MultiBrokerNetwork) {
+   // can communicate with brokers other than its own and can transmit platform
+   // handles between them.
+ 
++  if (!mojo::core::IsMojoIpczEnabled()) {
++    // Mutli-broker networks are only supported with ipcz enabled.
++    GTEST_SKIP() << "This tests functionality which is only supported when "
++                 << "MojoIpcz is enabled, but MojoIpcz is not enabled.";
++  }
++
+   ASSERT_TRUE(mojo::core::GetIpczNodeOptions().is_broker);
+ 
+   // First we launch a second broker and connect to it.
+@@ -891,6 +1036,10 @@ DEFINE_TEST_CLIENT(MultiBrokerNetworkClient) {
+ 
+ #if BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_WIN)
+ TEST_F(MAYBE_InvitationTest, NoLeakOnFailedSend) {
++  if (!mojo::core::IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This test is specific to the MojoIpcz driver.";
++  }
++
+   // Helper lambda to retrieve the number of open handles.
+   auto get_open_handle_count = []() {
+ #if BUILDFLAG(IS_WIN)
+diff --git a/mojo/core/message_pipe_unittest.cc b/mojo/core/message_pipe_unittest.cc
+index 7ee24fbcd0407..aa8c3d941b481 100644
+--- a/mojo/core/message_pipe_unittest.cc
++++ b/mojo/core/message_pipe_unittest.cc
+@@ -474,6 +474,41 @@ TEST_F(FuseMessagePipeTest, NoFuseSelf) {
+             MojoFuseMessagePipes(a, b, nullptr));
+ }
+ 
++TEST_F(FuseMessagePipeTest, FuseInvalidArguments) {
++  if (IsMojoIpczEnabled()) {
++    // The MergePortals() API which supports MojoFuseMessagePipes() with
++    // MojoIpcz enabled is simpler and has fewer side effects on failure. Making
++    // this test pass would require additional complexity with no real value to
++    // production code.
++    GTEST_SKIP() << "Not relevant to MojoIpcz";
++  }
++
++  MojoHandle a, b, c, d;
++  CreateMessagePipe(&a, &b);
++  CreateMessagePipe(&c, &d);
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
++
++  // Can't fuse an invalid handle.
++  EXPECT_EQ(MOJO_RESULT_INVALID_ARGUMENT, MojoFuseMessagePipes(b, c, nullptr));
++
++  // Handle c should be closed.
++  EXPECT_EQ(MOJO_RESULT_INVALID_ARGUMENT, MojoClose(c));
++
++  // Can't fuse a non-message pipe handle.
++  MojoHandle e, f;
++  CreateDataPipe(&e, &f, 16);
++
++  EXPECT_EQ(MOJO_RESULT_INVALID_ARGUMENT, MojoFuseMessagePipes(e, d, nullptr));
++
++  // Handles d and e should be closed.
++  EXPECT_EQ(MOJO_RESULT_INVALID_ARGUMENT, MojoClose(d));
++  EXPECT_EQ(MOJO_RESULT_INVALID_ARGUMENT, MojoClose(e));
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(f));
++}
++
+ TEST_F(FuseMessagePipeTest, FuseAfterPeerClosure) {
+   // Test that peer closure prior to fusion can still be detected after fusion.
+ 
+diff --git a/mojo/core/message_unittest.cc b/mojo/core/message_unittest.cc
+index 28a0d41778647..3b26485a6f84a 100644
+--- a/mojo/core/message_unittest.cc
++++ b/mojo/core/message_unittest.cc
+@@ -18,6 +18,7 @@
+ #include "base/rand_util.h"
+ #include "build/blink_buildflags.h"
+ #include "build/build_config.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/ipcz_driver/mojo_message.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/public/cpp/platform/platform_channel.h"
+@@ -30,6 +31,8 @@ namespace {
+ 
+ using MessageTest = test::MojoTestBase;
+ 
++constexpr uint32_t kLegacyMinimumPayloadBufferSize = 0;
++
+ // Helper class which provides a base implementation for an unserialized user
+ // message context and helpers to go between these objects and opaque message
+ // handles.
+@@ -709,7 +712,9 @@ TEST_F(MessageTest, PreallocateEnoughMemoryForMessage) {
+   // because if we use a total payload size smaller than that, the buffer may
+   // not be reallocated when we expect it to (since at least
+   // `kMinimumBufferSize` bytes of capacity will be allocated).
+-  const size_t kMinimumBufferSize = ipcz_driver::MojoMessage::kMinBufferSize;
++  const size_t kMinimumBufferSize =
++      IsMojoIpczEnabled() ? ipcz_driver::MojoMessage::kMinBufferSize
++                          : kLegacyMinimumPayloadBufferSize;
+   const std::string kMsgPart1(kMinimumBufferSize / 2, 'x');
+   const std::string kMsgPart2(kMinimumBufferSize, 'y');
+   const std::string kCombined = kMsgPart1 + kMsgPart2;
+@@ -776,7 +781,9 @@ TEST_F(MessageTest, PreallocateNotEnoughMemoryForMessage) {
+   // because if we use a total payload size smaller than that, the buffer may
+   // not be reallocated when we expect it to (since at least
+   // `kMinimumBufferSize` bytes of capacity will be allocated).
+-  const size_t kMinimumBufferSize = ipcz_driver::MojoMessage::kMinBufferSize;
++  const size_t kMinimumBufferSize =
++      IsMojoIpczEnabled() ? ipcz_driver::MojoMessage::kMinBufferSize
++                          : kLegacyMinimumPayloadBufferSize;
+   const std::string kMsgPart1(kMinimumBufferSize / 2, 'x');
+   const std::string kMsgPart2(kMinimumBufferSize, 'y');
+   const std::string kCombined = kMsgPart1 + kMsgPart2;
+diff --git a/mojo/core/multiprocess_message_pipe_unittest.cc b/mojo/core/multiprocess_message_pipe_unittest.cc
+index e77839e009cc8..bfc2cfce78f8f 100644
+--- a/mojo/core/multiprocess_message_pipe_unittest.cc
++++ b/mojo/core/multiprocess_message_pipe_unittest.cc
+@@ -25,6 +25,7 @@
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/test/task_environment.h"
+ #include "build/build_config.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/handle_signals_state.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/core/test/test_utils.h"
+@@ -1372,6 +1373,14 @@ DEFINE_TEST_CLIENT_TEST_WITH_PIPE(SpotaneouslyDyingProcess,
+   VerifyEcho(parent, "!");
+   WriteMessageWithHandles(parent, "receiver", &receiver, 1);
+ 
++  if (!IsMojoIpczEnabled()) {
++    // Wait for the pipe to actually appear as remote. Before this happens, it's
++    // possible for message transmission to be deferred to the IO thread, and
++    // sudden termination might preempt that work. Note that this is unnecessary
++    // (and PEER_REMOTE signals are unsupported anyway) with MojoIpcz.
++    WaitForSignals(sender, MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++  }
++
+   WriteMessage(sender, "ok");
+   MojoClose(sender);
+   MojoClose(parent);
+diff --git a/mojo/core/shared_buffer_unittest.cc b/mojo/core/shared_buffer_unittest.cc
+index 535ad02df54f4..2643d9cf23b0a 100644
+--- a/mojo/core/shared_buffer_unittest.cc
++++ b/mojo/core/shared_buffer_unittest.cc
+@@ -6,12 +6,15 @@
+ 
+ #include <string.h>
+ 
++#include <array>
+ #include <string>
+ #include <utility>
+ 
+ #include "base/memory/platform_shared_memory_region.h"
++#include "base/notreached.h"
+ #include "build/blink_buildflags.h"
+ #include "build/build_config.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/public/c/system/types.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+@@ -195,6 +198,82 @@ TEST_F(SharedBufferTest, MAYBE_PassSharedBufferFromChildToChild) {
+   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
+ }
+ 
++DEFINE_TEST_CLIENT_TEST_WITH_PIPE(CreateAndPassBufferParent,
++                                  SharedBufferTest,
++                                  parent) {
++  RunTestClient("CreateAndPassBuffer", [&](MojoHandle child) {
++    // Read a pipe from the parent and forward it to our child.
++    MojoHandle pipe;
++    std::string message = ReadMessageWithHandles(parent, &pipe, 1);
++
++    WriteMessageWithHandles(child, message, &pipe, 1);
++
++    // Read a buffer handle from the child and pass it back to the parent.
++    MojoHandle buffer;
++    EXPECT_EQ("", ReadMessageWithHandles(child, &buffer, 1));
++    WriteMessageWithHandles(parent, "", &buffer, 1);
++
++    EXPECT_EQ("quit", ReadMessage(parent));
++    WriteMessage(child, "quit");
++  });
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(parent));
++}
++
++DEFINE_TEST_CLIENT_TEST_WITH_PIPE(ReceiveAndEditBufferParent,
++                                  SharedBufferTest,
++                                  parent) {
++  RunTestClient("ReceiveAndEditBuffer", [&](MojoHandle child) {
++    // Read a pipe from the parent and forward it to our child.
++    MojoHandle pipe;
++    std::string message = ReadMessageWithHandles(parent, &pipe, 1);
++    WriteMessageWithHandles(child, message, &pipe, 1);
++
++    EXPECT_EQ("quit", ReadMessage(parent));
++    WriteMessage(child, "quit");
++  });
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(parent));
++}
++
++#if BUILDFLAG(IS_ANDROID)
++// Android multi-process tests are not executing the new process. This is flaky.
++#define MAYBE_PassHandleBetweenCousins DISABLED_PassHandleBetweenCousins
++#else
++#define MAYBE_PassHandleBetweenCousins PassHandleBetweenCousins
++#endif
++TEST_F(SharedBufferTest, MAYBE_PassHandleBetweenCousins) {
++  if (IsMojoIpczEnabled()) {
++    // TODO(crbug.com/40058840): This test relies on Mojo invitations
++    // between non-broker nodes, which is not currently supported by MojoIpcz.
++    GTEST_SKIP() << "Invitations between non-brokers are not yet supported "
++                 << "by MojoIpcz.";
++  }
++
++  const std::string message = "hello";
++
++  // Spawn two children who will each spawn their own child. Make sure the
++  // grandchildren (cousins to each other) can pass platform handles.
++  MojoHandle b;
++  RunTestClient("CreateAndPassBufferParent", [&](MojoHandle child1) {
++    RunTestClient("ReceiveAndEditBufferParent", [&](MojoHandle child2) {
++      std::array<MojoHandle, 2> pipe;
++      CreateMessagePipe(&pipe[0], &pipe[1]);
++
++      WriteMessageWithHandles(child1, message, &pipe[0], 1);
++      WriteMessageWithHandles(child2, message, &pipe[1], 1);
++
++      // Receive the buffer back from the first child.
++      ReadMessageWithHandles(child1, &b, 1);
++
++      WriteMessage(child2, "quit");
++    });
++    WriteMessage(child1, "quit");
++  });
++
++  // The second grandchild should have written this message.
++  ExpectBufferContents(b, 0, message);
++  MojoClose(b);
++}
++
+ DEFINE_TEST_CLIENT_TEST_WITH_PIPE(ReadAndMapWriteSharedBuffer,
+                                   SharedBufferTest,
+                                   h) {
+@@ -206,9 +285,13 @@ DEFINE_TEST_CLIENT_TEST_WITH_PIPE(ReadAndMapWriteSharedBuffer,
+   ExpectBufferContents(b, 0, "hello");
+ 
+   // Extract the shared memory handle and verify that it is read-only.
+-  auto buffer = ipcz_driver::SharedBuffer::Unbox(b);
+-  EXPECT_EQ(buffer->region().GetMode(),
+-            base::subtle::PlatformSharedMemoryRegion::Mode::kReadOnly);
++  if (IsMojoIpczEnabled()) {
++    auto buffer = ipcz_driver::SharedBuffer::Unbox(b);
++    EXPECT_EQ(buffer->region().GetMode(),
++              base::subtle::PlatformSharedMemoryRegion::Mode::kReadOnly);
++  } else {
++    NOTREACHED();
++  }
+ 
+   WriteMessage(h, "ok");
+   EXPECT_EQ("quit", ReadMessage(h));
+@@ -269,9 +352,13 @@ TEST_F(SharedBufferTest, MAYBE_CreateAndPassFromChildReadOnlyBuffer) {
+     ExpectBufferContents(b, 0, "hello");
+ 
+     // Extract the shared memory handle and verify that it is read-only.
+-    auto buffer = ipcz_driver::SharedBuffer::Unbox(b);
+-    EXPECT_EQ(buffer->region().GetMode(),
+-              base::subtle::PlatformSharedMemoryRegion::Mode::kReadOnly);
++    if (IsMojoIpczEnabled()) {
++      auto buffer = ipcz_driver::SharedBuffer::Unbox(b);
++      EXPECT_EQ(buffer->region().GetMode(),
++                base::subtle::PlatformSharedMemoryRegion::Mode::kReadOnly);
++    } else {
++      NOTREACHED();
++    }
+ 
+     EXPECT_EQ("ok", ReadMessage(h));
+     WriteMessage(h, "quit");
+diff --git a/mojo/core/signals_unittest.cc b/mojo/core/signals_unittest.cc
+index d2427fb19cf1e..55af00c0be267 100644
+--- a/mojo/core/signals_unittest.cc
++++ b/mojo/core/signals_unittest.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "build/build_config.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/public/c/system/buffer.h"
+ #include "mojo/public/c/system/data_pipe.h"
+@@ -133,6 +135,99 @@ TEST_F(SignalsTest, LocalPeers) {
+   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
+ }
+ 
++#if !BUILDFLAG(IS_IOS)
++
++TEST_F(SignalsTest, RemotePeers) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "Peer remoteness tracking is not implemented by MojoIpcz.";
++  }
++
++  MojoHandleSignalsState state = {0, 0};
++  MojoHandle a, b;
++  CreateMessagePipe(&a, &b);
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoQueryHandleSignalsState(a, &state));
++  EXPECT_TRUE(state.satisfiable_signals & MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++  EXPECT_FALSE(state.satisfied_signals & MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++  EXPECT_EQ(MOJO_RESULT_OK,
++            WaitForSignals(a, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_UNSATISFIED));
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoQueryHandleSignalsState(b, &state));
++  EXPECT_TRUE(state.satisfiable_signals & MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++  EXPECT_FALSE(state.satisfied_signals & MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++  EXPECT_EQ(MOJO_RESULT_OK,
++            WaitForSignals(b, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_UNSATISFIED));
++
++  RunTestClient("RemotePeersClient", [&](MojoHandle h) {
++    // The bootstrap pipe should eventually signal remoteness.
++    EXPECT_EQ(MOJO_RESULT_OK,
++              WaitForSignals(h, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                             MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED));
++
++    // And so should |a| after we send its peer.
++    WriteMessageWithHandles(h, ":)", &b, 1);
++    EXPECT_EQ(MOJO_RESULT_OK,
++              WaitForSignals(a, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                             MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED));
++    EXPECT_EQ(MOJO_RESULT_OK, MojoQueryHandleSignalsState(a, &state));
++    EXPECT_TRUE(state.satisfied_signals & MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++
++    // And so should |c| after we fuse |d| to |a|.
++    MojoHandle c, d;
++    CreateMessagePipe(&c, &d);
++    EXPECT_EQ(MOJO_RESULT_OK, MojoFuseMessagePipes(d, a, nullptr));
++    EXPECT_EQ(MOJO_RESULT_OK,
++              WaitForSignals(c, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                             MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED));
++    EXPECT_EQ(MOJO_RESULT_OK, MojoQueryHandleSignalsState(c, &state));
++    EXPECT_TRUE(state.satisfied_signals & MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++
++    // We fused c-d to a-b, so we'll just sort of "rename" |c| back to |a| so
++    // the system resembles the state it was in before we did that.
++    a = c;
++
++    WriteMessage(h, "OK!");
++
++    // Read |b| back before joining the client.
++    EXPECT_EQ("O_O", ReadMessageWithHandles(h, &b, 1));
++
++    // Wait for |a| to see its peer as local again.
++    EXPECT_EQ(MOJO_RESULT_OK,
++              WaitForSignals(a, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                             MOJO_TRIGGER_CONDITION_SIGNALS_UNSATISFIED));
++    EXPECT_EQ(MOJO_RESULT_OK, MojoQueryHandleSignalsState(a, &state));
++    EXPECT_FALSE(state.satisfied_signals & MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++    EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
++    EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
++  });
++}
++
++DEFINE_TEST_CLIENT_TEST_WITH_PIPE(RemotePeersClient, SignalsTest, h) {
++  // The bootstrap pipe should eventually signal remoteness.
++  EXPECT_EQ(MOJO_RESULT_OK,
++            WaitForSignals(h, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED));
++
++  MojoHandle b;
++  EXPECT_EQ(":)", ReadMessageWithHandles(h, &b, 1));
++
++  // And so should |b|.
++  EXPECT_EQ(MOJO_RESULT_OK,
++            WaitForSignals(b, MOJO_HANDLE_SIGNAL_PEER_REMOTE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED));
++
++  // Wait for the test to signal that it's ready to read |b| back.
++  EXPECT_EQ("OK!", ReadMessage(h));
++
++  // Now send |b| back home.
++  WriteMessageWithHandles(h, "O_O", &b, 1);
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
++}
++
++#endif  // !BUILDFLAG(IS_IOS)
++
+ }  // namespace
+ }  // namespace core
+ }  // namespace mojo
+diff --git a/mojo/core/trap_unittest.cc b/mojo/core/trap_unittest.cc
+index 1d7fbd9970e8e..7b74775b4b3a6 100644
+--- a/mojo/core/trap_unittest.cc
++++ b/mojo/core/trap_unittest.cc
+@@ -12,14 +12,17 @@
+ #include <set>
+ 
+ #include "base/compiler_specific.h"
++#include "base/containers/span.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/ptr_util.h"
++#include "base/rand_util.h"
+ #include "base/synchronization/waitable_event.h"
+ #include "base/test/bind.h"
+ #include "base/threading/platform_thread.h"
+ #include "base/threading/simple_thread.h"
+ #include "base/time/time.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/public/c/system/data_pipe.h"
+ #include "mojo/public/c/system/types.h"
+@@ -1129,6 +1132,109 @@ TEST_F(TrapTest, ExplicitRemoveOtherTriggerWithinEventHandler) {
+   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(d));
+ }
+ 
++TEST_F(TrapTest, NestedCancellation) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This test expects trap handlers to be reentrant in some "
++                 << "edge cases, which is an unsafe artifact of pre-ipcz Mojo "
++                 << "that is unsupported by MojoIpcz. This case should not be "
++                 << "relevant to any current production usage.";
++  }
++
++  MojoHandle a, b;
++  CreateMessagePipe(&a, &b);
++
++  MojoHandle c, d;
++  CreateMessagePipe(&c, &d);
++
++  static const char kTestMessageToA[] = "hey a";
++  static const char kTestMessageToC[] = "hey c";
++  static const char kTestMessageToD[] = "hey d";
++
++  // This is a tricky test. It establishes a trigger on |b| using one trap and
++  // triggers on |c| and |d| using another trap.
++  //
++  // A message is written to |d| to activate |c|'s trigger, and the resuling
++  // event handler invocation does the folllowing:
++  //   1. Writes to |a| to eventually activate |b|'s trigger.
++  //   2. Rearms |c|'s trap.
++  //   3. Writes to |d| to eventually activate |c|'s trigger again.
++  //
++  // Meanwhile, |b|'s event handler removes |c|'s trigger altogether before
++  // writing to |c| to activate |d|'s trigger.
++  //
++  // The net result should be that |c|'s trigger only gets activated once (from
++  // the first write to |d| above) and everyone else gets notified as expected.
++
++  MojoHandle b_trap;
++  MojoHandle cd_trap;
++  TriggerHelper helper;
++  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&b_trap));
++  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&cd_trap));
++
++  base::WaitableEvent wait(base::WaitableEvent::ResetPolicy::MANUAL,
++                           base::WaitableEvent::InitialState::NOT_SIGNALED);
++  uintptr_t readable_d_context =
++      helper.CreateContext([&](const MojoTrapEvent& event) {
++        EXPECT_EQ(MOJO_RESULT_OK, event.result);
++        EXPECT_EQ(kTestMessageToD, ReadMessage(d));
++        wait.Signal();
++      });
++
++  int num_expected_c_notifications = 1;
++  uintptr_t readable_c_context =
++      helper.CreateContext([&](const MojoTrapEvent& event) {
++        EXPECT_EQ(MOJO_RESULT_OK, event.result);
++        EXPECT_GT(num_expected_c_notifications--, 0);
++
++        // Trigger an eventual |readable_b_context| notification.
++        WriteMessage(a, kTestMessageToA);
++
++        EXPECT_EQ(kTestMessageToC, ReadMessage(c));
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  MojoArmTrap(cd_trap, nullptr, nullptr, nullptr));
++
++        // Trigger another eventual |readable_c_context| notification.
++        WriteMessage(d, kTestMessageToC);
++      });
++
++  uintptr_t readable_b_context =
++      helper.CreateContext([&](const MojoTrapEvent& event) {
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  MojoRemoveTrigger(cd_trap, readable_c_context, nullptr));
++
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  MojoArmTrap(cd_trap, nullptr, nullptr, nullptr));
++
++        WriteMessage(c, kTestMessageToD);
++      });
++
++  EXPECT_EQ(MOJO_RESULT_OK,
++            MojoAddTrigger(b_trap, b, MOJO_HANDLE_SIGNAL_READABLE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                           readable_b_context, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK,
++            MojoAddTrigger(cd_trap, c, MOJO_HANDLE_SIGNAL_READABLE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                           readable_c_context, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK,
++            MojoAddTrigger(cd_trap, d, MOJO_HANDLE_SIGNAL_READABLE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                           readable_d_context, nullptr));
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(b_trap, nullptr, nullptr, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(cd_trap, nullptr, nullptr, nullptr));
++
++  WriteMessage(d, kTestMessageToC);
++  wait.Wait();
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(cd_trap));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b_trap));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(c));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(d));
++}
++
+ TEST_F(TrapTest, RemoveSelfWithinEventHandler) {
+   MojoHandle a, b;
+   CreateMessagePipe(&a, &b);
+@@ -1337,6 +1443,124 @@ TEST_F(TrapTest, OtherThreadRemovesTriggerDuringEventHandler) {
+   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
+ }
+ 
++TEST_F(TrapTest, TriggersRemoveEachOtherWithinEventHandlers) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This test deadlocks with MojoIpcz, because it expects "
++                 << "trap handlers to be re-entrant in some edge cases. Not "
++                 << "relevant to any current production usage.";
++  }
++
++  MojoHandle a, b;
++  CreateMessagePipe(&a, &b);
++
++  static const char kTestMessageToA[] = "hey a";
++  static const char kTestMessageToB[] = "hey b";
++
++  base::WaitableEvent wait_for_a_to_notify(
++      base::WaitableEvent::ResetPolicy::MANUAL,
++      base::WaitableEvent::InitialState::NOT_SIGNALED);
++  base::WaitableEvent wait_for_b_to_notify(
++      base::WaitableEvent::ResetPolicy::MANUAL,
++      base::WaitableEvent::InitialState::NOT_SIGNALED);
++  base::WaitableEvent wait_for_a_to_cancel(
++      base::WaitableEvent::ResetPolicy::MANUAL,
++      base::WaitableEvent::InitialState::NOT_SIGNALED);
++  base::WaitableEvent wait_for_b_to_cancel(
++      base::WaitableEvent::ResetPolicy::MANUAL,
++      base::WaitableEvent::InitialState::NOT_SIGNALED);
++
++  MojoHandle a_trap;
++  MojoHandle b_trap;
++  TriggerHelper helper;
++  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&a_trap));
++  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&b_trap));
++
++  // We set up two traps, one triggered on |a| readability and one triggered on
++  // |b| readability. Each removes the other's trigger from within its own event
++  // handler. This should be safe, i.e., it should not deadlock in spite of the
++  // fact that we also guarantee mutually exclusive event handler invocation
++  // (including cancellations) on any given trap.
++  bool a_cancelled = false;
++  bool b_cancelled = false;
++  static uintptr_t readable_b_context;
++  uintptr_t readable_a_context = helper.CreateContextWithCancel(
++      [&](const MojoTrapEvent& event) {
++        EXPECT_EQ(MOJO_RESULT_OK, event.result);
++        EXPECT_EQ(kTestMessageToA, ReadMessage(a));
++
++        // Our removal from the other handler may delete this lambda and
++        // invalidate its captures. Copy the references we need first.
++        base::WaitableEvent& wait_for_b = wait_for_b_to_notify;
++        MojoHandle b_trap_handle = b_trap;
++        uintptr_t b_context = readable_b_context;
++        wait_for_a_to_notify.Signal();
++
++        wait_for_b.Wait();
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  MojoRemoveTrigger(b_trap_handle, b_context, nullptr));
++        EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b_trap_handle));
++      },
++      [&] {
++        a_cancelled = true;
++        wait_for_a_to_cancel.Signal();
++        wait_for_b_to_cancel.Wait();
++      });
++
++  readable_b_context = helper.CreateContextWithCancel(
++      [&](const MojoTrapEvent& event) {
++        EXPECT_EQ(MOJO_RESULT_OK, event.result);
++        EXPECT_EQ(kTestMessageToB, ReadMessage(b));
++
++        // Our removal from the other handler may delete this lambda and
++        // invalidate its captures. Copy the references we need first.
++        base::WaitableEvent& wait_for_a = wait_for_a_to_notify;
++        MojoHandle a_trap_handle = a_trap;
++        uintptr_t a_context = readable_a_context;
++        wait_for_b_to_notify.Signal();
++
++        wait_for_a.Wait();
++        EXPECT_EQ(MOJO_RESULT_OK,
++                  MojoRemoveTrigger(a_trap_handle, a_context, nullptr));
++        EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a_trap_handle));
++      },
++      [&] {
++        b_cancelled = true;
++        wait_for_b_to_cancel.Signal();
++        wait_for_a_to_cancel.Wait();
++      });
++
++  EXPECT_EQ(MOJO_RESULT_OK,
++            MojoAddTrigger(a_trap, a, MOJO_HANDLE_SIGNAL_READABLE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                           readable_a_context, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(a_trap, nullptr, nullptr, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK,
++            MojoAddTrigger(b_trap, b, MOJO_HANDLE_SIGNAL_READABLE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                           readable_b_context, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(b_trap, nullptr, nullptr, nullptr));
++
++  ThreadedRunner runner(base::BindOnce(
++      [](MojoHandle b) { WriteMessage(b, kTestMessageToA); }, b));
++  runner.Start();
++
++  // To enforce that the two traps run concurrently, wait until the WriteMessage
++  // above has made a readable before firing the readable trap on b.
++  wait_for_a_to_notify.Wait();
++
++  WriteMessage(a, kTestMessageToB);
++
++  wait_for_a_to_cancel.Wait();
++  wait_for_b_to_cancel.Wait();
++  runner.Join();
++
++  EXPECT_TRUE(a_cancelled);
++  EXPECT_TRUE(b_cancelled);
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
++}
++
+ TEST_F(TrapTest, AlwaysCancel) {
+   // Basic sanity check to ensure that all possible ways to remove a trigger
+   // result in a final MOJO_RESULT_CANCELLED notification.
+@@ -1432,6 +1656,64 @@ TEST_F(TrapTest, ArmFailureCirculation) {
+   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(t));
+ }
+ 
++TEST_F(TrapTest, TriggerOnUnsatisfiedSignals) {
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "Monitoring for unsatisfied signals is not supported by "
++                 << "MojoIpcz.";
++  }
++
++  MojoHandle a, b;
++  CreateMessagePipe(&a, &b);
++
++  base::WaitableEvent wait(base::WaitableEvent::ResetPolicy::MANUAL,
++                           base::WaitableEvent::InitialState::NOT_SIGNALED);
++  TriggerHelper helper;
++  const uintptr_t readable_a_context =
++      helper.CreateContext([&](const MojoTrapEvent& event) {
++        EXPECT_EQ(MOJO_RESULT_OK, event.result);
++        wait.Signal();
++      });
++
++  MojoHandle t;
++  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&t));
++  EXPECT_EQ(MOJO_RESULT_OK,
++            MojoAddTrigger(t, a, MOJO_HANDLE_SIGNAL_READABLE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                           readable_a_context, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(t, nullptr, nullptr, nullptr));
++
++  const char kMessage[] = "this is not a message";
++
++  WriteMessage(b, kMessage);
++  wait.Wait();
++
++  // Now we know |a| is readable. Remove the trigger and add a new one to watch
++  // for a not-readable state.
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(t));
++  const uintptr_t not_readable_a_context =
++      helper.CreateContext([&](const MojoTrapEvent& event) {
++        EXPECT_EQ(MOJO_RESULT_OK, event.result);
++        wait.Signal();
++      });
++  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&t));
++  EXPECT_EQ(MOJO_RESULT_OK,
++            MojoAddTrigger(t, a, MOJO_HANDLE_SIGNAL_READABLE,
++                           MOJO_TRIGGER_CONDITION_SIGNALS_UNSATISFIED,
++                           not_readable_a_context, nullptr));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(t, nullptr, nullptr, nullptr));
++
++  // This should not block, because the event should be signaled by
++  // |not_readable_a_context| when we read the only available message off of
++  // |a|.
++  wait.Reset();
++  EXPECT_EQ(kMessage, ReadMessage(a));
++  wait.Wait();
++
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(t));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
++  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
++}
++
+ TEST_F(TrapTest, TriggerDuringDestruction) {
+   // Regression test for races between trap event firing and trap destruction.
+   // See https://crbug.com/1385643.
+@@ -1576,6 +1858,129 @@ TEST_F(TrapTest, RaceDispatchAndBlockedCancel) {
+   MojoClose(state.trap);
+ }
+ 
++base::RepeatingClosure g_do_random_thing_callback;
++
++void ReadAllMessages(const MojoTrapEvent* event) {
++  if (event->result == MOJO_RESULT_OK) {
++    MojoHandle handle = static_cast<MojoHandle>(event->trigger_context);
++    MojoMessageHandle message;
++    while (MojoReadMessage(handle, nullptr, &message) == MOJO_RESULT_OK) {
++      MojoDestroyMessage(message);
++    }
++  }
++
++  constexpr size_t kNumRandomThingsToDoOnNotify = 5;
++  for (size_t i = 0; i < kNumRandomThingsToDoOnNotify; ++i) {
++    g_do_random_thing_callback.Run();
++  }
++}
++
++MojoHandle RandomHandle(base::span<MojoHandle> handles) {
++  return handles[base::RandIntInclusive(0,
++                                        static_cast<int>(handles.size()) - 1)];
++}
++
++void DoRandomThing(base::span<MojoHandle> traps,
++                   base::span<MojoHandle> watched_handles) {
++  switch (base::RandIntInclusive(0, 10)) {
++    case 0:
++      MojoClose(RandomHandle(traps));
++      break;
++    case 1:
++      MojoClose(RandomHandle(watched_handles));
++      break;
++    case 2:
++    case 3:
++    case 4: {
++      MojoMessageHandle message;
++      ASSERT_EQ(MOJO_RESULT_OK, MojoCreateMessage(nullptr, &message));
++      ASSERT_EQ(MOJO_RESULT_OK,
++                MojoSetMessageContext(message, 1, nullptr, nullptr, nullptr));
++      MojoWriteMessage(RandomHandle(watched_handles), message, nullptr);
++      break;
++    }
++    case 5:
++    case 6: {
++      MojoHandle t = RandomHandle(traps);
++      MojoHandle h = RandomHandle(watched_handles);
++      MojoAddTrigger(t, h, MOJO_HANDLE_SIGNAL_READABLE,
++                     MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
++                     static_cast<uintptr_t>(h), nullptr);
++      break;
++    }
++    case 7:
++    case 8: {
++      uint32_t num_blocking_events = 1;
++      MojoTrapEvent blocking_event = {sizeof(blocking_event)};
++      if (MojoArmTrap(RandomHandle(traps), nullptr, &num_blocking_events,
++                      &blocking_event) == MOJO_RESULT_FAILED_PRECONDITION &&
++          blocking_event.result == MOJO_RESULT_OK) {
++        ReadAllMessages(&blocking_event);
++      }
++      break;
++    }
++    case 9:
++    case 10: {
++      MojoHandle t = RandomHandle(traps);
++      MojoHandle h = RandomHandle(watched_handles);
++      MojoRemoveTrigger(t, static_cast<uintptr_t>(h), nullptr);
++      break;
++    }
++    default:
++      NOTREACHED();
++  }
++}
++
++TEST_F(TrapTest, ConcurrencyStressTest) {
++  // Regression test for https://crbug.com/740044. Exercises racy usage of the
++  // trap API to weed out potential crashes.
++  if (IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This test relies on implementation assumptions which are "
++                 << "invalid when MojoIpcz is enabled; namely that it's safe "
++                 << "to attempt operations on invalid handles.";
++  }
++
++  constexpr size_t kNumTraps = 50;
++  constexpr size_t kNumWatchedHandles = 50;
++  static_assert(kNumWatchedHandles % 2 == 0, "Invalid number of test handles.");
++
++  constexpr size_t kNumThreads = 10;
++  static constexpr size_t kNumOperationsPerThread = 400;
++
++  std::array<MojoHandle, kNumTraps> traps;
++  std::array<MojoHandle, kNumWatchedHandles> watched_handles;
++  g_do_random_thing_callback = base::BindRepeating(
++      &DoRandomThing, base::span(traps), base::span(watched_handles));
++
++  for (size_t i = 0; i < kNumTraps; ++i) {
++    MojoCreateTrap(&ReadAllMessages, nullptr, &traps[i]);
++  }
++  for (size_t i = 0; i < kNumWatchedHandles; i += 2) {
++    CreateMessagePipe(&watched_handles[i], &watched_handles[i + 1]);
++  }
++
++  std::array<std::unique_ptr<ThreadedRunner>, kNumThreads> threads;
++  for (size_t i = 0; i < kNumThreads; ++i) {
++    threads[i] = std::make_unique<ThreadedRunner>(base::BindOnce([] {
++      for (size_t i = 0; i < kNumOperationsPerThread; ++i) {
++        g_do_random_thing_callback.Run();
++      }
++    }));
++    threads[i]->Start();
++  }
++  for (size_t i = 0; i < kNumThreads; ++i) {
++    threads[i]->Join();
++  }
++  for (size_t i = 0; i < kNumTraps; ++i) {
++    MojoClose(traps[i]);
++  }
++  for (size_t i = 0; i < kNumWatchedHandles; ++i) {
++    MojoClose(watched_handles[i]);
++  }
++
++  g_do_random_thing_callback.Reset();
++}
++
+ }  // namespace
+ }  // namespace core
+ }  // namespace mojo
+diff --git a/mojo/public/cpp/base/shared_memory_utils.cc b/mojo/public/cpp/base/shared_memory_utils.cc
+index 835fe8a117fdc..f290627ab225b 100644
+--- a/mojo/public/cpp/base/shared_memory_utils.cc
++++ b/mojo/public/cpp/base/shared_memory_utils.cc
+@@ -4,12 +4,64 @@
+ 
+ #include "mojo/public/cpp/base/shared_memory_utils.h"
+ 
++#include "base/memory/read_only_shared_memory_region.h"
++#include "base/memory/shared_memory_hooks.h"
++#include "base/memory/shared_memory_mapping.h"
++#include "base/memory/unsafe_shared_memory_region.h"
++#include "base/memory/writable_shared_memory_region.h"
+ #include "mojo/core/embedder/embedder.h"
++#include "mojo/public/cpp/system/buffer.h"
++#include "mojo/public/cpp/system/platform_handle.h"
+ 
+ namespace mojo {
+ 
++namespace {
++
++base::WritableSharedMemoryRegion CreateWritableSharedMemoryRegion(size_t size) {
++  mojo::ScopedSharedBufferHandle handle =
++      mojo::SharedBufferHandle::Create(size);
++  if (!handle.is_valid()) {
++    return base::WritableSharedMemoryRegion();
++  }
++
++  return mojo::UnwrapWritableSharedMemoryRegion(std::move(handle));
++}
++
++base::MappedReadOnlyRegion CreateReadOnlySharedMemoryRegion(
++    size_t size,
++    base::SharedMemoryMapper* mapper) {
++  auto writable_region = CreateWritableSharedMemoryRegion(size);
++  if (!writable_region.IsValid()) {
++    return {};
++  }
++
++  base::WritableSharedMemoryMapping mapping = writable_region.Map(mapper);
++  return {base::WritableSharedMemoryRegion::ConvertToReadOnly(
++              std::move(writable_region)),
++          std::move(mapping)};
++}
++
++base::UnsafeSharedMemoryRegion CreateUnsafeSharedMemoryRegion(size_t size) {
++  auto writable_region = CreateWritableSharedMemoryRegion(size);
++  if (!writable_region.IsValid()) {
++    return base::UnsafeSharedMemoryRegion();
++  }
++
++  return base::WritableSharedMemoryRegion::ConvertToUnsafe(
++      std::move(writable_region));
++}
++
++}  // namespace
++
+ void SharedMemoryUtils::InstallBaseHooks() {
+-  mojo::core::InstallMojoIpczBaseSharedMemoryHooks();
++  if (mojo::core::IsMojoIpczEnabled()) {
++    mojo::core::InstallMojoIpczBaseSharedMemoryHooks();
++    return;
++  }
++
++  base::SharedMemoryHooks::SetCreateHooks(&CreateReadOnlySharedMemoryRegion,
++                                          &CreateUnsafeSharedMemoryRegion,
++                                          &CreateWritableSharedMemoryRegion);
+ }
+ 
+ }  // namespace mojo
+diff --git a/mojo/public/cpp/bindings/direct_receiver.cc b/mojo/public/cpp/bindings/direct_receiver.cc
+index bbe3b8a30f020..0d092548185e8 100644
+--- a/mojo/public/cpp/bindings/direct_receiver.cc
++++ b/mojo/public/cpp/bindings/direct_receiver.cc
+@@ -17,6 +17,7 @@
+ #include "base/task/current_thread.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "build/build_config.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/ipcz_api.h"
+ #include "mojo/core/ipcz_driver/driver.h"
+ #include "mojo/core/ipcz_driver/transport.h"
+@@ -364,7 +365,7 @@ void ThreadLocalNode::OnTransferredPortalAvailable() {
+ namespace mojo {
+ 
+ bool IsDirectReceiverSupported() {
+-  return true;
++  return core::IsMojoIpczEnabled();
+ }
+ 
+ bool IsAsyncIOSupported() {
+diff --git a/mojo/public/cpp/bindings/direct_receiver.h b/mojo/public/cpp/bindings/direct_receiver.h
+index 2f5f4b0893bde..7c9431abc9c54 100644
+--- a/mojo/public/cpp/bindings/direct_receiver.h
++++ b/mojo/public/cpp/bindings/direct_receiver.h
+@@ -227,8 +227,6 @@ class DirectReceiver {
+ };
+ 
+ // Indicates whether DirectReceiver can be supported in the calling process.
+-// TODO(crbug.com/359926651): This is now always true. Simplify it away,
+-// along with the dead paths behind it at call sites.
+ COMPONENT_EXPORT(MOJO_CPP_BINDINGS) bool IsDirectReceiverSupported();
+ 
+ // Indicates whether the current thread can receive async IO either because it's
+diff --git a/mojo/public/cpp/bindings/tests/direct_receiver_unittest.cc b/mojo/public/cpp/bindings/tests/direct_receiver_unittest.cc
+index e8a30c6ca987b..749652f45672e 100644
+--- a/mojo/public/cpp/bindings/tests/direct_receiver_unittest.cc
++++ b/mojo/public/cpp/bindings/tests/direct_receiver_unittest.cc
+@@ -86,6 +86,12 @@ ScopedHandle CreateDummyHandle(IpczHandle node) {
+ // provides multiprocess test facilities.
+ class DirectReceiverTest : public ipcz::test::internal::TestBase,
+                            public core::test::MojoTestBase {
++  void SetUp() override {
++    if (!core::IsMojoIpczEnabled()) {
++      GTEST_SKIP() << "This test is only valid when MojoIpcz is enabled.";
++    }
++  }
++
+  private:
+   base::test::TaskEnvironment task_environment_;
+ };
+diff --git a/mojo/public/cpp/bindings/tests/receiver_unittest.cc b/mojo/public/cpp/bindings/tests/receiver_unittest.cc
+index 4f4fe193b54b4..d18604fb68a4f 100644
+--- a/mojo/public/cpp/bindings/tests/receiver_unittest.cc
++++ b/mojo/public/cpp/bindings/tests/receiver_unittest.cc
+@@ -21,6 +21,7 @@
+ #include "base/test/bind.h"
+ #include "base/threading/thread.h"
+ #include "build/blink_buildflags.h"
++#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/public/cpp/bindings/associated_remote.h"
+ #include "mojo/public/cpp/bindings/lib/validation_errors.h"
+@@ -1007,6 +1008,12 @@ TEST_F(MultiprocessReceiverTest, MultiprocessReceiver) {
+   // incoming IO thread activity, as an event to signal peer closure on the new
+   // receiver may arrive on the IO thread during receiver teardown on this
+   // thread.
++  if (!mojo::core::IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "This is a regression test specifically for MojoIpcz. When "
++                 << "MojoIpcz is disabled, the test is flaky for unrelated "
++                 << "reasons which stem from a long-standing bug in Mojo Core "
++                 << "shutdown.";
++  }
+   RunTestClient("MultiprocessReceiverClient", [&](MojoHandle client) {
+     Remote<mojom::InterfaceDropper> dropper;
+     MojoHandle dropper_pipe =
+diff --git a/mojo/public/cpp/system/isolated_connection.cc b/mojo/public/cpp/system/isolated_connection.cc
+index 4d23c50cd71e6..6dcb4c965d120 100644
+--- a/mojo/public/cpp/system/isolated_connection.cc
++++ b/mojo/public/cpp/system/isolated_connection.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "mojo/public/cpp/system/isolated_connection.h"
+ 
++#include "mojo/core/embedder/embedder.h"
++#include "mojo/public/cpp/platform/platform_channel.h"
+ #include "mojo/public/cpp/system/invitation.h"
+ 
+ namespace mojo {
+@@ -11,8 +13,24 @@ namespace mojo {
+ IsolatedConnection::IsolatedConnection()
+     : token_(base::UnguessableToken::Create()) {}
+ 
+-// Isolated connections are not transient and can outlive this object.
+-IsolatedConnection::~IsolatedConnection() = default;
++IsolatedConnection::~IsolatedConnection() {
++  // We send a dummy invitation over a temporary channel, re-using |token_| as
++  // the name. This ensures that the connection set up by Connect(), if any,
++  // will be replaced with a short-lived, self-terminating connection.
++  //
++  // This is a bit of a hack since Mojo does not provide any API for explicitly
++  // terminating isolated connections, but this is a decision made to minimize
++  // the API surface dedicated to isolated connections in anticipation of the
++  // concept being deprecated eventually.
++  //
++  // This is not done with MojoIpcz enabled, because with MojoIpcz, isolated
++  // connections are not transient and can outlive this object.
++  if (!mojo::core::IsMojoIpczEnabled()) {
++    PlatformChannel channel;
++    OutgoingInvitation::SendIsolated(channel.TakeLocalEndpoint(),
++                                     token_.ToString());
++  }
++}
+ 
+ ScopedMessagePipeHandle IsolatedConnection::Connect(
+     PlatformChannelEndpoint endpoint) {
+diff --git a/mojo/public/cpp/system/tests/BUILD.gn b/mojo/public/cpp/system/tests/BUILD.gn
+index 576757c197dd1..6d34b7f7f99bd 100644
+--- a/mojo/public/cpp/system/tests/BUILD.gn
++++ b/mojo/public/cpp/system/tests/BUILD.gn
+@@ -14,6 +14,7 @@ source_set("tests") {
+     "data_pipe_unittest.cc",
+     "file_data_source_unittest.cc",
+     "file_stream_data_source_unittest.cc",
++    "handle_signal_tracker_unittest.cc",
+     "handle_signals_state_unittest.cc",
+     "scope_to_message_pipe_unittest.cc",
+     "simple_watcher_unittest.cc",
+diff --git a/mojo/public/cpp/system/tests/handle_signal_tracker_unittest.cc b/mojo/public/cpp/system/tests/handle_signal_tracker_unittest.cc
+new file mode 100644
+index 0000000000000..2006e460ac253
+--- /dev/null
++++ b/mojo/public/cpp/system/tests/handle_signal_tracker_unittest.cc
+@@ -0,0 +1,131 @@
++// Copyright 2017 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "mojo/public/cpp/system/handle_signal_tracker.h"
++
++#include "base/functional/bind.h"
++#include "base/run_loop.h"
++#include "base/test/task_environment.h"
++#include "mojo/core/embedder/embedder.h"
++#include "mojo/public/cpp/system/message_pipe.h"
++#include "mojo/public/cpp/system/wait.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace mojo {
++namespace {
++
++class HandleSignalTrackerTest : public testing::Test {
++ public:
++  HandleSignalTrackerTest() {}
++
++  HandleSignalTrackerTest(const HandleSignalTrackerTest&) = delete;
++  HandleSignalTrackerTest& operator=(const HandleSignalTrackerTest&) = delete;
++
++  ~HandleSignalTrackerTest() override {}
++
++  void WaitForNextNotification(HandleSignalTracker* tracker) {
++    base::RunLoop loop;
++    tracker->set_notification_callback(base::BindRepeating(
++        [](base::RunLoop* loop, const HandleSignalsState& signals_state) {
++          loop->Quit();
++        },
++        &loop));
++    loop.Run();
++    tracker->set_notification_callback(
++        HandleSignalTracker::NotificationCallback());
++  }
++
++ private:
++  base::test::TaskEnvironment task_environment_;
++};
++
++TEST_F(HandleSignalTrackerTest, StartsWithCorrectState) {
++  if (mojo::core::IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "HandleSignalTracker is not supported by MojoIpcz.";
++  }
++
++  MessagePipe pipe;
++  {
++    HandleSignalTracker tracker(pipe.handle0.get(),
++                                MOJO_HANDLE_SIGNAL_READABLE);
++    EXPECT_FALSE(tracker.last_known_state().readable());
++  }
++
++  WriteMessageRaw(pipe.handle1.get(), "hi", 2, nullptr, 0,
++                  MOJO_WRITE_MESSAGE_FLAG_NONE);
++  Wait(pipe.handle0.get(), MOJO_HANDLE_SIGNAL_READABLE,
++       MOJO_WATCH_CONDITION_SATISFIED);
++
++  {
++    HandleSignalTracker tracker(pipe.handle0.get(),
++                                MOJO_HANDLE_SIGNAL_READABLE);
++    EXPECT_TRUE(tracker.last_known_state().readable());
++  }
++}
++
++TEST_F(HandleSignalTrackerTest, BasicTracking) {
++  if (mojo::core::IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "HandleSignalTracker is not supported by MojoIpcz.";
++  }
++
++  MessagePipe pipe;
++  HandleSignalTracker tracker(pipe.handle0.get(), MOJO_HANDLE_SIGNAL_READABLE);
++  EXPECT_FALSE(tracker.last_known_state().readable());
++
++  WriteMessageRaw(pipe.handle1.get(), "hi", 2, nullptr, 0,
++                  MOJO_WRITE_MESSAGE_FLAG_NONE);
++  WaitForNextNotification(&tracker);
++  EXPECT_TRUE(tracker.last_known_state().readable());
++
++  std::vector<uint8_t> bytes;
++  ReadMessageRaw(pipe.handle0.get(), &bytes, nullptr,
++                 MOJO_READ_MESSAGE_FLAG_NONE);
++  WaitForNextNotification(&tracker);
++  EXPECT_FALSE(tracker.last_known_state().readable());
++}
++
++TEST_F(HandleSignalTrackerTest, DoesntUpdateOnIrrelevantChanges) {
++  if (mojo::core::IsMojoIpczEnabled()) {
++    GTEST_SKIP() << "HandleSignalTracker is not supported by MojoIpcz.";
++  }
++
++  MessagePipe pipe;
++  HandleSignalTracker readable_tracker(pipe.handle0.get(),
++                                       MOJO_HANDLE_SIGNAL_READABLE);
++  HandleSignalTracker peer_closed_tracker(pipe.handle0.get(),
++                                          MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++  EXPECT_FALSE(readable_tracker.last_known_state().readable());
++  EXPECT_FALSE(peer_closed_tracker.last_known_state().peer_closed());
++
++  WriteMessageRaw(pipe.handle1.get(), "hi", 2, nullptr, 0,
++                  MOJO_WRITE_MESSAGE_FLAG_NONE);
++  WaitForNextNotification(&readable_tracker);
++  EXPECT_TRUE(readable_tracker.last_known_state().readable());
++  EXPECT_FALSE(readable_tracker.last_known_state().peer_closed());
++
++  // Closing the peer won't change the |readable_tracker|'s state since there's
++  // still an unread message. Therefore the tracker's last known state should
++  // continue to reflect the state prior to peer closure even after the handle's
++  // signals state has updated.
++  pipe.handle1.reset();
++  WaitForNextNotification(&peer_closed_tracker);
++  EXPECT_TRUE(pipe.handle0->QuerySignalsState().peer_closed());
++  EXPECT_TRUE(peer_closed_tracker.last_known_state().peer_closed());
++  EXPECT_FALSE(readable_tracker.last_known_state().peer_closed());
++
++  // Now read the message, which will ultimately trigger the pipe becoming
++  // unreadable.
++  std::vector<uint8_t> bytes;
++  ReadMessageRaw(pipe.handle0.get(), &bytes, nullptr,
++                 MOJO_READ_MESSAGE_FLAG_NONE);
++  WaitForNextNotification(&readable_tracker);
++  EXPECT_FALSE(readable_tracker.last_known_state().readable());
++
++  // And note that the |peer_closed_tracker| should not have seen the readable
++  // state change above since it's not relevant to its tracked signal.
++  EXPECT_TRUE(peer_closed_tracker.last_known_state().readable());
++}
++
++}  // namespace
++}  // namespace mojo
+diff --git a/mojo/public/cpp/system/tests/invitation_unittest.cc b/mojo/public/cpp/system/tests/invitation_unittest.cc
+index 1dde415e66a24..b6f3b85cea85b 100644
+--- a/mojo/public/cpp/system/tests/invitation_unittest.cc
++++ b/mojo/public/cpp/system/tests/invitation_unittest.cc
+@@ -369,6 +369,25 @@ DEFINE_TEST_CLIENT(CppSendWithMultiplePipesClient) {
+   CHECK_EQ(kTestMessage2, ReadMessage(pipe1));
+ }
+ 
++TEST(MAYBE_InvitationCppTest_NoParam, SendIsolatedInvitationWithDuplicateName) {
++  if (mojo::core::IsMojoIpczEnabled()) {
++    // This feature is not particularly useful in a world where isolated
++    // connections are only supported between broker nodes.
++    GTEST_SKIP() << "MojoIpcz does not support multiple isolated invitations "
++                 << "between the same two nodes.";
++  }
++
++  base::test::TaskEnvironment task_environment;
++  PlatformChannel channel1;
++  PlatformChannel channel2;
++  const char kConnectionName[] = "foo";
++  ScopedMessagePipeHandle pipe0 = OutgoingInvitation::SendIsolated(
++      channel1.TakeLocalEndpoint(), kConnectionName);
++  ScopedMessagePipeHandle pipe1 = OutgoingInvitation::SendIsolated(
++      channel2.TakeLocalEndpoint(), kConnectionName);
++  Wait(pipe0.get(), MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++}
++
+ const char kErrorMessage[] = "ur bad :{{";
+ const char kDisconnectMessage[] = "go away plz";
+ 
+diff --git a/remoting/base/run_all_unittests.cc b/remoting/base/run_all_unittests.cc
+index 7a617c6cf3f9f..4b735dae5fbce 100644
+--- a/remoting/base/run_all_unittests.cc
++++ b/remoting/base/run_all_unittests.cc
+@@ -50,7 +50,8 @@ int main(int argc, char** argv) {
+   // processes are non-brokers, since by default, the process sending
+   // invitations needs to be a broker, while the process accepting invitations
+   // needs to be a non-broker.
+-  bool is_broker_process = !cmd->HasSwitch(switches::kTestChildProcess);
++  bool is_broker_process = mojo::core::IsMojoIpczEnabled() &&
++                           !cmd->HasSwitch(switches::kTestChildProcess);
+   mojo::core::Init({.is_broker_process = is_broker_process});
+   mojo::core::ScopedIPCSupport ipc_support(
+       ipc_thread.task_runner(),

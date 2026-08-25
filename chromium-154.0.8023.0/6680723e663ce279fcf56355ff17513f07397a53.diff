@@ -1,0 +1,438 @@
+diff --git a/third_party/libwebp/src/src/utils/thread_utils.c b/third_party/libwebp/src/src/utils/thread_utils.c
+index 5b06d6e2..a1c13f03 100644
+--- a/third_party/libwebp/src/src/utils/thread_utils.c
++++ b/third_party/libwebp/src/src/utils/thread_utils.c
+@@ -90,20 +90,430 @@ static int pthread_join(pthread_t thread, void** value_ptr) {
+           CloseHandle(thread) == 0);
+ }
+ 
++//
++// Push lock definitions
++//
++typedef struct _EX_PUSH_LOCK {
++
++#define EX_PUSH_LOCK_WAITING   0x1
++#define EX_PUSH_LOCK_EXCLUSIVE 0x2
++#define EX_PUSH_LOCK_SHARE_INC 0x4
++
++    union {
++        struct {
++            ULONG_PTR Waiting : 1;
++            ULONG_PTR Exclusive : 1;
++            ULONG_PTR Shared : sizeof (ULONG_PTR) * 8 - 2;
++        };
++        ULONG_PTR Value;
++        PVOID Ptr;
++    };
++} EX_PUSH_LOCK, *PEX_PUSH_LOCK;
++
++
++//
++// This is a block held on the local stack of the waiting threads.
++//
++
++typedef  struct _EX_PUSH_LOCK_WAIT_BLOCK *PEX_PUSH_LOCK_WAIT_BLOCK;
++
++typedef struct _EX_PUSH_LOCK_WAIT_BLOCK {
++    HANDLE WakeEvent;
++    PEX_PUSH_LOCK_WAIT_BLOCK Next;
++    PEX_PUSH_LOCK_WAIT_BLOCK Last;
++    PEX_PUSH_LOCK_WAIT_BLOCK Previous;
++    ULONG ShareCount;
++    BOOLEAN Exclusive;
++} EX_PUSH_LOCK_WAIT_BLOCK;
++
++#undef ASSERT
++#define ASSERT(x)
++
++static
++void
++ExInitializePushLock (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Initialize a push lock structure
++
++Arguments:
++
++    PushLock - Push lock to be initialized
++
++Return Value:
++
++    None
++
++--*/
++{
++    PushLock->Value = 0;
++}
++
++static
++void
++ExfAcquirePushLockExclusive (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Acquire a push lock exclusively
++
++Arguments:
++
++    PushLock - Push lock to be acquired
++
++Return Value:
++
++    None
++
++--*/
++{
++    EX_PUSH_LOCK OldValue, NewValue;
++    EX_PUSH_LOCK_WAIT_BLOCK WaitBlock;
++
++    OldValue = *PushLock;
++    while (1) {
++        //
++        // If the lock is already held exclusively/shared or there are waiters then
++        // we need to wait.
++        //
++        if (OldValue.Value == 0) {
++            NewValue.Value = OldValue.Value + EX_PUSH_LOCK_EXCLUSIVE;
++            NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                              NewValue.Ptr,
++                                                              OldValue.Ptr);
++            if (NewValue.Ptr == OldValue.Ptr) {
++                break;
++            }
++        } else {
++            WaitBlock.WakeEvent = CreateEvent ( NULL, FALSE, FALSE, NULL );
++            WaitBlock.Exclusive = TRUE;
++            WaitBlock.Last = NULL;
++            WaitBlock.Previous = NULL;
++            //
++            // Move the sharecount to our wait block if need be.
++            //
++            if (OldValue.Waiting) {
++                WaitBlock.Next = (PEX_PUSH_LOCK_WAIT_BLOCK)
++                                     (OldValue.Value - EX_PUSH_LOCK_WAITING);
++                WaitBlock.ShareCount = 0;
++            } else {
++                WaitBlock.Next = NULL;
++                WaitBlock.ShareCount = (ULONG) OldValue.Shared;
++            }
++            NewValue.Ptr = ((PUCHAR) &WaitBlock) + EX_PUSH_LOCK_WAITING;
++            ASSERT ((NewValue.Value & EX_PUSH_LOCK_WAITING) != 0);
++            NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                              NewValue.Ptr,
++                                                              OldValue.Ptr);
++            if (NewValue.Ptr == OldValue.Ptr) {
++                WaitForSingleObject(WaitBlock.WakeEvent, INFINITE);
++                ASSERT ((WaitBlock.ShareCount == 0) && (WaitBlock.Next == NULL));
++                CloseHandle(WaitBlock.WakeEvent);
++                break;
++            }
++            CloseHandle(WaitBlock.WakeEvent);
++
++        }
++        OldValue = NewValue;
++    }
++}
++
++static
++void
++ExfReleasePushLock (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Release a push lock that was acquired exclusively or shared
++
++Arguments:
++
++    PushLock - Push lock to be released
++
++Return Value:
++
++    None
++
++--*/
++{
++    EX_PUSH_LOCK OldValue, NewValue;
++    PEX_PUSH_LOCK_WAIT_BLOCK WaitBlock, NextWaitBlock, ReleaseWaitList, Previous;
++    PEX_PUSH_LOCK_WAIT_BLOCK LastWaitBlock, FirstWaitBlock;
++    ULONG ShareCount;
++#if 0
++    KIRQL OldIrql;
++#endif
++
++    OldValue = *PushLock;
++    while (1) {
++        if (!OldValue.Waiting) {
++            //
++            // Either we hold the lock exclusive or shared but not both.
++            //
++            ASSERT (OldValue.Exclusive ^ (OldValue.Shared > 0));
++
++            //
++            // We must hold the lock exclusive or shared. We make the assuption that
++            // the exclusive bit is just below the share count here.
++            //
++            NewValue.Value = (OldValue.Value - EX_PUSH_LOCK_EXCLUSIVE) &
++                             ~EX_PUSH_LOCK_EXCLUSIVE;
++            NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                              NewValue.Ptr,
++                                                              OldValue.Ptr);
++            if (NewValue.Ptr == OldValue.Ptr) {
++                break;
++            }
++            //
++            // Either we gained a new waiter or another shared owner arrived or left
++            //
++            ASSERT (NewValue.Waiting || (NewValue.Shared > 0 && !NewValue.Exclusive));
++            OldValue = NewValue;
++        } else {
++            //
++            // There are waiters chained to the lock. We have to release the share count,
++            // last exclusive or last chain of shared waiters.
++            //
++            WaitBlock = (PEX_PUSH_LOCK_WAIT_BLOCK)
++                           (OldValue.Value - EX_PUSH_LOCK_WAITING);
++
++            FirstWaitBlock = WaitBlock;
++            ReleaseWaitList = WaitBlock;
++            Previous = NULL;
++            LastWaitBlock = NULL;
++            ShareCount = 0;
++            do {
++
++                if (WaitBlock->Last != NULL) {
++                    LastWaitBlock = WaitBlock;
++                    WaitBlock = WaitBlock->Last;
++                    Previous = WaitBlock->Previous;
++                    ReleaseWaitList = WaitBlock;
++                    ASSERT (WaitBlock->Next == NULL);
++                    ASSERT (Previous != NULL);
++                    ShareCount = 0;
++                }
++
++                if (WaitBlock->Exclusive) {
++                    //
++                    // This is an exclusive waiter. If this was the first exclusive waited to a shared acquire
++                    // then it will have the saved share count. If we acquired the lock shared then the count
++                    // must contain a bias for this thread. Release that and if we are not the last shared
++                    // accessor then exit. A later shared release thread will wake the exclusive
++                    // waiter.
++                    //
++                    if (WaitBlock->ShareCount != 0) {
++                        if (InterlockedDecrement ((PLONG)&WaitBlock->ShareCount) != 0) {
++                            return;
++                        }
++                    }
++                    //
++                    // Reset count of share acquires waiting.
++                    //
++                    ShareCount = 0;
++                } else {
++                    //
++                    // This is a shared waiter. Record the number of these to update the head or the
++                    // previous exclusive waiter.
++                    //
++                    ShareCount++;
++                }
++                NextWaitBlock = WaitBlock->Next;
++                if (NextWaitBlock != NULL) {
++
++                    NextWaitBlock->Previous = WaitBlock;
++
++                    if (NextWaitBlock->Exclusive) {
++                        //
++                        // The next block is exclusive. This may be the entry to free.
++                        //
++                        Previous = WaitBlock;
++                        ReleaseWaitList = NextWaitBlock;
++                    } else {
++                        //
++                        // The next block is shared. If the chain start is exclusive then skip to this one
++                        // as the exclusive isn't the thread we will wake up.
++                        //
++                        if (ReleaseWaitList->Exclusive) {
++                            Previous = WaitBlock;
++                            ReleaseWaitList = NextWaitBlock;
++                        }
++                    }
++                }
++
++                WaitBlock = NextWaitBlock;
++            } while (WaitBlock != NULL);
++
++            //
++            // If our release chain is everything then we have to update the header
++            //
++            if (Previous == NULL) {
++                NewValue.Value = 0;
++                NewValue.Exclusive = ReleaseWaitList->Exclusive;
++                NewValue.Shared = ShareCount;
++                ASSERT (((ShareCount > 0) ^ (ReleaseWaitList->Exclusive)) && !NewValue.Waiting);
++
++                NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                                  NewValue.Ptr,
++                                                                  OldValue.Ptr);
++                if (NewValue.Ptr != OldValue.Ptr) {
++                    //
++                    // We are releasing so we could have only gained another waiter
++                    //
++                    ASSERT (NewValue.Waiting);
++                    OldValue = NewValue;
++                    continue;
++                }
++            } else {
++
++                if (LastWaitBlock != NULL) {
++                    LastWaitBlock->Last = NULL;
++                }
++                //
++                // Truncate the chain at this position and save the share count for all the shared owners to
++                // decrement later.
++                //
++                Previous->Next = NULL;
++                ASSERT (Previous->ShareCount == 0);
++                Previous->ShareCount = ShareCount;
++
++                //
++                // Add a pointer to make future searches faster
++                //
++                if (Previous->Exclusive && FirstWaitBlock != Previous) {
++                    FirstWaitBlock->Last = Previous;
++                    ASSERT (Previous->Previous != NULL);
++                }
++                //
++                // We are either releasing multiple share accessors or a single exclusive
++                //
++                ASSERT ((ShareCount > 0) ^ ReleaseWaitList->Exclusive);
++            }
++
++#if 0
++            //
++            // If we are waking more than one thread then raise to DPC level to prevent us
++            // getting rescheduled part way through the operation
++            //
++
++            OldIrql = DISPATCH_LEVEL;
++            if (ShareCount > 1) {
++                KeRaiseIrql (DISPATCH_LEVEL, &OldIrql);
++            }
++#endif
++
++            //
++            //
++            // Release the chain of threads we located.
++            //
++            do {
++                NextWaitBlock = ReleaseWaitList->Next;
++                //
++                // All the chain should have the same type (Exclusive/Shared).
++                //
++                ASSERT (NextWaitBlock == NULL || (ReleaseWaitList->Exclusive == NextWaitBlock->Exclusive));
++                ASSERT (!ReleaseWaitList->Exclusive || (ReleaseWaitList->ShareCount == 0));
++#if 0
++                KeSetEventBoostPriority (&ReleaseWaitList->WakeEvent, NULL);
++#endif
++                SetEvent (ReleaseWaitList->WakeEvent);
++                ReleaseWaitList = NextWaitBlock;
++            } while (ReleaseWaitList != NULL);
++
++#if 0
++            if (OldIrql != DISPATCH_LEVEL) {
++                KeLowerIrql (OldIrql);
++            }
++#endif
++
++
++            break;
++        }
++    }
++}
++
++static
++void
++ExAcquirePushLockExclusive (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Acquire a push lock exclusively
++
++Arguments:
++
++    PushLock - Push lock to be acquired
++
++Return Value:
++
++    None
++
++--*/
++{
++    if (InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                           (PVOID)EX_PUSH_LOCK_EXCLUSIVE,
++                                           NULL) != NULL) {
++        ExfAcquirePushLockExclusive (PushLock);
++    }
++}
++
++static
++void
++ExReleasePushLockExclusive (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Release a push lock that was acquired exclusively
++
++Arguments:
++
++    PushLock - Push lock to be released
++
++Return Value:
++
++    None
++
++--*/
++{
++    ASSERT (PushLock->Value & (EX_PUSH_LOCK_WAITING|EX_PUSH_LOCK_EXCLUSIVE));
++
++    if (InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                           NULL,
++                                           (PVOID)EX_PUSH_LOCK_EXCLUSIVE) != (PVOID)EX_PUSH_LOCK_EXCLUSIVE) {
++        ExfReleasePushLock (PushLock);
++    }
++}
++
+ // Mutex
+ static int pthread_mutex_init(pthread_mutex_t* const mutex, void* mutexattr) {
+   (void)mutexattr;
+-  InitializeSRWLock(mutex);
++  ExInitializePushLock((PEX_PUSH_LOCK)mutex);
+   return 0;
+ }
+ 
+ static int pthread_mutex_lock(pthread_mutex_t* const mutex) {
+-  AcquireSRWLockExclusive(mutex);
++  ExAcquirePushLockExclusive((PEX_PUSH_LOCK)mutex);
+   return 0;
+ }
+ 
+ static int pthread_mutex_unlock(pthread_mutex_t* const mutex) {
+-  ReleaseSRWLockExclusive(mutex);
++  ExReleasePushLockExclusive((PEX_PUSH_LOCK)mutex);
+   return 0;
+ }
+ 

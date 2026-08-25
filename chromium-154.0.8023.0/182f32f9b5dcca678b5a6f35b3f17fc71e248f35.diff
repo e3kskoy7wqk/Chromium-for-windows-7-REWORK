@@ -1,0 +1,23 @@
+diff --git a/net/base/ip_endpoint.cc b/net/base/ip_endpoint.cc
+index b840a1883ff25..429c355b6db2d 100644
+--- a/net/base/ip_endpoint.cc
++++ b/net/base/ip_endpoint.cc
+@@ -91,7 +91,17 @@ base::Value IPEndPoint::ScopeIdToValue(std::optional<uint32_t> scope_id) {
+     name = index_to_name_func_for_testing_(scope_id.value(),
+                                            base::span<char>(buf));
+   } else {
+-    name = if_indextoname(scope_id.value(), buf);
++typedef PCHAR (NETIOAPI_API_ *PGNSI)(NET_IFINDEX, PCHAR);
++
++   PGNSI pGNSI;
++
++   pGNSI = (PGNSI) GetProcAddress(
++      GetModuleHandleW(L"Iphlpapi.dll"), 
++      "if_indextoname");
++   if(NULL != pGNSI)
++   {
++    name = pGNSI(scope_id.value(), buf);
++   }
+   }
+ 
+   if (!name) {

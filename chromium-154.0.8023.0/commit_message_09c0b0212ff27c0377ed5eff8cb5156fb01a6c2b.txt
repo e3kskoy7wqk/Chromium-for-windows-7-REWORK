@@ -1,0 +1,1 @@
+win7dep: Remove win7/8 code from device/    2023/1/4 22:33:10    09c0b0212ff27c0377ed5eff8cb5156fb01a6c2b

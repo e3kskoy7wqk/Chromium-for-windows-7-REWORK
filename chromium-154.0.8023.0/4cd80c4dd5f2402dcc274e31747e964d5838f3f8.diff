@@ -1,0 +1,13 @@
+diff --git a/content/browser/devtools/devtools_pipe_handler.cc b/content/browser/devtools/devtools_pipe_handler.cc
+index 60c115b9dfd3a..4be1b974b4a86 100644
+--- a/content/browser/devtools/devtools_pipe_handler.cc
++++ b/content/browser/devtools/devtools_pipe_handler.cc
+@@ -228,7 +228,7 @@ void DevToolsPipeHandler::Shutdown() {
+ // Concurrently discard the pipe handles to successfully join threads.
+ #if BUILDFLAG(IS_WIN)
+     // Cancel pending synchronous read.
+-  CancelIoEx(read_handle_, nullptr);
++  CancelIo(read_handle_);
+     ScopedInvalidParameterHandlerOverride invalid_parameter_handler_override;
+     _close(read_fd_);
+     read_handle_ = INVALID_HANDLE_VALUE;

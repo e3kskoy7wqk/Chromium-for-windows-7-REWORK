@@ -1,0 +1,18 @@
+diff --git a/third_party/libc++/src/src/filesystem/posix_compat.h b/third_party/libc++/src/src/filesystem/posix_compat.h
+index ddd99d8aa..8ff2fb226 100644
+--- a/third_party/libc++/src/src/filesystem/posix_compat.h
++++ b/third_party/libc++/src/src/filesystem/posix_compat.h
+@@ -237,11 +312,12 @@ inline int link(const wchar_t* oldname, const wchar_t* newname) {
+ 
+ inline int remove(const wchar_t* path) {
+   detail::WinHandle h(path, DELETE, FILE_FLAG_OPEN_REPARSE_POINT);
++    IO_STATUS_BLOCK IoStatusBlock;
+   if (!h)
+     return -1;
+   FILE_DISPOSITION_INFO info;
+   info.DeleteFile = TRUE;
+-  if (!SetFileInformationByHandle(h, FileDispositionInfo, &info, sizeof(info)))
++  if (!NT_SUCCESS(NtSetInformationFile(h,&IoStatusBlock, &info, sizeof(info), FileDispositionInformation)))
+     return -1;
+   return 0;
+ }

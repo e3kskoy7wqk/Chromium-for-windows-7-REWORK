@@ -1,0 +1,1 @@
+Reland "Do not follow reparse points in base::DeletePathRecursively on Windows"    2026/4/29 3:54:06    aed056dc0487e9abd001ec7e7fcc189f6b5954be

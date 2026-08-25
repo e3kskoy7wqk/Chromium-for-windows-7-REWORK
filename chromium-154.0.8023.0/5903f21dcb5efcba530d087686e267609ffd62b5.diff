@@ -1,0 +1,142 @@
+diff --git a/third_party/swiftshader/src/Reactor/LLVMReactor.cpp b/third_party/swiftshader/src/Reactor/LLVMReactor.cpp
+index 77b9fbca5..a181f29f6 100644
+--- a/third_party/swiftshader/src/Reactor/LLVMReactor.cpp
++++ b/third_party/swiftshader/src/Reactor/LLVMReactor.cpp
+@@ -2871,6 +2871,32 @@ Type *Half::type()
+ 	return T(llvm::Type::getInt16Ty(*jit->context));
+ }
+ 
++RValue<Float> Rcp_pp(RValue<Float> x, bool exactAtPow2)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++#if defined(__i386__) || defined(__x86_64__)
++	if(exactAtPow2)
++	{
++		// rcpss uses a piecewise-linear approximation which minimizes the relative error
++		// but is not exact at power-of-two values. Rectify by multiplying by the inverse.
++		return x86::rcpss(x) * Float(1.0f / _mm_cvtss_f32(_mm_rcp_ss(_mm_set_ps1(1.0f))));
++	}
++	return x86::rcpss(x);
++#else
++	return As<Float>(V(lowerRCP(V(x.value()))));
++#endif
++}
++
++RValue<Float> RcpSqrt_pp(RValue<Float> x)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++#if defined(__i386__) || defined(__x86_64__)
++	return x86::rsqrtss(x);
++#else
++	return As<Float>(V(lowerRSQRT(V(x.value()))));
++#endif
++}
++
+ bool HasRcpApprox()
+ {
+ #if defined(__i386__) || defined(__x86_64__)
+@@ -3109,6 +3135,32 @@ RValue<Float4> Min(RValue<Float4> x, RValue<Float4> y)
+ #endif
+ }
+ 
++RValue<Float4> Rcp_pp(RValue<Float4> x, bool exactAtPow2)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++#if defined(__i386__) || defined(__x86_64__)
++	if(exactAtPow2)
++	{
++		// rcpps uses a piecewise-linear approximation which minimizes the relative error
++		// but is not exact at power-of-two values. Rectify by multiplying by the inverse.
++		return x86::rcpps(x) * Float4(1.0f / _mm_cvtss_f32(_mm_rcp_ss(_mm_set_ps1(1.0f))));
++	}
++	return x86::rcpps(x);
++#else
++	return As<Float4>(V(lowerRCP(V(x.value()))));
++#endif
++}
++
++RValue<Float4> RcpSqrt_pp(RValue<Float4> x)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++#if defined(__i386__) || defined(__x86_64__)
++	return x86::rsqrtps(x);
++#else
++	return As<Float4>(V(lowerRSQRT(V(x.value()))));
++#endif
++}
++
+ RValue<Float4> Sqrt(RValue<Float4> x)
+ {
+ 	RR_DEBUG_INFO_UPDATE_LOC();
+diff --git a/third_party/swiftshader/src/Reactor/Reactor.hpp b/third_party/swiftshader/src/Reactor/Reactor.hpp
+index 4a68b12f0..0f992da46 100644
+--- a/third_party/swiftshader/src/Reactor/Reactor.hpp
++++ b/third_party/swiftshader/src/Reactor/Reactor.hpp
+@@ -1771,6 +1771,12 @@ RValue<Bool> operator==(RValue<Float> lhs, RValue<Float> rhs);
+ RValue<Float> Abs(RValue<Float> x);
+ RValue<Float> Max(RValue<Float> x, RValue<Float> y);
+ RValue<Float> Min(RValue<Float> x, RValue<Float> y);
++// Deprecated: use Rcp
++// TODO(b/147516027): Remove when GLES frontend is removed
++RValue<Float> Rcp_pp(RValue<Float> val, bool exactAtPow2 = false);
++// Deprecated: use RcpSqrt
++// TODO(b/147516027): Remove when GLES frontend is removed
++RValue<Float> RcpSqrt_pp(RValue<Float> val);
+ RValue<Float> Rcp(RValue<Float> x, bool relaxedPrecision, bool exactAtPow2 = false);
+ RValue<Float> RcpSqrt(RValue<Float> x, bool relaxedPrecision);
+ RValue<Float> Sqrt(RValue<Float> x);
+@@ -1941,6 +1947,12 @@ RValue<Float4> Abs(RValue<Float4> x);
+ RValue<Float4> Max(RValue<Float4> x, RValue<Float4> y);
+ RValue<Float4> Min(RValue<Float4> x, RValue<Float4> y);
+ 
++// Deprecated: use Rcp
++// TODO(b/147516027): Remove when GLES frontend is removed
++RValue<Float4> Rcp_pp(RValue<Float4> val, bool exactAtPow2 = false);
++// Deprecated: use RcpSqrt
++// TODO(b/147516027): Remove when GLES frontend is removed
++RValue<Float4> RcpSqrt_pp(RValue<Float4> val);
+ RValue<Float4> Rcp(RValue<Float4> x, bool relaxedPrecision, bool exactAtPow2 = false);
+ RValue<Float4> RcpSqrt(RValue<Float4> x, bool relaxedPrecision);
+ RValue<Float4> Sqrt(RValue<Float4> x);
+diff --git a/third_party/swiftshader/src/Reactor/SubzeroReactor.cpp b/third_party/swiftshader/src/Reactor/SubzeroReactor.cpp
+index 55180863a..c5c083a15 100644
+--- a/third_party/swiftshader/src/Reactor/SubzeroReactor.cpp
++++ b/third_party/swiftshader/src/Reactor/SubzeroReactor.cpp
+@@ -3831,6 +3831,18 @@ Type *Half::type()
+ 	return T(Ice::IceType_i16);
+ }
+ 
++RValue<Float> Rcp_pp(RValue<Float> x, bool exactAtPow2)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++	return 1.0f / x;
++}
++
++RValue<Float> RcpSqrt_pp(RValue<Float> x)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++	return Rcp_pp(Sqrt(x));
++}
++
+ RValue<Float> Sqrt(RValue<Float> x)
+ {
+ 	RR_DEBUG_INFO_UPDATE_LOC();
+@@ -3986,6 +3998,18 @@ RValue<Float4> Min(RValue<Float4> x, RValue<Float4> y)
+ 	return RValue<Float4>(V(result));
+ }
+ 
++RValue<Float4> Rcp_pp(RValue<Float4> x, bool exactAtPow2)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++	return Float4(1.0f) / x;
++}
++
++RValue<Float4> RcpSqrt_pp(RValue<Float4> x)
++{
++	RR_DEBUG_INFO_UPDATE_LOC();
++	return Rcp_pp(Sqrt(x));
++}
++
+ bool HasRcpApprox()
+ {
+ 	// TODO(b/175612820): Update once we implement x86 SSE rcp_ss and rsqrt_ss intrinsics in Subzero
