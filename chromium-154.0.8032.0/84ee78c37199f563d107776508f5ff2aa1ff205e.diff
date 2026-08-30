@@ -1,0 +1,126 @@
+diff --git a/base/files/file_util.h b/base/files/file_util.h
+index a40289e33a553..543a6e65c4eb8 100644
+--- a/base/files/file_util.h
++++ b/base/files/file_util.h
+@@ -326,6 +327,13 @@ BASE_EXPORT bool NormalizeFilePath(const FilePath& path, FilePath* real_path);
+ BASE_EXPORT bool DevicePathToDriveLetterPath(const FilePath& device_path,
+                                              FilePath* drive_letter_path);
+ 
++// Given an existing file in |path|, set |real_path| to the path
++// in native NT format, of the form "\Device\HarddiskVolumeXX\..".
++// Returns false if the path can not be found. Empty files cannot
++// be resolved with this function.
++BASE_EXPORT bool NormalizeToNativeFilePath(const FilePath& path,
++                                           FilePath* nt_path);
++
+ // Method that wraps the win32 GetLongPathName API, normalizing the specified
+ // path to its long form. An example where this is needed is when comparing
+ // temp file paths. If a username isn't a valid 8.3 short file name (even just a
+diff --git a/base/files/file_util_win.cc b/base/files/file_util_win.cc
+index 3625e0de0c55f..f77f12840a7a3 100644
+--- a/base/files/file_util_win.cc
++++ b/base/files/file_util_win.cc
+@@ -654,37 +654,14 @@ bool CreateDirectoryAndGetError(const FilePath& full_path,
+ 
+ bool NormalizeFilePath(const FilePath& path, FilePath* real_path) {
+   ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
+-
+-  File file(path, File::FLAG_OPEN | File::FLAG_READ |
+-                      File::FLAG_WIN_SHARE_DELETE |
+-                      File::FLAG_WIN_BACKUP_SEMANTICS);
+-  if (!file.IsValid()) {
+-    return false;
+-  }
+-
+-  // Add space for the `\\?\` or `\\?\UNC\` prefix.
+-  constexpr int kMaxPathLength = MAX_PATH + 16;
+-  wchar_t prefixed_file_path_buffer[kMaxPathLength];
+-  // On success, `used_wchars` returns the number of written characters, not
+-  // including the trailing '\0'. Thus, failure is indicated by returning 0 or
+-  // >= kMaxPathLength.
+-  DWORD used_wchars = ::GetFinalPathNameByHandle(
+-      file.GetPlatformFile(), prefixed_file_path_buffer, kMaxPathLength,
+-      FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+-  if (used_wchars >= kMaxPathLength || used_wchars == 0) {
+-    return false;
+-  }
+-
+-  std::wstring_view prefixed_file_path(prefixed_file_path_buffer, used_wchars);
+-  *real_path = RemoveWindowsExtendedPathPrefix(prefixed_file_path);
+-
+-  // `real_path` can be longer than MAX_PATH and we should only return paths
+-  // that are less than MAX_PATH.
+-  if (real_path->value().size() >= MAX_PATH) {
+-    real_path->clear();
+-  }
+-
+-  return !real_path->empty();
++  FilePath mapped_file;
++  if (!NormalizeToNativeFilePath(path, &mapped_file))
++    return false;
++  // NormalizeToNativeFilePath() will return a path that starts with
++  // "\Device\Harddisk...".  Helper DevicePathToDriveLetterPath()
++  // will find a drive letter which maps to the path's device, so
++  // that we return a path starting with a drive letter.
++  return DevicePathToDriveLetterPath(mapped_file, real_path);
+ }
+ 
+ bool GetSecureTempDirectory(FilePath* temp_dir) {
+@@ -724,6 +710,57 @@ bool DevicePathToDriveLetterPath(const FilePath& nt_device_path,
+   return false;
+ }
+ 
++bool NormalizeToNativeFilePath(const FilePath& path, FilePath* nt_path) {
++  ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
++  // In Vista, GetFinalPathNameByHandle() would give us the real path
++  // from a file handle.  If we ever deprecate XP, consider changing the
++  // code below to a call to GetFinalPathNameByHandle().  The method this
++  // function uses is explained in the following msdn article:
++  // http://msdn.microsoft.com/en-us/library/aa366789(VS.85).aspx
++  win::ScopedHandle file_handle(
++      ::CreateFile(path.value().c_str(), GENERIC_READ, kFileShareAll, NULL,
++                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
++  if (!file_handle.is_valid())
++    return false;
++
++  // Create a file mapping object.  Can't easily use MemoryMappedFile, because
++  // we only map the first byte, and need direct access to the handle. You can
++  // not map an empty file, this call fails in that case.
++  win::ScopedHandle file_map_handle(
++      ::CreateFileMapping(file_handle.Get(),
++                          NULL,
++                          PAGE_READONLY,
++                          0,
++                          1,  // Just one byte.  No need to look at the data.
++                          NULL));
++  if (!file_map_handle.is_valid())
++    return false;
++
++  // Use a view of the file to get the path to the file.
++  void* file_view = MapViewOfFile(file_map_handle.Get(),
++                                  FILE_MAP_READ, 0, 0, 1);
++  if (!file_view)
++    return false;
++
++  // The expansion of |path| into a full path may make it longer.
++  // GetMappedFileName() will fail if the result is longer than MAX_PATH.
++  // Pad a bit to be safe.  If kMaxPathLength is ever changed to be less
++  // than MAX_PATH, it would be nessisary to test that GetMappedFileName()
++  // not return kMaxPathLength.  This would mean that only part of the
++  // path fit in |mapped_file_path|.
++  const int kMaxPathLength = MAX_PATH + 10;
++  wchar_t mapped_file_path[kMaxPathLength];
++  bool success = false;
++  HANDLE cp = GetCurrentProcess();
++  if (::GetMappedFileNameW(cp, file_view, mapped_file_path,
++                           kMaxPathLength)) {
++    *nt_path = FilePath(mapped_file_path);
++    success = true;
++  }
++  ::UnmapViewOfFile(file_view);
++  return success;
++}
++
+ FilePath MakeLongFilePath(const FilePath& input) {
+   ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
+ 

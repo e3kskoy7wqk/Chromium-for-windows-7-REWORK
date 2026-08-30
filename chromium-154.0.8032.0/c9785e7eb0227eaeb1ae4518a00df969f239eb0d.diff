@@ -1,0 +1,161 @@
+diff --git a/cc/slim/frame_sink_impl.cc b/cc/slim/frame_sink_impl.cc
+index 7e46d8447d19a..78e72468d5c74 100644
+--- a/cc/slim/frame_sink_impl.cc
++++ b/cc/slim/frame_sink_impl.cc
+@@ -113,7 +113,9 @@ bool FrameSinkImpl::BindToClient(FrameSinkImplClient* client) {
+   frame_sink_remote_.set_disconnect_handler(
+       base::BindOnce(&FrameSinkImpl::OnContextLost, base::Unretained(this)));
+ 
+-  client_receiver_.emplace<DirectReceiver>(mojo::DirectReceiverKey{}, this);
++  if (mojo::IsDirectReceiverSupported()) {
++    client_receiver_.emplace<DirectReceiver>(mojo::DirectReceiverKey{}, this);
++  }
+ 
+   std::visit(
+       absl::Overload{[&](Receiver& receiver) {
+diff --git a/components/viz/service/frame_sinks/compositor_frame_sink_impl.cc b/components/viz/service/frame_sinks/compositor_frame_sink_impl.cc
+index d8e76be71c275..cb37cfd45a4f0 100644
+--- a/components/viz/service/frame_sinks/compositor_frame_sink_impl.cc
++++ b/components/viz/service/frame_sinks/compositor_frame_sink_impl.cc
+@@ -115,7 +115,7 @@ CompositorFrameSinkImpl::CompositorFrameSinkImpl(
+           frame_sink_manager,
+           frame_sink_id,
+           false /* is_root */)) {
+-  if (mojo::IsAsyncIOSupported() &&
++  if (mojo::IsDirectReceiverSupported() && mojo::IsAsyncIOSupported() &&
+       features::IsVizDirectCompositorThreadIpcNonRootEnabled()) {
+     compositor_frame_sink_receiver_.emplace<DirectReceiver>(
+         mojo::DirectReceiverKey{}, this);
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+index 743df44847f8c..91aae28d67535 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+@@ -102,7 +102,8 @@ FrameSinkManagerImpl::FrameSinkManagerImpl(const InitParams& params)
+       host_process_id_(params.host_process_id),
+       hint_session_factory_(params.hint_session_factory),
+       frame_sink_manager_receiver_(std::in_place_type<Receiver>, this) {
+-  if (mojo::IsAsyncIOSupported() && params.use_direct_receiver) {
++  if (mojo::IsDirectReceiverSupported() && mojo::IsAsyncIOSupported() &&
++      params.use_direct_receiver) {
+     frame_sink_manager_receiver_.emplace<DirectReceiver>(
+         mojo::DirectReceiverKey{}, this);
+   }
+diff --git a/components/viz/service/main/viz_compositor_thread_runner_impl.cc b/components/viz/service/main/viz_compositor_thread_runner_impl.cc
+index d871fd2127a99..117a3eb96e2e9 100644
+--- a/components/viz/service/main/viz_compositor_thread_runner_impl.cc
++++ b/components/viz/service/main/viz_compositor_thread_runner_impl.cc
+@@ -102,8 +102,9 @@ std::unique_ptr<VizCompositorThreadType> CreateAndStartCompositorThread() {
+   // IOWatcher like MessagePumpAndroid.
+   const bool should_use_io_pump =
+       features::IsVizWithIoMessagePumpEnabled() ||
+-      features::IsVizDirectCompositorThreadIpcNonRootEnabled() ||
+-      features::IsVizDirectCompositorThreadIpcFrameSinkManagerEnabled();
++      (mojo::IsDirectReceiverSupported() &&
++       (features::IsVizDirectCompositorThreadIpcNonRootEnabled() ||
++        features::IsVizDirectCompositorThreadIpcFrameSinkManagerEnabled()));
+   if (should_use_io_pump) {
+     thread_options.message_pump_type = base::MessagePumpType::IO;
+   }
+diff --git a/mojo/public/cpp/bindings/direct_receiver.cc b/mojo/public/cpp/bindings/direct_receiver.cc
+index b5976df4b2288..bbe3b8a30f020 100644
+--- a/mojo/public/cpp/bindings/direct_receiver.cc
++++ b/mojo/public/cpp/bindings/direct_receiver.cc
+@@ -125,6 +125,7 @@ thread_local ThreadLocalNode* g_thread_local_node;
+ }  // namespace
+ 
+ ThreadLocalNode::ThreadLocalNode(base::PassKey<ThreadLocalNode>) {
++  CHECK(IsDirectReceiverSupported());
+   CHECK(!g_thread_local_node);
+   g_thread_local_node = this;
+ 
+@@ -362,6 +363,10 @@ void ThreadLocalNode::OnTransferredPortalAvailable() {
+ 
+ namespace mojo {
+ 
++bool IsDirectReceiverSupported() {
++  return true;
++}
++
+ bool IsAsyncIOSupported() {
+   if (!base::CurrentThread::IsSet()) {
+     return false;
+@@ -375,7 +380,9 @@ bool IsAsyncIOSupported() {
+ void CreateDirectReceiverTransportBeforeSandbox() {
+   CHECK(!internal::g_use_precreated_transport);
+   internal::g_use_precreated_transport = true;
+-  internal::TransportPairStorage::Get().CreateTransportPairBeforeSandbox();
++  if (IsDirectReceiverSupported()) {
++    internal::TransportPairStorage::Get().CreateTransportPairBeforeSandbox();
++  }
+ }
+ 
+ #endif  // BUILDFLAG(IS_WIN)
+diff --git a/mojo/public/cpp/bindings/direct_receiver.h b/mojo/public/cpp/bindings/direct_receiver.h
+index e71c4d67e5441..2f5f4b0893bde 100644
+--- a/mojo/public/cpp/bindings/direct_receiver.h
++++ b/mojo/public/cpp/bindings/direct_receiver.h
+@@ -226,6 +226,10 @@ class DirectReceiver {
+   Receiver<T> receiver_;
+ };
+ 
++// Indicates whether DirectReceiver can be supported in the calling process.
++// TODO(crbug.com/359926651): This is now always true. Simplify it away,
++// along with the dead paths behind it at call sites.
++COMPONENT_EXPORT(MOJO_CPP_BINDINGS) bool IsDirectReceiverSupported();
+ 
+ // Indicates whether the current thread can receive async IO either because it's
+ // an IO thread or because an IOWatcher is exposed. Used for cases where
+diff --git a/services/network/public/cpp/features.cc b/services/network/public/cpp/features.cc
+index 8d35f90c24bf0..4fcccaacef987 100644
+--- a/services/network/public/cpp/features.cc
++++ b/services/network/public/cpp/features.cc
+@@ -537,7 +537,7 @@ BASE_FEATURE(kReportingApiEnableVariationsHeaders,
+ BASE_FEATURE(kNetworkContextDirectReceiver, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ bool ShouldBindNetworkContextDirectReceiver() {
+-  return base::CurrentIOThread::IsSet() &&
++  return mojo::IsDirectReceiverSupported() && base::CurrentIOThread::IsSet() &&
+          base::FeatureList::IsEnabled(features::kNetworkContextDirectReceiver);
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/scheduler/worker/non_main_thread_impl.cc b/third_party/blink/renderer/platform/scheduler/worker/non_main_thread_impl.cc
+index 97f179f804840..1ea7a5e223cf5 100644
+--- a/third_party/blink/renderer/platform/scheduler/worker/non_main_thread_impl.cc
++++ b/third_party/blink/renderer/platform/scheduler/worker/non_main_thread_impl.cc
+@@ -56,7 +56,8 @@ NonMainThreadImpl::NonMainThreadImpl(const ThreadCreationParams& params)
+ 
+   base::MessagePumpType message_pump_type = base::MessagePumpType::DEFAULT;
+   if (params.thread_type == ThreadType::kCompositorThread &&
+-      base::FeatureList::IsEnabled(features::kDirectCompositorThreadIpc)) {
++      base::FeatureList::IsEnabled(features::kDirectCompositorThreadIpc) &&
++      mojo::IsDirectReceiverSupported()) {
+     message_pump_type = base::MessagePumpType::IO;
+   }
+   thread_ = std::make_unique<SimpleThreadImpl>(
+diff --git a/third_party/blink/renderer/platform/widget/input/widget_input_handler_impl.cc b/third_party/blink/renderer/platform/widget/input/widget_input_handler_impl.cc
+index 518ed50aaeee0..c93b7ec737936 100644
+--- a/third_party/blink/renderer/platform/widget/input/widget_input_handler_impl.cc
++++ b/third_party/blink/renderer/platform/widget/input/widget_input_handler_impl.cc
+@@ -61,7 +61,7 @@ WidgetInputHandlerImpl::WidgetInputHandlerImpl(
+   // NOTE: DirectReceiver must be bound on an IO thread, so input handlers which
+   // live on the main thread (e.g. for popups) cannot use direct IPC for now.
+   if (base::FeatureList::IsEnabled(features::kDirectCompositorThreadIpc) &&
+-      base::CurrentIOThread::IsSet()) {
++      base::CurrentIOThread::IsSet() && mojo::IsDirectReceiverSupported()) {
+     receiver_.emplace<DirectReceiver>(mojo::DirectReceiverKey{}, this);
+   } else {
+     receiver_.emplace<Receiver>(this);
+diff --git a/third_party/blink/renderer/platform/widget/widget_base.cc b/third_party/blink/renderer/platform/widget/widget_base.cc
+index e35a983c4e5eb..9c3b186d7aa55 100644
+--- a/third_party/blink/renderer/platform/widget/widget_base.cc
++++ b/third_party/blink/renderer/platform/widget/widget_base.cc
+@@ -773,7 +773,8 @@ void WidgetBase::RequestNewLayerTreeFrameSink(
+   }
+ 
+   if (base::FeatureList::IsEnabled(features::kDirectCompositorThreadIpc) &&
+-      !for_web_tests && params.embedder_params->compositor_task_runner) {
++      !for_web_tests && params.embedder_params->compositor_task_runner &&
++      mojo::IsDirectReceiverSupported()) {
+     params.embedder_params->use_direct_client_receiver = true;
+   }
+ 

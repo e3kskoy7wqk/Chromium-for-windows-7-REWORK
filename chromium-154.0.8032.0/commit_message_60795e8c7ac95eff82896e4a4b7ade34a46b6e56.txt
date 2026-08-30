@@ -1,0 +1,1 @@
+Re-initialize the DXGI capturer when the DPI of the monitor changes    2023/2/14 2:26:29    60795e8c7ac95eff82896e4a4b7ade34a46b6e56

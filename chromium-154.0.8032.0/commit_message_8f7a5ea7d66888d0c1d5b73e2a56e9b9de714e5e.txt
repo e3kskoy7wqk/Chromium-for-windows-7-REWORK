@@ -1,0 +1,1 @@
+Reland "Add Windows implementation of GetDiscoveryNetworkInfoList"    2017/7/26 5:47:01    8f7a5ea7d66888d0c1d5b73e2a56e9b9de714e5e

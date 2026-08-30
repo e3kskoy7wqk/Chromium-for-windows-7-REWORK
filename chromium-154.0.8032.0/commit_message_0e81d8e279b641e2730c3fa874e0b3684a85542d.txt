@@ -1,0 +1,1 @@
+[Vertical Tabs] Fix window corners on ChromeOS and Windows    2026/2/20 8:30:36    0e81d8e279b641e2730c3fa874e0b3684a85542d

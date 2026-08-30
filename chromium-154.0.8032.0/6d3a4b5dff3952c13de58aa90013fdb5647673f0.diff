@@ -1,0 +1,456 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index a8af4ae7aadfb..91357cb2e60a5 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -30,6 +30,7 @@ import("//extensions/buildflags/buildflags.gni")
+ import("//gpu/vulkan/features.gni")
+ import("//media/gpu/args.gni")
+ import("//media/media_options.gni")
++import("//mojo/features.gni")
+ import("//pdf/features.gni")
+ import("//printing/buildflags/buildflags.gni")
+ import("//remoting/remoting_enable.gni")
+diff --git a/chrome/browser/DEPS b/chrome/browser/DEPS
+index db311c331aa90..e0c73d6d4ea22 100644
+--- a/chrome/browser/DEPS
++++ b/chrome/browser/DEPS
+@@ -634,6 +634,7 @@ specific_include_rules = {
+   ],
+   r"about_flags\.cc" : [
+     "+components/stylus_handwriting/win/features.h",
++    "+mojo/core/embedder/features.h",
+     "+sandbox/policy/features.h",
+   ],
+   r"dbus_memory_pressure_evaluator_linux(_unittest)?\.(cc|h)" : [
+diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
+index a658fda4c4b2b..571e13e59511f 100644
+--- a/chrome/browser/about_flags.cc
++++ b/chrome/browser/about_flags.cc
+@@ -246,6 +246,7 @@
+ #include "media/media_buildflags.h"
+ #include "media/midi/midi_features.h"
+ #include "media/webrtc/webrtc_features.h"
++#include "mojo/core/embedder/features.h"
+ #include "net/base/features.h"
+ #include "net/base/switches.h"
+ #include "net/net_buildflags.h"
+diff --git a/chrome/browser/ash/login/DEPS b/chrome/browser/ash/login/DEPS
+index 620dc23f86e3a..9908d3be6e82b 100644
+--- a/chrome/browser/ash/login/DEPS
++++ b/chrome/browser/ash/login/DEPS
+@@ -91,6 +91,7 @@ include_rules = [
+   # Dependencies outside of //chrome:
+   "+components/trusted_vault",
+   "+ui/message_center/message_center.h",
++  "+mojo/core/embedder/features.h",
+ ]
+ 
+ specific_include_rules = {
+diff --git a/chrome/browser/ash/login/chrome_restart_request.cc b/chrome/browser/ash/login/chrome_restart_request.cc
+index c95494dcaa211..94a5d5d8b7435 100644
+--- a/chrome/browser/ash/login/chrome_restart_request.cc
++++ b/chrome/browser/ash/login/chrome_restart_request.cc
+@@ -52,6 +52,7 @@
+ #include "media/base/media_switches.h"
+ #include "media/capture/capture_switches.h"
+ #include "media/media_buildflags.h"
++#include "mojo/core/embedder/features.h"
+ #include "sandbox/policy/switches.h"
+ #include "third_party/blink/public/common/switches.h"
+ #include "third_party/cros_system_api/switches/chrome_switches.h"
+@@ -258,6 +259,9 @@ void DeriveFeatures(base::CommandLine* out_command_line) {
+ #if BUILDFLAG(ENABLE_PLATFORM_HEVC)
+       &media::kPlatformHEVCDecoderSupport,
+ #endif
++#if BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
++      &mojo::core::kMojoIpcz,
++#endif  // BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
+   };
+   std::vector<std::string> enabled_features;
+   std::vector<std::string> disabled_features;
+diff --git a/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.cc b/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.cc
+index 1ba4d440d22f2..da508bc71dc02 100644
+--- a/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.cc
++++ b/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.cc
+@@ -4,16 +4,48 @@
+ 
+ #include "chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.h"
+ 
++#include <string_view>
++
+ #include "base/command_line.h"
++#include "base/files/file_util.h"
+ #include "base/path_service.h"
++#include "base/strings/string_split.h"
++#include "base/test/scoped_feature_list.h"
+ #include "chrome/common/chrome_paths.h"
+ #include "chrome/common/chrome_switches.h"
++#include "mojo/core/embedder/features.h"
+ #include "ui/compositor/compositor_switches.h"
+ #include "ui/gl/gl_switches.h"
+ 
++namespace {
++
++#if BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
++constexpr char kUseFlagsPathName[] = "/etc/ui_use_flags.txt";
++constexpr char kMojoIpczUseFlag[] = "ipcz";
++#endif  // BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
++
++}  // namespace
++
+ ChromeOSIntegrationTestMixin::ChromeOSIntegrationTestMixin(
+     InProcessBrowserTestMixinHost* host)
+-    : InProcessBrowserTestMixin(host) {}
++    : InProcessBrowserTestMixin(host) {
++#if BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
++  base::FilePath use_flags_path(kUseFlagsPathName);
++  if (base::PathExists(use_flags_path)) {
++    std::string data;
++    base::ReadFileToString(use_flags_path, &data);
++
++    std::vector<std::string_view> flags = base::SplitStringPiece(
++        data, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if (std::find(flags.begin(), flags.end(), kMojoIpczUseFlag) !=
++        flags.end()) {
++      // Enable MojoIpcz flag in the presence of ipcz USE flag to prevent
++      // crbug.com/439917450.
++      feature_list_.InitAndEnableFeature(mojo::core::kMojoIpcz);
++    }
++  }
++#endif  // BUILDFLAG(MOJO_SUPPORT_LEGACY_CORE)
++}
+ 
+ ChromeOSIntegrationTestMixin::~ChromeOSIntegrationTestMixin() = default;
+ 
+diff --git a/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.h b/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.h
+index da6a8bc206b26..bd9f4ea86d202 100644
+--- a/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.h
++++ b/chrome/test/base/chromeos/crosier/chromeos_integration_test_mixin.h
+@@ -5,6 +5,7 @@
+ #ifndef CHROME_TEST_BASE_CHROMEOS_CROSIER_CHROMEOS_INTEGRATION_TEST_MIXIN_H_
+ #define CHROME_TEST_BASE_CHROMEOS_CROSIER_CHROMEOS_INTEGRATION_TEST_MIXIN_H_
+ 
++#include "base/test/scoped_feature_list.h"
+ #include "chrome/test/base/mixin_based_in_process_browser_test.h"
+ 
+ namespace base {
+@@ -24,6 +25,9 @@ class ChromeOSIntegrationTestMixin : public InProcessBrowserTestMixin {
+   // InProcessBrowserTestMixin:
+   void SetUpCommandLine(base::CommandLine* command_line) override;
+   bool SetUpUserDataDirectory() override;
++
++ protected:
++  base::test::ScopedFeatureList feature_list_;
+ };
+ 
+ #endif  // CHROME_TEST_BASE_CHROMEOS_CROSIER_CHROMEOS_INTEGRATION_TEST_MIXIN_H_
+diff --git a/chromeos/ash/components/mojo_proxy/mojo_core/BUILD.gn b/chromeos/ash/components/mojo_proxy/mojo_core/BUILD.gn
+index 6e78fa5eea8d6..bcdad9d402b2d 100644
+--- a/chromeos/ash/components/mojo_proxy/mojo_core/BUILD.gn
++++ b/chromeos/ash/components/mojo_proxy/mojo_core/BUILD.gn
+@@ -18,8 +18,8 @@ group("mojo_core") {
+ }
+ 
+ # Corresponds to buildflag_header("buildflags") in //mojo/BUILD.gn.
+-# The clone is frozen, so dynamic GN flags like $mojo_use_apple_channel
+-# are replaced with constant values.
++# The clone is frozen, so dynamic GN flags ($mojo_use_apple_channel,
++# $mojo_support_legacy_core) are replaced with constant values.
+ buildflag_header("buildflags") {
+   header = "buildflags.h"
+   flags = [
+@@ -94,7 +94,8 @@ source_set("public_cpp_platform") {
+ # Corresponds to source_set("impl_for_embedder") in //mojo/core/BUILD.gn,
+ # component("embedder") in //mojo/core/embedder/BUILD.gn, and component("ports")
+ # in //mojo/core/ports/BUILD.gn. Pruned all ipcz transport/driver sources
+-# (ipcz_driver/*, core_ipcz.*, ipcz_api.*) and included the legacy Core files.
++# (ipcz_driver/*, core_ipcz.*, ipcz_api.*) and hardcoded the legacy Core files
++# (from upstream if (mojo_support_legacy_core)).
+ source_set("core") {
+   visibility = [ ":*" ]
+   sources = [
+@@ -250,7 +251,7 @@ source_set("public_cpp_system") {
+ 
+ # Test support and the retained legacy Mojo Core unit tests. The clone is
+ # self-contained, so these build wherever the clone does (no dependency on
+-# //mojo).
++# //mojo or mojo_support_legacy_core).
+ 
+ # Corresponds to static_library("test_support") in //mojo/public/c/test_support.
+ static_library("public_test_support") {
+diff --git a/content/browser/DEPS b/content/browser/DEPS
+index 8b644c2b879dd..6ddfcb4ff61ea 100644
+--- a/content/browser/DEPS
++++ b/content/browser/DEPS
+@@ -189,6 +189,9 @@ specific_include_rules = {
+     "+services/network/cookie_manager.h",
+     "+third_party/leveldatabase",
+   ],
++  "launch_as_mojo_client_browsertest.cc": [
++    "+ui/ozone/public/ozone_switches.h",
++  ],
+   "site_per_process_mac_browsertest\\.mm": [
+     "+content/app_shim_remote_cocoa",
+   ],
+diff --git a/content/browser/launch_as_mojo_client_browsertest.cc b/content/browser/launch_as_mojo_client_browsertest.cc
+new file mode 100644
+index 0000000000000..c8097d496d130
+--- /dev/null
++++ b/content/browser/launch_as_mojo_client_browsertest.cc
+@@ -0,0 +1,187 @@
++// Copyright 2020 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/base_switches.h"
++#include "base/cfi_buildflags.h"
++#include "base/command_line.h"
++#include "base/feature_list.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/process/launch.h"
++#include "base/run_loop.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/test/bind.h"
++#include "build/build_config.h"
++#include "components/variations/field_trial_config/field_trial_util.h"
++#include "components/variations/variations_switches.h"
++#include "content/public/common/content_switches.h"
++#include "content/public/test/browser_test.h"
++#include "content/public/test/content_browser_test.h"
++#include "content/shell/common/shell_controller.test-mojom.h"
++#include "content/shell/common/shell_switches.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/platform/platform_channel.h"
++#include "mojo/public/cpp/system/invitation.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++#if BUILDFLAG(IS_OZONE)
++#include "ui/ozone/public/ozone_switches.h"
++#endif
++
++#if BUILDFLAG(IS_CHROMEOS) || defined(MEMORY_SANITIZER)
++#include "ui/gl/gl_switches.h"
++#endif
++
++namespace content {
++namespace {
++
++#if BUILDFLAG(IS_WIN)
++const char kShellExecutableName[] = "content_shell.exe";
++#else
++const char kShellExecutableName[] = "content_shell";
++#endif
++
++base::FilePath GetCurrentDirectory() {
++  base::FilePath current_directory;
++  CHECK(base::GetCurrentDirectory(&current_directory));
++  return current_directory;
++}
++
++class LaunchAsMojoClientBrowserTest : public ContentBrowserTest {
++ public:
++  LaunchAsMojoClientBrowserTest() { CHECK(temp_dir_.CreateUniqueTempDir()); }
++
++  ~LaunchAsMojoClientBrowserTest() override {
++    // Ensure that the launched Content Shell process is dead before the test
++    // tears down, otherwise the temp profile dir may fail to delete. Note that
++    // tests must explicitly request shutdown through ShellController before
++    // finishing, otherwise this will time out.
++    CHECK(content_shell_process_.WaitForExit(nullptr));
++    CHECK(temp_dir_.Delete());
++  }
++
++  base::CommandLine MakeShellCommandLine() {
++    base::CommandLine command_line(
++        GetFilePathNextToCurrentExecutable(kShellExecutableName));
++    command_line.AppendSwitchPath(switches::kContentShellUserDataDir,
++                                  temp_dir_.GetPath());
++#if BUILDFLAG(IS_OZONE)
++    const base::CommandLine& cmdline = *base::CommandLine::ForCurrentProcess();
++    static const char* const kSwitchesToCopy[] = {
++        // Keep the kOzonePlatform switch that the Ozone must use.
++        switches::kOzonePlatform,
++    };
++    command_line.CopySwitchesFrom(cmdline, kSwitchesToCopy);
++#endif
++
++#if BUILDFLAG(IS_CHROMEOS)
++    command_line.AppendSwitchASCII(switches::kUseGL,
++                                   gl::kGLImplementationANGLEName);
++    command_line.AppendSwitchASCII(switches::kUseANGLE,
++                                   gl::kANGLEImplementationSwiftShaderName);
++    command_line.AppendSwitch(switches::kEnableUnsafeSwiftShader);
++#endif
++
++#if defined(MEMORY_SANITIZER)
++    // MSan and GL do not get along so avoid using the GPU with MSan. Normally,
++    // BrowserTestBase::SetUp() forces browser tests to use software GL for
++    // tests (in both non-MSan and MSan builds), but since this test builds a
++    // command line to launch the shell directly, that logic needs to be
++    // replicated here.
++    command_line.AppendSwitch(switches::kOverrideUseSoftwareGLForTests);
++#endif
++
++    const auto& current_command_line = *base::CommandLine::ForCurrentProcess();
++    command_line.AppendSwitchASCII(
++        switches::kEnableFeatures,
++        current_command_line.GetSwitchValueASCII(switches::kEnableFeatures));
++    command_line.AppendSwitchASCII(
++        switches::kDisableFeatures,
++        current_command_line.GetSwitchValueASCII(switches::kDisableFeatures));
++
++    std::string force_field_trials =
++        current_command_line.GetSwitchValueASCII(switches::kForceFieldTrials);
++    if (!force_field_trials.empty()) {
++      command_line.AppendSwitchASCII(switches::kForceFieldTrials,
++                                     force_field_trials);
++
++      std::string params =
++          base::FieldTrialList::AllParamsToString(variations::EscapeValue);
++      if (!params.empty()) {
++        command_line.AppendSwitchASCII(
++            variations::switches::kForceFieldTrialParams, params);
++      }
++    }
++    return command_line;
++  }
++
++  mojo::Remote<mojom::ShellController> LaunchContentShell(
++      const base::CommandLine& command_line) {
++    mojo::PlatformChannel channel;
++    base::LaunchOptions options;
++    base::CommandLine shell_command_line(command_line);
++    channel.PrepareToPassRemoteEndpoint(&options, &shell_command_line);
++    content_shell_process_ = base::LaunchProcess(shell_command_line, options);
++    channel.RemoteProcessLaunchAttempted();
++
++    mojo::OutgoingInvitation invitation;
++    mojo::Remote<mojom::ShellController> controller(
++        mojo::PendingRemote<mojom::ShellController>(
++            invitation.AttachMessagePipe(0), /*version=*/0));
++    mojo::OutgoingInvitation::Send(std::move(invitation),
++                                   content_shell_process_.Handle(),
++                                   channel.TakeLocalEndpoint());
++    return controller;
++  }
++
++ private:
++  base::FilePath GetFilePathNextToCurrentExecutable(
++      const std::string& filename) {
++    base::FilePath executable_dir =
++        base::CommandLine::ForCurrentProcess()->GetProgram().DirName();
++    if (executable_dir.IsAbsolute())
++      return executable_dir.AppendASCII(filename);
++
++    // If the current executable path is relative, resolve it to an absolute
++    // path before swapping in |filename|. This ensures that the path is OK to
++    // use with base::LaunchProcess. Otherwise we could end up with a path
++    // containing only |filename|, and this can fail to execute in environments
++    // where "." is not in the PATH (common on e.g. Linux).
++    return current_directory_.Append(executable_dir).AppendASCII(filename);
++  }
++
++  base::ScopedTempDir temp_dir_;
++  const base::FilePath current_directory_ = GetCurrentDirectory();
++  base::Process content_shell_process_;
++  mojo::Remote<mojom::ShellController> shell_controller_;
++};
++
++IN_PROC_BROWSER_TEST_F(LaunchAsMojoClientBrowserTest, LaunchAndBindInterface) {
++  // Verifies that we can launch an instance of Content Shell with a Mojo
++  // invitation on the command line and reach the new browser process's exposed
++  // ShellController interface.
++
++  const char kExtraSwitchName[] = "extra-switch-for-testing";
++  const char kExtraSwitchValue[] = "42";
++
++  base::CommandLine command_line = MakeShellCommandLine();
++  command_line.AppendSwitchASCII(kExtraSwitchName, kExtraSwitchValue);
++  mojo::Remote<mojom::ShellController> shell_controller =
++      LaunchContentShell(command_line);
++
++  base::RunLoop loop;
++  shell_controller->GetSwitchValue(
++      kExtraSwitchName,
++      base::BindLambdaForTesting([&](const std::optional<std::string>& value) {
++        ASSERT_TRUE(value);
++        EXPECT_EQ(kExtraSwitchValue, *value);
++        loop.Quit();
++      }));
++  loop.Run();
++
++  shell_controller->ShutDown();
++}
++
++}  // namespace
++}  // namespace content
+diff --git a/content/test/BUILD.gn b/content/test/BUILD.gn
+index c16f91a70f94d..f0497f3dbda1d 100644
+--- a/content/test/BUILD.gn
++++ b/content/test/BUILD.gn
+@@ -16,6 +16,7 @@ import("//content/public/common/features.gni")
+ import("//device/vr/buildflags/buildflags.gni")
+ import("//extensions/buildflags/buildflags.gni")
+ import("//media/media_options.gni")
++import("//mojo/features.gni")
+ import("//mojo/public/tools/bindings/mojom.gni")
+ import("//net/features.gni")
+ import("//printing/buildflags/buildflags.gni")
+@@ -2386,6 +2387,24 @@ test("content_browsertests") {
+     deps += [ "//components/vrp_flags" ]
+   }
+ 
++  if ((is_win || is_chromeos || is_linux) && !is_tsan &&
++      mojo_support_legacy_core) {
++    # NOTE: We don't bother to build these tests when TSan is enabled, because
++    # they can't properly launch a child content_shell in that environment.
++    sources += [ "../browser/launch_as_mojo_client_browsertest.cc" ]
++    deps += [
++      "//components/variations",
++      "//components/variations/field_trial_config",
++      "//content/shell:shell_controller_mojom",
++      "//mojo/public/cpp/platform",
++      "//mojo/public/mojom/base",
++    ]
++    data_deps += [ "//content/shell:content_shell" ]
++    if (use_ozone) {
++      deps += [ "//ui/ozone" ]
++    }
++  }
++
+   if (!is_chrome_branded) {
+     # These tests depend on single process mode, which is disabled
+     # in official builds.
+diff --git a/mojo/BUILD.gn b/mojo/BUILD.gn
+index 4d32e2b3bd028..8688cb2b642c8 100644
+--- a/mojo/BUILD.gn
++++ b/mojo/BUILD.gn
+@@ -25,7 +25,10 @@ group("mojo") {
+ 
+ buildflag_header("buildflags") {
+   header = "buildflags.h"
+-  flags = [ "MOJO_USE_APPLE_CHANNEL=$mojo_use_apple_channel" ]
++  flags = [
++    "MOJO_USE_APPLE_CHANNEL=$mojo_use_apple_channel",
++    "MOJO_SUPPORT_LEGACY_CORE=$mojo_support_legacy_core",
++  ]
+ }
+ 
+ group("tests") {
+diff --git a/mojo/features.gni b/mojo/features.gni
+index 5e379b91fa34d..e22931286c4ae 100644
+--- a/mojo/features.gni
++++ b/mojo/features.gni
+@@ -9,4 +9,11 @@ import("//build/config/sanitizers/sanitizers.gni")
+ declare_args() {
+   mojo_use_apple_channel =
+       is_mac || (is_ios && use_blink && target_platform == "iphoneos")
++
++  # Builds non-ipcz-based Mojo Core. No longer supported.
++  #
++  # When this is true, ipcz-based Mojo Core can be disabled by disabling the
++  # MojoIpcz feature flag. When this is false, ipcz-based Mojo Core is used
++  # unconditionally.
++  mojo_support_legacy_core = false
+ }

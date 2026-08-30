@@ -1,0 +1,63 @@
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index f89325d420865..efa24d64852be 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -119,7 +119,13 @@ void ApplyAffinityToActiveSystemMenu(DWORD affinity) {
+         if (len > 0 &&
+             std::wstring_view(class_name, static_cast<size_t>(len)) ==
+                 kSystemMenuClassName) {
+-          ::SetWindowDisplayAffinity(hwnd, static_cast<DWORD>(lParam));
++    typedef BOOL(WINAPI *SetWindowDisplayAffinity_t)(HWND, DWORD);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    SetWindowDisplayAffinity_t pfnSetWindowDisplayAffinity =
++        (SetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "SetWindowDisplayAffinity");
++    if (pfnSetWindowDisplayAffinity)
++          pfnSetWindowDisplayAffinity(hwnd, static_cast<DWORD>(lParam));
+         }
+         return TRUE;
+       },
+@@ -153,7 +159,13 @@ void ApplyAffinityToOwnedWindows(HWND owner_hwnd, DWORD affinity) {
+         constexpr int kMaxOwnerDepth = 32;
+         for (int depth = 0; current_owner && depth < kMaxOwnerDepth; ++depth) {
+           if (current_owner == enum_data->owner) {
+-            ::SetWindowDisplayAffinity(hwnd, enum_data->affinity);
++    typedef BOOL(WINAPI *SetWindowDisplayAffinity_t)(HWND, DWORD);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    SetWindowDisplayAffinity_t pfnSetWindowDisplayAffinity =
++        (SetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "SetWindowDisplayAffinity");
++    if (pfnSetWindowDisplayAffinity)
++            pfnSetWindowDisplayAffinity(hwnd, enum_data->affinity);
+             break;
+           }
+           current_owner = ::GetWindow(current_owner, GW_OWNER);
+@@ -1686,14 +1698,26 @@ void DesktopWindowTreeHostWin::UpdateDisplayAffinity() {
+     HWND owner_hwnd = ::GetWindow(GetHWND(), GW_OWNER);
+     if (owner_hwnd) {
+       DWORD owner_affinity = WDA_NONE;
+-      if (::GetWindowDisplayAffinity(owner_hwnd, &owner_affinity) &&
++    typedef BOOL(WINAPI *GetWindowDisplayAffinity_t)(HWND, DWORD *);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    GetWindowDisplayAffinity_t pfnGetWindowDisplayAffinity =
++        (GetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "GetWindowDisplayAffinity");
++    if (pfnGetWindowDisplayAffinity)
++      if (pfnGetWindowDisplayAffinity(owner_hwnd, &owner_affinity) &&
+           owner_affinity != WDA_NONE) {
+         affinity = owner_affinity;
+       }
+     }
+   }
+ 
+-  SetWindowDisplayAffinity(GetHWND(), affinity);
++    typedef BOOL(WINAPI *SetWindowDisplayAffinity_t)(HWND, DWORD);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    SetWindowDisplayAffinity_t pfnSetWindowDisplayAffinity =
++        (SetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "SetWindowDisplayAffinity");
++    if (pfnSetWindowDisplayAffinity)
++  pfnSetWindowDisplayAffinity(GetHWND(), affinity);
+ 
+   // Propagate the new display affinity to any active native system menu.
+   ApplyAffinityToActiveSystemMenus(affinity);

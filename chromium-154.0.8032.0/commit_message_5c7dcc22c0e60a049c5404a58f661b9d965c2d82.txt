@@ -1,0 +1,1 @@
+Use DXGI EnumAdapters to collect GPU info instead of SetupAPI.    2019/8/15 6:16:22    5c7dcc22c0e60a049c5404a58f661b9d965c2d82

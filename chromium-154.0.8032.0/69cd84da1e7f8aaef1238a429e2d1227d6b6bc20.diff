@@ -1,0 +1,22 @@
+diff --git a/ui/gfx/win/physical_size.cc b/ui/gfx/win/physical_size.cc
+index f268dc206f0b3..1b74a7b84570c 100644
+--- a/ui/gfx/win/physical_size.cc
++++ b/ui/gfx/win/physical_size.cc
+@@ -147,14 +146,9 @@ std::vector<PhysicalDisplaySize> GetPhysicalSizeForDisplays() {
+       while (EnumDisplayDevices(display_device.DeviceName, attached_index++,
+                                 &attached_device,
+                                 EDD_GET_DEVICE_INTERFACE_NAME)) {
+-        // -1 means the string is NUL-terminated for CompareStringOrdinal.
+-        // See
+-        // https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-comparestringordinal
+-        constexpr int kNullTerminatedString = -1;
+-        if (CompareStringOrdinal(attached_device.DeviceID,
+-                                 kNullTerminatedString,
+-                                 interface_detail->DevicePath,
+-                                 kNullTerminatedString, TRUE) == CSTR_EQUAL) {
++        wchar_t* attached_device_id = attached_device.DeviceID;
++        wchar_t* setup_device_path = interface_detail->DevicePath;
++        if (wcsicmp(attached_device_id, setup_device_path) == 0) {
+           int width_mm;
+           int height_mm;
+           bool found = GetSizeFromRegistry(device_info_list.get(), &device_info,
