@@ -1,0 +1,47 @@
+diff --git a/third_party/zlib/cpu_features.c b/third_party/zlib/cpu_features.c
+index 8a25dd29c824a..7ac6a15fb9bb5 100644
+--- a/third_party/zlib/cpu_features.c
++++ b/third_party/zlib/cpu_features.c
+@@ -54,16 +54,34 @@ void ZLIB_INTERNAL cpu_check_features(void)
+ #endif
+ }
+ #elif defined(ARMV8_OS_WINDOWS) || defined(X86_WINDOWS)
+-static INIT_ONCE cpu_check_inited_once = INIT_ONCE_STATIC_INIT;
+-static BOOL CALLBACK _cpu_check_features_forwarder(PINIT_ONCE once, PVOID param, PVOID* context)
+-{
+-    _cpu_check_features();
+-    return TRUE;
+-}
++static volatile int32_t once_control = 0;
++/* Copied from "perftools_pthread_once" in tcmalloc */
++static int fake_pthread_once(volatile int32_t *once_control,
++                             void (*init_routine)(void)) {
++    // Try for a fast path first. Note: this should be an acquire semantics read
++    // It is on x86 and x64, where Windows runs.
++    if (*once_control != 1) {
++        while (1) {
++            switch (InterlockedCompareExchange(once_control, 2, 0)) {
++                case 0:
++                    init_routine();
++                    InterlockedExchange(once_control, 1);
++                    return 0;
++                case 1:
++                    // The initializer has already been executed
++                    return 0;
++                default:
++                    // The initializer is being processed by another thread
++                    SwitchToThread();
++            }
++        }
++    }
++    return 0;
++}
++
+ void ZLIB_INTERNAL cpu_check_features(void)
+ {
+-    InitOnceExecuteOnce(&cpu_check_inited_once, _cpu_check_features_forwarder,
+-                        NULL, NULL);
++    fake_pthread_once(&once_control, _cpu_check_features);
+ }
+ #endif
+ 

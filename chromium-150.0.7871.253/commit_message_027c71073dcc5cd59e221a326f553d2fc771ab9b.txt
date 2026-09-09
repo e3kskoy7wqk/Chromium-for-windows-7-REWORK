@@ -1,0 +1,1 @@
+Remove GDI text support    2023/5/9 23:09:05    027c71073dcc5cd59e221a326f553d2fc771ab9b

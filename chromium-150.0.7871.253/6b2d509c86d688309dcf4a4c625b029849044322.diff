@@ -1,0 +1,13 @@
+diff --git a/extensions/browser/manifest_v2_experiment_manager.cc b/extensions/browser/manifest_v2_experiment_manager.cc
+index 915712be2eea6..5796a558b5c11 100644
+--- a/extensions/browser/manifest_v2_experiment_manager.cc
++++ b/extensions/browser/manifest_v2_experiment_manager.cc
+@@ -28,7 +28,7 @@ namespace extensions {
+ namespace {
+ 
+ // Whether to override the MV2 deprecation for testing purposes.
+-bool g_allow_mv2_for_testing = false;
++bool g_allow_mv2_for_testing = true;
+ 
+ // Returns the suffix to use for histograms related to the manifest location
+ // grouping.

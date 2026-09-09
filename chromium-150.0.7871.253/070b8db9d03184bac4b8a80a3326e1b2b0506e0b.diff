@@ -1,0 +1,338 @@
+diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/Context.cpp b/Source/ThirdParty/ANGLE/src/libANGLE/Context.cpp
+index 5b87d4fdff45ef4dc30e58948def647258290147..6e86744dc913cd2d2d8d098a1df8a4d2eae648f0 100644
+--- a/third_party/angle/src/libANGLE/Context.cpp
++++ b/third_party/angle/src/libANGLE/Context.cpp
+@@ -46,6 +46,11 @@
+ #    include "common/tls.h"
+ #endif
+ 
++#if defined(ANGLE_PLATFORM_WINDOWS)
++#include "common/tls.h"
++#include <mutex>
++#endif
++
+ namespace gl
+ {
+ namespace
+@@ -283,6 +288,48 @@ bool IsColorMaskedOut(const BlendStateExt &blendStateExt, const GLint drawbuffer
+     gCurrentValidContext = context;
+ }
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++
++// NOTE: Due to a bug in Apple's dyld loader, `thread_local` will cause
++// excessive memory use. Temporarily avoid it by using pthread's thread
++// local storage instead.
++
++angle::TLSIndex CurrentValidContextIndex = TLS_INVALID_INDEX;
++
++bool InitializeCurrentValidContextTLSIndexIfNecessary()
++{
++    static  std::once_flag once;
++    std::call_once(once, []{
++        ASSERT(CurrentValidContextIndex == TLS_INVALID_INDEX);
++        CurrentValidContextIndex = angle::CreateTLSIndex(nullptr);
++    });
++    return CurrentValidContextIndex != TLS_INVALID_INDEX;
++}
++
++// NOTE: This is not called from anywhere at the moment. This is
++// ok because it would be at the time the process is exiting, but
++// if that changes then this method will have to be used.
++void FreeCurrentValidContextTLSIndex()
++{
++    ASSERT(CurrentValidContextIndex != TLS_INVALID_INDEX);
++    angle::DestroyTLSIndex(CurrentValidContextIndex);
++    CurrentValidContextIndex = TLS_INVALID_INDEX;
++}
++
++Context *GetCurrentValidContextTLS()
++{
++    InitializeCurrentValidContextTLSIndexIfNecessary();
++    ASSERT(CurrentValidContextIndex != TLS_INVALID_INDEX);
++    return static_cast<Context *>(angle::GetTLSValue(CurrentValidContextIndex));
++}
++
++void SetCurrentValidContextTLS(Context *context)
++{
++    InitializeCurrentValidContextTLSIndexIfNecessary();
++    ASSERT(CurrentValidContextIndex != TLS_INVALID_INDEX);
++    angle::SetTLSValue(CurrentValidContextIndex, context);
++}
++
++#else
+ thread_local Context *gCurrentValidContext = nullptr;
+ #endif
+ 
+@@ -2567,6 +2616,8 @@ void Context::setContextLost()
+ 
+ #if defined(ANGLE_PLATFORM_APPLE) || defined(ANGLE_USE_STATIC_THREAD_LOCAL_VARIABLES)
+     SetCurrentValidContextTLS(context);
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++    SetCurrentValidContextTLS(context);
+ #else
+     gCurrentValidContext = context;
+ #endif
+diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/Context.h b/Source/ThirdParty/ANGLE/src/libANGLE/Context.h
+index fa1ca4bcd06df70ef7b622bf754f4b1e8830a148..40e6d1d9518ed040ddd31d190887ce17f32c93d3 100644
+--- a/third_party/angle/src/libANGLE/Context.h
++++ b/third_party/angle/src/libANGLE/Context.h
+@@ -804,6 +804,9 @@ class Context final : public egl::LabeledObject, angle::NonCopyable, public angl
+ extern Context *GetCurrentValidContextTLS();
+ extern void SetCurrentValidContextTLS(Context *context);
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++extern Context *GetCurrentValidContextTLS();
++extern void SetCurrentValidContextTLS(Context *context);
++#else
+ extern thread_local Context *gCurrentValidContext;
+ #endif
+ 
+diff --git a/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.cpp b/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.cpp
+index 976f853d802a348045d2eac97724a2b5435ce4b8..263f86f4d37b3cf0b7f13aa3765f83d7e7f26800 100644
+--- a/third_party/angle/src/libGLESv2/global_state.cpp
++++ b/third_party/angle/src/libGLESv2/global_state.cpp
+@@ -16,6 +16,10 @@
+ #if defined(ANGLE_PLATFORM_APPLE)
+ #    include <dispatch/dispatch.h>
+ #endif
++#if defined(ANGLE_PLATFORM_WINDOWS)
++//#include <dispatch/dispatch.h>
++#endif
++
+ namespace egl
+ {
+ namespace
+@@ -38,6 +42,8 @@ void SetContextToAndroidOpenGLTLSSlot(gl::Context *value)
+ #if defined(ANGLE_PLATFORM_APPLE) || defined(ANGLE_USE_STATIC_THREAD_LOCAL_VARIABLES)
+         SetCurrentThreadTLS(thread);
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++    SetCurrentThreadTLS(thread);
++#else
+         gCurrentThread = thread;
+ #endif
+ 
+@@ -71,6 +85,47 @@ void AllocateMutex()
+     gCurrentThread = thread;
+ }
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++
++// NOTE: Due to a bug in Apple's dyld loader, `thread_local` will cause
++// excessive memory use. Temporarily avoid it by using pthread's thread
++// local storage instead.
++
++angle::TLSIndex CurrentThreadIndex = TLS_INVALID_INDEX;
++
++bool InitializeCurrentThreadTLSIndexIfNecessary()
++{
++    static std::once_flag once;
++    std::call_once(once, []{
++        ASSERT(CurrentThreadIndex == TLS_INVALID_INDEX);
++        CurrentThreadIndex = angle::CreateTLSIndex(nullptr);
++    });
++    return CurrentThreadIndex != TLS_INVALID_INDEX;
++}
++
++// NOTE: This is not called from anywhere at the moment. This is
++// ok because it would be at the time the process is exiting, but
++// if that changes then this method will have to be used.
++void FreeCurrentThreadTLSIndex()
++{
++    ASSERT(CurrentThreadIndex != TLS_INVALID_INDEX);
++    angle::DestroyTLSIndex(CurrentThreadIndex);
++    CurrentThreadIndex = TLS_INVALID_INDEX;
++}
++
++Thread *GetCurrentThreadTLS()
++{
++    InitializeCurrentThreadTLSIndexIfNecessary();
++    ASSERT(CurrentThreadIndex != TLS_INVALID_INDEX);
++    return static_cast<Thread *>(angle::GetTLSValue(CurrentThreadIndex));
++}
++
++void SetCurrentThreadTLS(Thread *thread)
++{
++    InitializeCurrentThreadTLSIndexIfNecessary();
++    ASSERT(CurrentThreadIndex != TLS_INVALID_INDEX);
++    angle::SetTLSValue(CurrentThreadIndex, thread);
++}
++#else
+ thread_local Thread *gCurrentThread = nullptr;
+ #endif
+ 
+@@ -81,6 +138,8 @@ angle::GlobalMutex &GetGlobalMutex()
+ #if defined(ANGLE_PLATFORM_APPLE) || defined(ANGLE_USE_STATIC_THREAD_LOCAL_VARIABLES)
+     Thread *current = GetCurrentThreadTLS();
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++    Thread *current = GetCurrentThreadTLS();
++#else
+     Thread *current = gCurrentThread;
+ #endif
+     return (current ? current : AllocateCurrentThread());
+@@ -93,6 +154,8 @@ Debug *GetDebug()
+ #if defined(ANGLE_PLATFORM_APPLE) || defined(ANGLE_USE_STATIC_THREAD_LOCAL_VARIABLES)
+     Thread *currentThread = GetCurrentThreadTLS();
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++    Thread *currentThread = GetCurrentThreadTLS();
++#else
+     Thread *currentThread = gCurrentThread;
+ #endif
+     ASSERT(currentThread);
+@@ -215,7 +266,8 @@ namespace
+ 
+ void DeallocateCurrentThread()
+ {
+-    SafeDelete(gCurrentThread);
++    Thread *current = GetCurrentThreadTLS();
++    SafeDelete(current);
+ }
+ 
+ bool InitializeProcess()
+diff --git a/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.h b/Source/ThirdParty/ANGLE/src/libGLESv2/global_state.h
+index b4e5ec4c814e4242575de6c9bab642586b5c065e..e557018fb62e9e21d13188f484d0e5fa19df8c2b 100644
+--- a/third_party/angle/src/libGLESv2/global_state.h
++++ b/third_party/angle/src/libGLESv2/global_state.h
+@@ -14,6 +14,10 @@
+ #    include "common/tls.h"
+ #endif
+ 
++#if defined(ANGLE_PLATFORM_WINDOWS)
++#include "common/tls.h"
++#endif
++
+ #include <mutex>
+ 
+ namespace egl
+@@ -89,6 +93,9 @@ namespace egl
+ extern Thread *GetCurrentThreadTLS();
+ extern void SetCurrentThreadTLS(Thread *thread);
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++extern Thread *GetCurrentThreadTLS();
++extern void SetCurrentThreadTLS(Thread *thread);
++#else
+ extern thread_local Thread *gCurrentThread;
+ #endif
+ 
+@@ -112,6 +121,8 @@ ANGLE_INLINE Context *GetGlobalContext()
+ #if defined(ANGLE_PLATFORM_APPLE) || defined(ANGLE_USE_STATIC_THREAD_LOCAL_VARIABLES)
+     egl::Thread *currentThread = egl::GetCurrentThreadTLS();
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++    egl::Thread *currentThread = egl::GetCurrentThreadTLS();
++#else
+     egl::Thread *currentThread = egl::gCurrentThread;
+ #endif
+     ASSERT(currentThread);
+@@ -131,6 +145,8 @@ ANGLE_INLINE Context *GetValidGlobalContext()
+ #if defined(ANGLE_PLATFORM_APPLE) || defined(ANGLE_USE_STATIC_THREAD_LOCAL_VARIABLES)
+     return GetCurrentValidContextTLS();
+-#else
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++    return GetCurrentValidContextTLS();
++#else
+     return gCurrentValidContext;
+ #endif
+ }
+diff --git a/src/common/system_utils.cpp b/src/common/system_utils.cpp
+index fbb7855bbc..7db7caccd3 100644
+--- a/third_party/angle/src/common/system_utils.cpp
++++ b/third_party/angle/src/common/system_utils.cpp
+@@ -14,6 +15,10 @@
+ #    include <pthread.h>
+ #endif
+ 
++#if defined(ANGLE_PLATFORM_WINDOWS)
++#    include <windows.h>
++#endif
++
+ namespace angle
+ {
+ std::string GetExecutableName()
+@@ -227,6 +233,25 @@ std::string StripFilenameFromPath(const std::string &path)
+     }
+     return reinterpret_cast<uint64_t>(tlsValue);
+ }
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++// https://anglebug.com/42264979, similar to egl::GetCurrentThread() in libGLESv2/global_state.cpp
++uint64_t GetCurrentThreadUniqueId()
++{
++    static std::atomic<uint64_t> globalThreadSerial;
++    static DWORD tlsIndex;
++    static std::once_flag once;
++    std::call_once(once, []{
++      tlsIndex = TlsAlloc();
++    });
++    void *tlsValue = TlsGetValue(tlsIndex);
++    if (ANGLE_UNLIKELY(tlsValue == nullptr))
++    {
++        uint64_t threadId = ++globalThreadSerial;
++        auto result       = TlsSetValue(tlsIndex, reinterpret_cast<void *>(threadId));
++        return threadId;
++    }
++    return reinterpret_cast<uint64_t>(tlsValue);
++}
+ #else
+ uint64_t GetCurrentThreadUniqueId()
+ {
+diff --git a/src/libANGLE/Display.cpp b/src/libANGLE/Display.cpp
+index 970f61b81b..4db9e7de27 100644
+--- a/third_party/angle/src/libANGLE/Display.cpp
++++ b/third_party/angle/src/libANGLE/Display.cpp
+@@ -44,6 +44,11 @@
+ #    include "common/tls.h"
+ #endif
+ 
++#if defined(ANGLE_PLATFORM_WINDOWS)
++#    include <windows.h>
++#    include "common/tls.h"
++#endif
++
+ #if defined(ANGLE_ENABLE_D3D9) || defined(ANGLE_ENABLE_D3D11)
+ #    include "libANGLE/renderer/d3d/DisplayD3D.h"
+ #endif
+@@ -101,6 +106,31 @@ namespace egl
+     ASSERT(DisplayIndex != TLS_INVALID_INDEX);
+     angle::SetTLSValue(DisplayIndex, tlsData);
+ }
++#elif defined(ANGLE_PLATFORM_WINDOWS)
++// TODO(http://anglebug.com/42264979): Due to a bug in Apple's dyld loader, `thread_local` will
++// cause excessive memory use. Temporarily avoid it by using pthread's thread local storage instead.
++static angle::TLSIndex GetDisplayTLSIndex()
++{
++    static angle::TLSIndex DisplayIndex = TLS_INVALID_INDEX;
++    static std::once_flag once;
++    std::call_once(once, []{
++      ASSERT(DisplayIndex == TLS_INVALID_INDEX);
++      DisplayIndex = angle::CreateTLSIndex(nullptr);
++    });
++    return DisplayIndex;
++}
++TLSData *GetDisplayTLS()
++{
++    angle::TLSIndex DisplayIndex = GetDisplayTLSIndex();
++    ASSERT(DisplayIndex != TLS_INVALID_INDEX);
++    return static_cast<TLSData *>(angle::GetTLSValue(DisplayIndex));
++}
++void SetDisplayTLS(TLSData *tlsData)
++{
++    angle::TLSIndex DisplayIndex = GetDisplayTLSIndex();
++    ASSERT(DisplayIndex != TLS_INVALID_INDEX);
++    angle::SetTLSValue(DisplayIndex, tlsData);
++}
+ #else
+ // Tail calls generated during execution of the entry point, to be run at the end of the entry
+ // point.  gTLSData->unlockedTailCall.run() is called at the end of any EGL entry point that is
+@@ -1231,7 +1297,7 @@ Error Display::terminate(Thread *thread, TerminateReason terminateReason)
+ {
+     TLSData *tlsData = new TLSData;
+ 
+-#if defined(ANGLE_PLATFORM_APPLE)
++#if defined(ANGLE_PLATFORM_WINDOWS) || defined(ANGLE_PLATFORM_APPLE)
+     SetDisplayTLS(tlsData);
+ #else
+     gDisplayTLS = tlsData;

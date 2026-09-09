@@ -1,0 +1,336 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 7ca47c6098982..08151a89a7613 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -4291,6 +4291,13 @@ std::string ChromeContentBrowserClient::GetDefaultDownloadName() {
+   return l10n_util::GetStringUTF8(IDS_DEFAULT_DOWNLOAD_FILENAME);
+ }
+ 
++base::FilePath ChromeContentBrowserClient::GetFontLookupTableCacheDir() {
++  base::FilePath user_data_dir;
++  base::PathService::Get(chrome::DIR_USER_DATA, &user_data_dir);
++  DCHECK(!user_data_dir.empty());
++  return user_data_dir.Append(FILE_PATH_LITERAL("FontLookupTableCache"));
++}
++
+ base::FilePath ChromeContentBrowserClient::GetShaderDiskCacheDirectory() {
+   base::FilePath user_data_dir;
+   base::PathService::Get(chrome::DIR_USER_DATA, &user_data_dir);
+diff --git a/chrome/browser/chrome_content_browser_client.h b/chrome/browser/chrome_content_browser_client.h
+index 071a3dd11e61b..662251e974aeb 100644
+--- a/chrome/browser/chrome_content_browser_client.h
++++ b/chrome/browser/chrome_content_browser_client.h
+@@ -397,6 +397,7 @@ class ChromeContentBrowserClient : public content::ContentBrowserClient {
+   void BrowserURLHandlerCreated(content::BrowserURLHandler* handler) override;
+   base::FilePath GetDefaultDownloadDirectory() override;
+   std::string GetDefaultDownloadName() override;
++  base::FilePath GetFontLookupTableCacheDir() override;
+   base::FilePath GetShaderDiskCacheDirectory() override;
+   base::FilePath GetGrShaderDiskCacheDirectory() override;
+   base::FilePath GetGraphiteDawnDiskCacheDirectory() override;
+diff --git a/content/browser/renderer_host/dwrite_font_lookup_table_builder_win_unittest.cc b/content/browser/renderer_host/dwrite_font_lookup_table_builder_win_unittest.cc
+new file mode 100644
+index 0000000000000..f121022d3075e
+--- /dev/null
++++ b/content/browser/renderer_host/dwrite_font_lookup_table_builder_win_unittest.cc
+@@ -0,0 +1,241 @@
++// Copyright 2019 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/renderer_host/dwrite_font_lookup_table_builder_win.h"
++
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/files/file.h"
++#include "base/files/file_path.h"
++#include "base/files/scoped_temp_dir.h"
++#include "base/memory/raw_ptr.h"
++#include "base/path_service.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/test/bind.h"
++#include "base/test/scoped_feature_list.h"
++#include "base/test/task_environment.h"
++#include "content/public/common/content_features.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/public/common/font_unique_name_lookup/font_table_matcher.h"
++
++namespace content {
++
++namespace {
++
++struct FontExpectation {
++  const char font_name[64];
++  uint16_t ttc_index;
++};
++
++constexpr FontExpectation kExpectedTestFonts[] = {{"CambriaMath", 1},
++                                                  {"Ming-Lt-HKSCS-ExtB", 2},
++                                                  {"NSimSun", 1},
++                                                  {"calibri-bolditalic", 0}};
++
++constexpr base::TimeDelta kTestingTimeout = base::Seconds(10);
++
++class DWriteFontLookupTableBuilderTest : public testing::Test {
++ public:
++  DWriteFontLookupTableBuilderTest() {
++    feature_list_.InitAndEnableFeature(features::kFontSrcLocalMatching);
++  }
++
++  void SetUp() override {
++    font_lookup_table_builder_ = DWriteFontLookupTableBuilder::GetInstance();
++    font_lookup_table_builder_->OverrideDWriteVersionChecksForTesting();
++    font_lookup_table_builder_->ResetLookupTableForTesting();
++    bool temp_dir_created = scoped_temp_dir_.CreateUniqueTempDir();
++    ASSERT_TRUE(temp_dir_created);
++    font_lookup_table_builder_->SetCacheDirectoryForTesting(
++        scoped_temp_dir_.GetPath());
++  }
++
++  void TearDown() override {
++    font_lookup_table_builder_->ResetStateForTesting();
++  }
++
++  void TestMatchFonts() {
++    base::ReadOnlySharedMemoryRegion font_table_memory =
++        font_lookup_table_builder_->DuplicateMemoryRegion();
++    blink::FontTableMatcher font_table_matcher(font_table_memory.Map());
++
++    for (auto& test_font_name_index : kExpectedTestFonts) {
++      absl::optional<blink::FontTableMatcher::MatchResult> match_result =
++          font_table_matcher.MatchName(test_font_name_index.font_name);
++      ASSERT_TRUE(match_result) << "No font matched for font name: "
++                                << test_font_name_index.font_name;
++      base::File unique_font_file(
++          base::FilePath::FromUTF8Unsafe(match_result->font_path),
++          base::File::FLAG_OPEN | base::File::FLAG_READ);
++      ASSERT_TRUE(unique_font_file.IsValid());
++      ASSERT_GT(unique_font_file.GetLength(), 0);
++      ASSERT_EQ(test_font_name_index.ttc_index, match_result->ttc_index);
++    }
++  }
++
++ protected:
++  base::test::ScopedFeatureList feature_list_;
++  base::test::TaskEnvironment task_environment_;
++  raw_ptr<DWriteFontLookupTableBuilder> font_lookup_table_builder_;
++  base::ScopedTempDir scoped_temp_dir_;
++};
++
++class DWriteFontLookupTableBuilderTimeoutTest
++    : public DWriteFontLookupTableBuilderTest,
++      public ::testing::WithParamInterface<
++          DWriteFontLookupTableBuilder::SlowDownMode> {};
++
++}  // namespace
++
++// Run a test similar to DWriteFontProxyImplUnitTest, TestFindUniqueFont but
++// without going through Mojo and running it on the DWRiteFontLookupTableBuilder
++// class directly.
++TEST_F(DWriteFontLookupTableBuilderTest, TestFindUniqueFontDirect) {
++  font_lookup_table_builder_->SchedulePrepareFontUniqueNameTableIfNeeded();
++  bool test_callback_executed = false;
++  font_lookup_table_builder_->QueueShareMemoryRegionWhenReady(
++      base::SequencedTaskRunner::GetCurrentDefault(),
++      base::BindLambdaForTesting(
++          [this, &test_callback_executed](base::ReadOnlySharedMemoryRegion) {
++            TestMatchFonts();
++            test_callback_executed = true;
++          }));
++  task_environment_.RunUntilIdle();
++  ASSERT_TRUE(test_callback_executed);
++}
++
++TEST_P(DWriteFontLookupTableBuilderTimeoutTest, TestTimeout) {
++  font_lookup_table_builder_->SetSlowDownIndexingForTestingWithTimeout(
++      GetParam(), kTestingTimeout);
++  font_lookup_table_builder_->SchedulePrepareFontUniqueNameTableIfNeeded();
++  bool test_callback_executed = false;
++  font_lookup_table_builder_->QueueShareMemoryRegionWhenReady(
++      base::SequencedTaskRunner::GetCurrentDefault(),
++      base::BindLambdaForTesting([this, &test_callback_executed](
++                                     base::ReadOnlySharedMemoryRegion
++                                         font_table_memory) {
++        blink::FontTableMatcher font_table_matcher(font_table_memory.Map());
++
++        for (auto& test_font_name_index : kExpectedTestFonts) {
++          absl::optional<blink::FontTableMatcher::MatchResult> match_result =
++              font_table_matcher.MatchName(test_font_name_index.font_name);
++          ASSERT_TRUE(!match_result);
++        }
++        if (GetParam() ==
++            DWriteFontLookupTableBuilder::SlowDownMode::kHangOneTask)
++          font_lookup_table_builder_->ResumeFromHangForTesting();
++        test_callback_executed = true;
++      }));
++  task_environment_.RunUntilIdle();
++  ASSERT_TRUE(test_callback_executed);
++}
++
++INSTANTIATE_TEST_SUITE_P(
++    All,
++    DWriteFontLookupTableBuilderTimeoutTest,
++    ::testing::Values(
++        DWriteFontLookupTableBuilder::SlowDownMode::kDelayEachTask,
++        DWriteFontLookupTableBuilder::SlowDownMode::kHangOneTask));
++
++TEST_F(DWriteFontLookupTableBuilderTest, TestReadyEarly) {
++  font_lookup_table_builder_->SetSlowDownIndexingForTestingWithTimeout(
++      DWriteFontLookupTableBuilder::SlowDownMode::kHangOneTask,
++      kTestingTimeout);
++
++  font_lookup_table_builder_->SchedulePrepareFontUniqueNameTableIfNeeded();
++  bool test_callback_executed = false;
++  font_lookup_table_builder_->QueueShareMemoryRegionWhenReady(
++      base::SequencedTaskRunner::GetCurrentDefault(),
++      base::BindLambdaForTesting(
++          [this, &test_callback_executed](base::ReadOnlySharedMemoryRegion) {
++            ASSERT_TRUE(font_lookup_table_builder_->FontUniqueNameTableReady());
++            test_callback_executed = true;
++          }));
++  ASSERT_FALSE(font_lookup_table_builder_->FontUniqueNameTableReady());
++  font_lookup_table_builder_->ResumeFromHangForTesting();
++  task_environment_.RunUntilIdle();
++  ASSERT_TRUE(test_callback_executed);
++}
++
++TEST_F(DWriteFontLookupTableBuilderTest, RepeatedScheduling) {
++  for (unsigned i = 0; i < 3; ++i) {
++    font_lookup_table_builder_->ResetLookupTableForTesting();
++    font_lookup_table_builder_->SetCachingEnabledForTesting(false);
++    font_lookup_table_builder_->SchedulePrepareFontUniqueNameTableIfNeeded();
++    bool test_callback_executed = false;
++    font_lookup_table_builder_->QueueShareMemoryRegionWhenReady(
++        base::SequencedTaskRunner::GetCurrentDefault(),
++        base::BindLambdaForTesting(
++            [&test_callback_executed](base::ReadOnlySharedMemoryRegion) {
++              test_callback_executed = true;
++            }));
++    task_environment_.RunUntilIdle();
++    ASSERT_TRUE(test_callback_executed);
++  }
++}
++
++TEST_F(DWriteFontLookupTableBuilderTest, FontsHash) {
++  ASSERT_GT(
++      font_lookup_table_builder_->ComputePersistenceHash("6.0.1.2").size(), 0u);
++  // Validate an empty string doesn't cause problems.
++  ASSERT_GT(font_lookup_table_builder_->ComputePersistenceHash("").size(), 0u);
++}
++
++TEST_F(DWriteFontLookupTableBuilderTest, HandleCorruptCacheFile) {
++  // Cycle once to build cache file.
++  font_lookup_table_builder_->ResetLookupTableForTesting();
++  font_lookup_table_builder_->SchedulePrepareFontUniqueNameTableIfNeeded();
++
++  bool test_callback_executed = false;
++  base::File cache_file;
++  font_lookup_table_builder_->QueueShareMemoryRegionWhenReady(
++      base::SequencedTaskRunner::GetCurrentDefault(),
++      base::BindLambdaForTesting([this, &cache_file, &test_callback_executed](
++                                     base::ReadOnlySharedMemoryRegion) {
++        ASSERT_TRUE(font_lookup_table_builder_->FontUniqueNameTableReady());
++        // Truncate table for testing
++        base::FilePath cache_file_path = scoped_temp_dir_.GetPath().Append(
++            FILE_PATH_LITERAL("font_unique_name_table.pb"));
++        // Use FLAG_WIN_EXCLUSIVE_WRITE to block file and make persisting the
++        // cache fail as well, use FLAG_OPEN to ensure it got created by the
++        // table builder implementation.
++        cache_file = base::File(cache_file_path,
++                                base::File::FLAG_OPEN | base::File::FLAG_READ |
++                                    base::File::FLAG_WRITE |
++                                    base::File::FLAG_WIN_EXCLUSIVE_WRITE);
++        // Ensure the cache file was created in the empty scoped_temp_dir_
++        // and has a non-zero length.
++        ASSERT_TRUE(cache_file.IsValid());
++        ASSERT_TRUE(cache_file.GetLength() > 0);
++        ASSERT_TRUE(cache_file.SetLength(cache_file.GetLength() / 2));
++        ASSERT_TRUE(cache_file.SetLength(cache_file.GetLength() * 2));
++        test_callback_executed = true;
++      }));
++  task_environment_.RunUntilIdle();
++  ASSERT_TRUE(test_callback_executed);
++
++  // Reload the cache file.
++  font_lookup_table_builder_->ResetLookupTableForTesting();
++  font_lookup_table_builder_->SchedulePrepareFontUniqueNameTableIfNeeded();
++
++  test_callback_executed = false;
++  font_lookup_table_builder_->QueueShareMemoryRegionWhenReady(
++      base::SequencedTaskRunner::GetCurrentDefault(),
++      base::BindLambdaForTesting(
++          [this, &test_callback_executed](base::ReadOnlySharedMemoryRegion) {
++            TestMatchFonts();
++            test_callback_executed = true;
++          }));
++
++  task_environment_.RunUntilIdle();
++  ASSERT_TRUE(test_callback_executed);
++
++  // Ensure that the table is still valid even though persisting has failed
++  // due to the exclusive write lock on the file.
++  ASSERT_TRUE(font_lookup_table_builder_->FontUniqueNameTableReady());
++}
++
++}  // namespace content
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index 75dbea1be3e60..28afdb7d6f13a 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -670,6 +670,10 @@ std::string ContentBrowserClient::GetDefaultDownloadName() {
+   return std::string();
+ }
+ 
++base::FilePath ContentBrowserClient::GetFontLookupTableCacheDir() {
++  return base::FilePath();
++}
++
+ base::FilePath ContentBrowserClient::GetShaderDiskCacheDirectory() {
+   return base::FilePath();
+ }
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 868dd480c66e3..174a8d9197876 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -1083,6 +1083,11 @@ class CONTENT_EXPORT ContentBrowserClient {
+   // else we should do with the file.
+   virtual std::string GetDefaultDownloadName();
+ 
++  // Returns the path to the font lookup table cache directory in which - on
++  // Windows 7 & 8 - we cache font name meta information to perform @font-face {
++  // src: local() } lookups.
++  virtual base::FilePath GetFontLookupTableCacheDir();
++
+   // Returns the path to the browser shader disk cache root.
+   virtual base::FilePath GetShaderDiskCacheDirectory();
+ 
+diff --git a/content/shell/browser/shell_content_browser_client.cc b/content/shell/browser/shell_content_browser_client.cc
+index 9f48acb9dd982..f2da991706dda 100644
+--- a/content/shell/browser/shell_content_browser_client.cc
++++ b/content/shell/browser/shell_content_browser_client.cc
+@@ -450,6 +450,11 @@ void ShellContentBrowserClient::OverrideWebkitPrefs(
+   }
+ }
+ 
++base::FilePath ShellContentBrowserClient::GetFontLookupTableCacheDir() {
++  return browser_context()->GetPath().Append(
++      FILE_PATH_LITERAL("FontLookupTableCache"));
++}
++
+ std::unique_ptr<content::DevToolsManagerDelegate>
+ ShellContentBrowserClient::CreateDevToolsManagerDelegate() {
+   return std::make_unique<ShellDevToolsManagerDelegate>(browser_context());
+diff --git a/content/shell/browser/shell_content_browser_client.h b/content/shell/browser/shell_content_browser_client.h
+index f070810b8c150..176a7fe15b1fd 100644
+--- a/content/shell/browser/shell_content_browser_client.h
++++ b/content/shell/browser/shell_content_browser_client.h
+@@ -77,6 +77,7 @@ class ShellContentBrowserClient : public ContentBrowserClient {
+   void OverrideWebPreferences(WebContents* web_contents,
+                               SiteInstance& main_frame_site,
+                               blink::web_pref::WebPreferences* prefs) override;
++  base::FilePath GetFontLookupTableCacheDir() override;
+   std::unique_ptr<content::DevToolsManagerDelegate>
+   CreateDevToolsManagerDelegate() override;
+   void ExposeInterfacesToRenderer(

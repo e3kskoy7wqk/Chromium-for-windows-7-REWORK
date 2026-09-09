@@ -1,0 +1,1 @@
+gfe-relnote: Replace QuicIpAddress with a standalone implementation.  No functional change, not flag protected.    2019/6/7 23:28:39    0dfdc0b07865610f66d95c91d2b9a404226c73a6

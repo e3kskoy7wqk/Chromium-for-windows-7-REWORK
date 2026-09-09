@@ -1,0 +1,1 @@
+[gDM] Window audio capture application id heuristic    2025/7/30 7:24:42    1c058d1fe091acfb268fdf26af27cebc638d58c6

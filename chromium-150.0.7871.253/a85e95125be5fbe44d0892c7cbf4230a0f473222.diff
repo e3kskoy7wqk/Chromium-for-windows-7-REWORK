@@ -1,0 +1,235 @@
+diff --git a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+index 5792e157cfcf3..8afa8d94e7f88 100644
+--- a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
++++ b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+@@ -60,10 +60,6 @@ struct RequiredFontStyle {
+   DWRITE_FONT_STYLE required_style;
+ };
+ 
+-// Used in tests to allow a known font to masquerade as a locally installed
+-// font. Usually this is the Ahem.ttf font. Leaked at shutdown.
+-std::vector<base::FilePath>* g_sideloaded_fonts = nullptr;
+-
+ const RequiredFontStyle kRequiredStyles[] = {
+     // The regular version of Gill Sans is actually in the Gill Sans MT family,
+     // and the Gill Sans family typically contains just the ultra-bold styles.
+@@ -117,73 +113,6 @@ bool CheckRequiredStylesPresent(IDWriteFontCollection* collection,
+   return true;
+ }
+ 
+-HRESULT GetLocalFontCollection(mswr::ComPtr<IDWriteFactory3>& factory,
+-                               IDWriteFontCollection** collection) {
+-  if (!g_sideloaded_fonts) {
+-    // Normal path - use the system's font collection with no sideloading.
+-    return factory->GetSystemFontCollection(collection);
+-  }
+-  // If sideloading - build a font set with sideloads then add the system font
+-  // collection.
+-  mswr::ComPtr<IDWriteFontSetBuilder> font_set_builder;
+-  HRESULT hr = factory->CreateFontSetBuilder(&font_set_builder);
+-  if (!SUCCEEDED(hr)) {
+-    return hr;
+-  }
+-  for (auto& path : *g_sideloaded_fonts) {
+-    mswr::ComPtr<IDWriteFontFile> font_file;
+-    hr = factory->CreateFontFileReference(path.value().c_str(), nullptr,
+-                                          &font_file);
+-    if (!SUCCEEDED(hr)) {
+-      return hr;
+-    }
+-    BOOL supported;
+-    DWRITE_FONT_FILE_TYPE file_type;
+-    UINT32 n_fonts;
+-    hr = font_file->Analyze(&supported, &file_type, nullptr, &n_fonts);
+-    if (!SUCCEEDED(hr)) {
+-      return hr;
+-    }
+-    for (UINT32 font_index = 0; font_index < n_fonts; ++font_index) {
+-      mswr::ComPtr<IDWriteFontFaceReference> font_face;
+-      hr = factory->CreateFontFaceReference(font_file.Get(), font_index,
+-                                            DWRITE_FONT_SIMULATIONS_NONE,
+-                                            &font_face);
+-      if (!SUCCEEDED(hr)) {
+-        return hr;
+-      }
+-      hr = font_set_builder->AddFontFaceReference(font_face.Get());
+-      if (!SUCCEEDED(hr)) {
+-        return hr;
+-      }
+-    }
+-  }
+-  // Now add the system fonts.
+-  mswr::ComPtr<IDWriteFontSet> system_font_set;
+-  hr = factory->GetSystemFontSet(&system_font_set);
+-  if (!SUCCEEDED(hr)) {
+-    return hr;
+-  }
+-  hr = font_set_builder->AddFontSet(system_font_set.Get());
+-  if (!SUCCEEDED(hr)) {
+-    return hr;
+-  }
+-  // Make the set.
+-  mswr::ComPtr<IDWriteFontSet> font_set;
+-  hr = font_set_builder->CreateFontSet(&font_set);
+-  if (!SUCCEEDED(hr)) {
+-    return hr;
+-  }
+-  // Make the collection.
+-  mswr::ComPtr<IDWriteFontCollection1> collection1;
+-  hr = factory->CreateFontCollectionFromFontSet(font_set.Get(), &collection1);
+-  if (!SUCCEEDED(hr)) {
+-    return hr;
+-  }
+-  hr = collection1->QueryInterface(collection);
+-  return hr;
+-}
+-
+ }  // namespace
+ 
+ DWriteFontProxyImpl::DWriteFontProxyImpl()
+@@ -198,15 +127,6 @@ void DWriteFontProxyImpl::Create(
+                               std::move(receiver));
+ }
+ 
+-// static
+-void DWriteFontProxyImpl::SideLoadFontForTesting(base::FilePath path) {
+-  if (!g_sideloaded_fonts) {
+-    // Note: this list is leaked.
+-    g_sideloaded_fonts = new std::vector<base::FilePath>();
+-  }
+-  g_sideloaded_fonts->push_back(path);
+-}
+-
+ void DWriteFontProxyImpl::SetWindowsFontsPathForTesting(std::u16string path) {
+   windows_fonts_path_.swap(path);
+ }
+@@ -481,15 +401,8 @@ void DWriteFontProxyImpl::MatchUniqueFont(
+   // We must not get here if this version of DWrite can't handle performing the
+   // search.
+   DCHECK(factory3_.Get());
+-  DCHECK(collection_);
+-  Microsoft::WRL::ComPtr<IDWriteFontCollection1> collection1;
+-  HRESULT hr = collection_.As(&collection1);
+-  if (FAILED(hr)) {
+-    return;
+-  }
+-  // In non-testing cases this is identical to factory3_->GetSystemFontSet().
+   mswr::ComPtr<IDWriteFontSet> system_font_set;
+-  hr = collection1->GetFontSet(&system_font_set);
++  HRESULT hr = factory3_->GetSystemFontSet(&system_font_set);
+   if (FAILED(hr))
+     return;
+ 
+@@ -632,9 +545,7 @@ void DWriteFontProxyImpl::InitializeDirectWrite() {
+   factory_.As<IDWriteFactory3>(&factory3_);
+   DCHECK(factory3_);
+ 
+-  // Normally identical to factory_->GetSystemFontCollection() unless a
+-  // sideloaded font has been added using SideLoadFontForTesting().
+-  HRESULT hr = GetLocalFontCollection(factory3_, &collection_);
++  HRESULT hr = factory_->GetSystemFontCollection(&collection_);
+   DCHECK(SUCCEEDED(hr));
+ 
+   if (!collection_) {
+diff --git a/content/browser/renderer_host/dwrite_font_proxy_impl_win.h b/content/browser/renderer_host/dwrite_font_proxy_impl_win.h
+index 126171d17a20b..92281eeb537d3 100644
+--- a/content/browser/renderer_host/dwrite_font_proxy_impl_win.h
++++ b/content/browser/renderer_host/dwrite_font_proxy_impl_win.h
+@@ -40,12 +40,6 @@ class CONTENT_EXPORT DWriteFontProxyImpl
+ 
+   void SetWindowsFontsPathForTesting(std::u16string path);
+ 
+-  // Adds a font to the "system collection" for content_shell tests. Usually
+-  // this is the Ahem.ttf font. The font will report as being `local()` as if
+-  // it was installed on the system. Must be called before any instance of the
+-  // class is instantiated.
+-  static void SideLoadFontForTesting(base::FilePath path);
+-
+  protected:
+   // blink::mojom::DWriteFontProxy:
+   void FindFamily(const std::u16string& family_name,
+@@ -73,6 +67,8 @@ class CONTENT_EXPORT DWriteFontProxyImpl
+ 
+  private:
+   bool IsLastResortFallbackFont(uint32_t font_index);
++
++ private:
+   bool direct_write_initialized_ = false;
+   Microsoft::WRL::ComPtr<IDWriteFontCollection> collection_;
+   Microsoft::WRL::ComPtr<IDWriteFactory> factory_;
+diff --git a/content/web_test/browser/web_test_browser_main_platform_support_win.cc b/content/web_test/browser/web_test_browser_main_platform_support_win.cc
+index 2411722336c7b..a300e31d07a95 100644
+--- a/content/web_test/browser/web_test_browser_main_platform_support_win.cc
++++ b/content/web_test/browser/web_test_browser_main_platform_support_win.cc
+@@ -17,7 +17,6 @@
+ #include "base/logging.h"
+ #include "base/path_service.h"
+ #include "base/strings/utf_string_conversions.h"
+-#include "content/browser/renderer_host/dwrite_font_proxy_impl_win.h"
+ #include "content/shell/common/shell_switches.h"
+ #include "ui/gfx/win/direct_write.h"
+ 
+@@ -33,7 +32,11 @@ void SetupFonts() {
+   base::FilePath font_path =
+       base_path.Append(FILE_PATH_LITERAL("/test_fonts/Ahem.ttf"));
+ 
+-  DWriteFontProxyImpl::SideLoadFontForTesting(font_path);
++  const char kRegisterFontFiles[] = "register-font-files";
++  // DirectWrite sandbox registration.
++  base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
++  command_line.AppendSwitchASCII(kRegisterFontFiles,
++                                 base::WideToUTF8(font_path.value()));
+ }
+ 
+ }  // namespace
+diff --git a/content/web_test/browser/web_test_content_browser_client.cc b/content/web_test/browser/web_test_content_browser_client.cc
+index 6acf2daab8315..6ff8fcc94bffc 100644
+--- a/content/web_test/browser/web_test_content_browser_client.cc
++++ b/content/web_test/browser/web_test_content_browser_client.cc
+@@ -662,6 +662,23 @@ bool WebTestContentBrowserClient::PreSpawnChild(
+     sandbox::TargetConfig* config,
+     sandbox::mojom::Sandbox sandbox_type,
+     ChildSpawnFlags flags) {
++  if (sandbox_type == sandbox::mojom::Sandbox::kRenderer) {
++    if (base::FeatureList::IsEnabled(
++            sandbox::policy::features::kWinSboxAllowSystemFonts)) {
++      // Add sideloaded font files for testing. See also DIR_WINDOWS_FONTS
++      // addition in |StartSandboxedProcess|.
++      std::vector<std::string> font_files = switches::GetSideloadFontFiles();
++      for (std::vector<std::string>::const_iterator i(font_files.begin());
++           i != font_files.end(); ++i) {
++        sandbox::ResultCode result = config->AddRule(
++            sandbox::SubSystem::kFiles, sandbox::Semantics::kFilesAllowReadonly,
++            base::UTF8ToWide(*i).c_str());
++        if (result != sandbox::SBOX_ALL_OK) {
++          return false;
++        }
++      }
++    }
++  }
+   return true;
+ }
+ #endif  // BUILDFLAG(IS_WIN)
+diff --git a/content/web_test/renderer/web_test_content_renderer_client.cc b/content/web_test/renderer/web_test_content_renderer_client.cc
+index 963fa8ffaaffd..47fd95cd1f99d 100644
+--- a/content/web_test/renderer/web_test_content_renderer_client.cc
++++ b/content/web_test/renderer/web_test_content_renderer_client.cc
+@@ -109,6 +109,18 @@ void WebTestContentRendererClient::RenderThreadStarted() {
+   // platforms set up fonts as part of WebTestBrowserMainRunner in the
+   // browser process, via WebTestBrowserPlatformInitialize().
+   skia::InitializeSkFontMgrForTest();
++#elif BUILDFLAG(IS_WIN)
++  // DirectWrite only has access to %WINDIR%\Fonts by default. For developer
++  // side-loading, support kRegisterFontFiles to allow access to additional
++  // fonts. The browser process sets these files and punches a hole in the
++  // sandbox for the renderer to load them here.
++  {
++    sk_sp<SkFontMgr> fontmgr = SkFontMgr_New_DirectWrite();
++    for (const auto& file : switches::GetSideloadFontFiles()) {
++      sk_sp<SkTypeface> typeface = fontmgr->makeFromFile(file.c_str());
++      blink::WebFontRendering::AddSideloadedFontForTesting(std::move(typeface));
++    }
++  }
+ #endif
+ }
+ 

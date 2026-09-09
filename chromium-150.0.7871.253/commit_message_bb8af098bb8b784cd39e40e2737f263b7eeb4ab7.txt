@@ -1,0 +1,1 @@
+[Extensions c2s] Remove corner_radius optional value in hover card    2023/11/8 1:12:28    bb8af098bb8b784cd39e40e2737f263b7eeb4ab7

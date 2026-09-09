@@ -1,0 +1,19 @@
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index 66e1c0fa50581..4c3a1e7304ab1 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -1401,7 +1407,13 @@ void DesktopWindowTreeHostWin::UpdateAllowScreenshots() {
+     affinity = WDA_MONITOR;
+   }
+ 
+-  SetWindowDisplayAffinity(GetHWND(), affinity);
++    typedef BOOL(WINAPI *SetWindowDisplayAffinity_t)(HWND, DWORD);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    SetWindowDisplayAffinity_t pfnSetWindowDisplayAffinity =
++        (SetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "SetWindowDisplayAffinity");
++    if (pfnSetWindowDisplayAffinity)
++  pfnSetWindowDisplayAffinity(GetHWND(), affinity);
+ }
+ 
+ void DesktopWindowTreeHostWin::UpdateBackdropColorMode() {

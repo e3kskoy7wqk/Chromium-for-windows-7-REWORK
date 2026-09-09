@@ -1,0 +1,48 @@
+diff --git a/third_party/xnnpack/src/src/xnnpack/init-once.h b/third_party/xnnpack/src/src/xnnpack/init-once.h
+index 1bcc7fd1e4..a7182094e0 100644
+--- a/third_party/xnnpack/src/src/xnnpack/init-once.h
++++ b/third_party/xnnpack/src/src/xnnpack/init-once.h
+@@ -17,18 +17,40 @@
+ 
+ #if XNN_PLATFORM_WINDOWS
+ 
++static int fake_pthread_once(volatile long *once_control,
++                             void (*init_routine)(void)) {
++    // Try for a fast path first. Note: this should be an acquire semantics read
++    // It is on x86 and x64, where Windows runs.
++    if (*once_control != 1) {
++        while (1) {
++            switch (InterlockedCompareExchange(once_control, 2, 0)) {
++                case 0:
++                    init_routine();
++                    InterlockedExchange(once_control, 1);
++                    return 0;
++                case 1:
++                    // The initializer has already been executed
++                    return 0;
++                default:
++                    // The initializer is being processed by another thread
++                    SwitchToThread();
++            }
++        }
++    }
++    return 0;
++}
++
+ #define XNN_INIT_ONCE_GUARD(name)                              \
+   static void init_##name##_config(void);                      \
+   static BOOL CALLBACK name##_windows_wrapper(                 \
+       PINIT_ONCE init_once, PVOID parameter, PVOID* context) { \
+     init_##name##_config();                                    \
+     return TRUE;                                               \
+   }                                                            \
+-    static INIT_ONCE name##_guard = INIT_ONCE_STATIC_INIT /* no semicolon */
++    static volatile long name##_guard = 0 /* no semicolon */
+ 
+ #define XNN_INIT_ONCE(name)                                         \
+-  InitOnceExecuteOnce(&name##_guard, &name##_windows_wrapper, NULL, \
+-                      NULL) /* no semicolon */
++    fake_pthread_once(&name##_guard, &init_##name##_config) /* no semicolon */
+ 
+ #elif XNN_HAS_PTHREADS
+ 

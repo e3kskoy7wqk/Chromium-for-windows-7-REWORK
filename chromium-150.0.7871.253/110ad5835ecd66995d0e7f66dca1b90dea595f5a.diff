@@ -1,0 +1,519 @@
+diff --git a/third_party/libwebp/src/src/utils/thread_utils.c b/third_party/libwebp/src/src/utils/thread_utils.c
+index 5b06d6e2..a1c13f03 100644
+--- a/third_party/libwebp/src/src/utils/thread_utils.c
++++ b/third_party/libwebp/src/src/utils/thread_utils.c
+@@ -32,7 +32,7 @@ typedef HANDLE pthread_t;
+ #error _WIN32_WINNT must target Windows Vista / Server 2008 or newer.
+ #endif
+ typedef SRWLOCK pthread_mutex_t;
+-typedef CONDITION_VARIABLE pthread_cond_t;
++typedef void *pthread_cond_t;
+ 
+ #ifndef WINAPI_FAMILY_PARTITION
+ #define WINAPI_PARTITION_DESKTOP 1
+@@ -112,6 +522,497 @@ static int pthread_mutex_destroy(pthread_mutex_t* const mutex) {
+   return 0;
+ }
+ 
++#define pthread_testcancel()
++#define LIFE_COND 0xC0BAB1FD
++#define DEAD_COND 0xC0DEADBF
++
++#define STATIC_COND_INITIALIZER(x)		((pthread_cond_t)(x) == ((pthread_cond_t)PTHREAD_COND_INITIALIZER))
++
++typedef struct cond_t cond_t;
++struct cond_t
++{
++    unsigned int valid;   
++    int busy;
++    LONG waiters_count_; /* Number of waiting threads.  */
++    LONG waiters_count_unblock_; /* Number of waiting threads whitch can be unblocked.  */
++    LONG waiters_count_gone_; /* Number of waiters which are gone.  */
++    CRITICAL_SECTION waiters_count_lock_; /* Serialize access to <waiters_count_>.  */
++    CRITICAL_SECTION waiters_q_lock_; /* Serialize access to sema_q.  */
++    LONG value_q;
++    CRITICAL_SECTION waiters_b_lock_; /* Serialize access to sema_b.  */
++    LONG value_b;
++    HANDLE sema_q; /* Semaphore used to queue up threads waiting for the condition to
++                 become signaled.  */
++    HANDLE sema_b; /* Semaphore used to queue up threads waiting for the condition which
++                 became signaled.  */
++};
++
++#define __pthread_shallcancel() (0)
++
++static int do_sema_b_wait (HANDLE sema, int nointerrupt, DWORD timeout,CRITICAL_SECTION *cs, LONG *val);
++static int do_sema_b_release(HANDLE sema, LONG count,CRITICAL_SECTION *cs, LONG *val);
++static void cleanup_wait(void *arg);
++
++typedef struct sCondWaitHelper {
++    cond_t *c;
++    pthread_mutex_t *external_mutex;
++    int *r;
++} sCondWaitHelper;
++
++static inline int do_sema_b_wait_intern (HANDLE sema, int nointerrupt, DWORD timeout);
++
++static inline int
++pthread_cond_init (pthread_cond_t *c, const void *a)
++{
++  cond_t *_c;
++  int r = 0;
++
++  if (!c)
++    return EINVAL;
++#if 0
++  if (a && *a == PTHREAD_PROCESS_SHARED)
++    return ENOSYS;
++#endif
++
++  if ( !(_c = (cond_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(*_c))) ) {
++      return ENOMEM; 
++  }
++  _c->valid  = DEAD_COND;
++  _c->busy = 0;
++  _c->waiters_count_ = 0;
++  _c->waiters_count_gone_ = 0;
++  _c->waiters_count_unblock_ = 0;
++
++  _c->sema_q = CreateSemaphore (NULL,       /* no security */
++      0,          /* initially 0 */
++      0x7fffffff, /* max count */
++      NULL);      /* unnamed  */
++  _c->sema_b =  CreateSemaphore (NULL,       /* no security */
++      0,          /* initially 0 */
++      0x7fffffff, /* max count */
++      NULL);  
++  if (_c->sema_q == NULL || _c->sema_b == NULL) {
++      if (_c->sema_q != NULL)
++        CloseHandle (_c->sema_q);
++      if (_c->sema_b != NULL)
++        CloseHandle (_c->sema_b);
++      HeapFree(GetProcessHeap(), 0, _c);
++      r = EAGAIN;
++  } else {
++      InitializeCriticalSection(&_c->waiters_count_lock_);
++      InitializeCriticalSection(&_c->waiters_b_lock_);
++      InitializeCriticalSection(&_c->waiters_q_lock_);
++      _c->value_q = 0;
++      _c->value_b = 1;
++  }
++  if (!r)
++    {
++      _c->valid = LIFE_COND;
++      *c = (pthread_cond_t)_c;
++    }
++  else
++    *c = (pthread_cond_t)NULL;
++  return r;
++}
++
++extern pthread_mutex_t cond_locked;
++
++static int
++cond_static_init (pthread_cond_t *c)
++{
++  int r = 0;
++  
++  pthread_mutex_lock (&cond_locked);
++  if (c == NULL)
++    r = EINVAL;
++  else if (*c == 0)
++    r = pthread_cond_init (c, NULL);
++  else
++    /* We assume someone was faster ... */
++    r = 0;
++  pthread_mutex_unlock (&cond_locked);
++  return r;
++}
++
++static inline int
++pthread_cond_destroy (pthread_cond_t *c)
++{
++  cond_t *_c;
++  int r;
++  if (!c || 0)
++    return EINVAL;
++  if (*c == 0)
++    {
++      pthread_mutex_lock (&cond_locked);
++      if (*c == 0)
++      {
++        *c = (pthread_cond_t)NULL;
++        r = 0;
++      }
++      else
++        r = EBUSY;
++      pthread_mutex_unlock (&cond_locked);
++      return r;
++    }
++  _c = (cond_t *) *c;
++  r = do_sema_b_wait(_c->sema_b, 0, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++  if (r != 0)
++    return r;
++  if (!TryEnterCriticalSection (&_c->waiters_count_lock_))
++    {
++       do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++       return EBUSY;
++    }
++  if (_c->waiters_count_ > _c->waiters_count_gone_)
++    {
++      r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++      if (!r) r = EBUSY;
++      LeaveCriticalSection(&_c->waiters_count_lock_);
++      return r;
++    }
++  *c = (pthread_cond_t)NULL;
++  do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++
++  if (!CloseHandle (_c->sema_q) && !r)
++    r = EINVAL;
++  if (!CloseHandle (_c->sema_b) && !r)
++    r = EINVAL;
++  LeaveCriticalSection (&_c->waiters_count_lock_);
++  DeleteCriticalSection(&_c->waiters_count_lock_);
++  DeleteCriticalSection(&_c->waiters_b_lock_);
++  DeleteCriticalSection(&_c->waiters_q_lock_);
++  _c->valid  = DEAD_COND;
++  HeapFree(GetProcessHeap(), 0, _c);
++  return 0;
++}
++
++static inline int
++pthread_cond_signal (pthread_cond_t *c)
++{
++  cond_t *_c;
++  int r;
++
++  if (!c || 0)
++    return EINVAL;
++  _c = (cond_t *)*c;
++  if (_c == (cond_t *)0)
++    return 0;
++  else if (_c->valid != (unsigned int)LIFE_COND)
++    return EINVAL;
++
++  EnterCriticalSection (&_c->waiters_count_lock_);
++  /* If there aren't any waiters, then this is a no-op.   */
++  if (_c->waiters_count_unblock_ != 0)
++    {
++      if (_c->waiters_count_ == 0)
++      {
++        LeaveCriticalSection (&_c->waiters_count_lock_);
++        /* pthread_testcancel(); */
++        return 0;
++      }
++      _c->waiters_count_ -= 1;
++      _c->waiters_count_unblock_ += 1;
++    }
++  else if (_c->waiters_count_ > _c->waiters_count_gone_)
++    {
++      r = do_sema_b_wait (_c->sema_b, 1, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++      if (r != 0)
++      {
++        LeaveCriticalSection (&_c->waiters_count_lock_);
++        /* pthread_testcancel(); */
++        return r;
++      }
++      if (_c->waiters_count_gone_ != 0)
++      {
++        _c->waiters_count_ -= _c->waiters_count_gone_;
++        _c->waiters_count_gone_ = 0;
++      }
++      _c->waiters_count_ -= 1;
++      _c->waiters_count_unblock_ = 1;
++    }
++  else
++    {
++      LeaveCriticalSection (&_c->waiters_count_lock_);
++      /* pthread_testcancel(); */
++      return 0;
++    }
++  LeaveCriticalSection (&_c->waiters_count_lock_);
++  r = do_sema_b_release(_c->sema_q, 1,&_c->waiters_q_lock_,&_c->value_q);
++  /* pthread_testcancel(); */
++  return r;
++}
++
++static inline int
++pthread_cond_wait (pthread_cond_t *c, pthread_mutex_t *external_mutex)
++{
++  sCondWaitHelper ch;
++  cond_t *_c;
++  int r;
++
++  /* pthread_testcancel(); */
++
++  if (!c || 0)
++    return EINVAL;
++  _c = (cond_t *)*c;
++  if (*c == 0)
++  {
++    r = cond_static_init(c);
++    if (r != 0 && r != EBUSY)
++      return r;
++    _c = (cond_t *) *c;
++  } else if (_c->valid != (unsigned int)LIFE_COND)
++    return EINVAL;
++
++tryagain:
++  r = do_sema_b_wait (_c->sema_b, 0, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++  if (r != 0)
++    return r;
++
++  if (!TryEnterCriticalSection (&_c->waiters_count_lock_))
++  {
++    r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++      return r;
++    Sleep(0);
++    goto tryagain;
++  }
++
++  _c->waiters_count_++;
++  LeaveCriticalSection(&_c->waiters_count_lock_);
++  r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++  if (r != 0)
++    return r;
++
++  ch.c = _c;
++  ch.r = &r;
++  ch.external_mutex = external_mutex;
++
++#if 0
++  pthread_cleanup_push(cleanup_wait, (void *) &ch);
++#endif
++  r = pthread_mutex_unlock(external_mutex);
++  if (!r)
++    r = do_sema_b_wait (_c->sema_q, 0, INFINITE,&_c->waiters_q_lock_,&_c->value_q);
++
++#if 0
++  pthread_cleanup_pop(1);
++#endif
++  cleanup_wait( (void *) &ch);
++  return r;
++}
++
++static void
++cleanup_wait (void *arg)
++{
++  int n, r;
++  sCondWaitHelper *ch = (sCondWaitHelper *) arg;
++  cond_t *_c;
++
++  _c = ch->c;
++  EnterCriticalSection (&_c->waiters_count_lock_);
++  n = _c->waiters_count_unblock_;
++  if (n != 0)
++    _c->waiters_count_unblock_ -= 1;
++  else if ((INT_MAX/2) - 1 == _c->waiters_count_gone_)
++  {
++    _c->waiters_count_gone_ += 1;
++    r = do_sema_b_wait (_c->sema_b, 1, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++    {
++      LeaveCriticalSection(&_c->waiters_count_lock_);
++      ch->r[0] = r;
++      return;
++    }
++    _c->waiters_count_ -= _c->waiters_count_gone_;
++    r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++    {
++      LeaveCriticalSection(&_c->waiters_count_lock_);
++      ch->r[0] = r;
++      return;
++    }
++    _c->waiters_count_gone_ = 0;
++  }
++  else
++    _c->waiters_count_gone_ += 1;
++  LeaveCriticalSection (&_c->waiters_count_lock_);
++
++  if (n == 1)
++  {
++    r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++    {
++      ch->r[0] = r;
++      return;
++    }
++  }
++  r = pthread_mutex_lock(ch->external_mutex);
++  if (r != 0)
++    ch->r[0] = r;
++}
++
++static int
++do_sema_b_wait (HANDLE sema, int nointerrupt, DWORD timeout,CRITICAL_SECTION *cs, LONG *val)
++{
++  int r;
++  LONG v;
++  EnterCriticalSection(cs);
++  InterlockedDecrement(val);
++  v = val[0];
++  LeaveCriticalSection(cs);
++  if (v >= 0)
++    return 0;
++  r = do_sema_b_wait_intern (sema, nointerrupt, timeout);
++  EnterCriticalSection(cs);
++  if (r != 0)
++    InterlockedIncrement(val);
++  LeaveCriticalSection(cs);
++  return r;
++}
++
++static inline int
++do_sema_b_wait_intern (HANDLE sema, int nointerrupt, DWORD timeout)
++{
++  HANDLE arr[2];
++  DWORD maxH = 1;
++  int r = 0;
++  DWORD res, dt;
++  if (nointerrupt == 1)
++  {
++    res = WaitForSingleObject(sema, timeout);
++    switch (res) {
++    case WAIT_TIMEOUT:
++        r = ETIMEDOUT;
++        break;
++    case WAIT_ABANDONED:
++        r = EPERM;
++        break;
++    case WAIT_OBJECT_0:
++        break;
++    default:
++        /*We can only return EINVAL though it might not be posix compliant  */
++        r = EINVAL;
++    }
++    if (r != 0 && r != EINVAL && WaitForSingleObject(sema, 0) == WAIT_OBJECT_0)
++      r = 0;
++    return r;
++  }
++  arr[0] = sema;
++  arr[1] = (HANDLE) NULL;
++  if (arr[1] != NULL) maxH += 1;
++  if (maxH == 2)
++  {
++redo:
++      res = WaitForMultipleObjects(maxH, arr, 0, timeout);
++      switch (res) {
++      case WAIT_TIMEOUT:
++          r = ETIMEDOUT;
++          break;
++      case (WAIT_OBJECT_0 + 1):
++          ResetEvent(arr[1]);
++          if (nointerrupt != 2)
++            {
++            pthread_testcancel();
++            return EINVAL;
++            }
++          pthread_testcancel ();
++          goto redo;
++      case WAIT_ABANDONED:
++          r = EPERM;
++          break;
++      case WAIT_OBJECT_0:
++          r = 0;
++          break;
++      default:
++          /*We can only return EINVAL though it might not be posix compliant  */
++          r = EINVAL;
++      }
++      if (r != 0 && r != EINVAL && WaitForSingleObject(arr[0], 0) == WAIT_OBJECT_0)
++        r = 0;
++      if (r != 0 && nointerrupt != 2 && __pthread_shallcancel ())
++        return EINVAL;
++      return r;
++  }
++  if (timeout == INFINITE)
++  {
++    do {
++      res = WaitForSingleObject(sema, 40);
++      switch (res) {
++      case WAIT_TIMEOUT:
++          r = ETIMEDOUT;
++          break;
++      case WAIT_ABANDONED:
++          r = EPERM;
++          break;
++      case WAIT_OBJECT_0:
++          r = 0;
++          break;
++      default:
++          /*We can only return EINVAL though it might not be posix compliant  */
++          r = EINVAL;
++      }
++      if (r != 0 && __pthread_shallcancel ())
++      {
++        if (nointerrupt != 2)
++          pthread_testcancel();
++        return EINVAL;
++      }
++    } while (r == ETIMEDOUT);
++    if (r != 0 && r != EINVAL && WaitForSingleObject(sema, 0) == WAIT_OBJECT_0)
++      r = 0;
++    return r;
++  }
++  dt = 20;
++  do {
++    if (dt > timeout) dt = timeout;
++    res = WaitForSingleObject(sema, dt);
++    switch (res) {
++    case WAIT_TIMEOUT:
++        r = ETIMEDOUT;
++        break;
++    case WAIT_ABANDONED:
++        r = EPERM;
++        break;
++    case WAIT_OBJECT_0:
++        r = 0;
++        break;
++    default:
++        /*We can only return EINVAL though it might not be posix compliant  */
++        r = EINVAL;
++    }
++    timeout -= dt;
++    if (timeout != 0 && r != 0 && __pthread_shallcancel ())
++      return EINVAL;
++  } while (r == ETIMEDOUT && timeout != 0);
++  if (r != 0 && r == ETIMEDOUT && WaitForSingleObject(sema, 0) == WAIT_OBJECT_0)
++    r = 0;
++  if (r != 0 && nointerrupt != 2)
++    pthread_testcancel();
++  return r;
++}
++
++static int
++do_sema_b_release(HANDLE sema, LONG count,CRITICAL_SECTION *cs, LONG *val)
++{
++  int wc;
++  EnterCriticalSection(cs);
++  if (((long long) val[0] + (long long) count) > (long long) 0x7fffffffLL)
++  {
++    LeaveCriticalSection(cs);
++    return ERANGE;
++  }
++  wc = -val[0];
++  InterlockedExchangeAdd(val, count);
++  if (wc <= 0 || ReleaseSemaphore(sema, (wc < count ? wc : count), NULL))
++  {
++    LeaveCriticalSection(cs);
++    return 0;
++  }
++  InterlockedExchangeAdd(val, -count);
++  LeaveCriticalSection(cs);
++  return EINVAL;  
++}
++#if 0
+ // Condition
+ static int pthread_cond_destroy(pthread_cond_t* const condition) {
+   (void)condition;
+@@ -134,6 +1035,7 @@ static int pthread_cond_wait(pthread_cond_t* const condition,
+   const int ok = SleepConditionVariableSRW(condition, mutex, INFINITE, 0);
+   return !ok;
+ }
++#endif
+ 
+ #else  // !_WIN32
+ #define THREADFN void*

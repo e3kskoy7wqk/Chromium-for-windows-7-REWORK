@@ -1,0 +1,24 @@
+diff --git a/base/trace_event/process_memory_dump.cc b/base/trace_event/process_memory_dump.cc
+index 07f805a33dc19..ace4ce540ae68 100644
+--- a/base/trace_event/process_memory_dump.cc
++++ b/base/trace_event/process_memory_dump.cc
+@@ -103,6 +103,10 @@ absl::optional<size_t> ProcessMemoryDump::CountResidentBytes(
+       GetSystemPageCount(std::min(mapped_size, kMaxChunkSize), page_size);
+ 
+ #if BUILDFLAG(IS_WIN)
++    typedef BOOL(WINAPI * QUERYWORKINGSETEX)(HANDLE, PVOID, DWORD);
++    QUERYWORKINGSETEX fnQueryWorkingSetEx = QUERYWORKINGSETEX(GetProcAddress(GetModuleHandleW(L"psapi.dll"), "QueryWorkingSetEx"));
++    if(!fnQueryWorkingSetEx)
++        return std::nullopt;
+   auto vec =
+       base::HeapArray<PSAPI_WORKING_SET_EX_INFORMATION>::WithSize(max_vec_size);
+ #elif BUILDFLAG(IS_APPLE)
+@@ -126,7 +130,7 @@ absl::optional<size_t> ProcessMemoryDump::CountResidentBytes(
+     }
+ 
+     auto span = vec.first(page_count);
+-    failure = !QueryWorkingSetEx(GetCurrentProcess(), span.data(),
++    failure = !fnQueryWorkingSetEx(GetCurrentProcess(), span.data(),
+                                  static_cast<DWORD>(span.size_bytes()));
+ 
+     for (size_t i = 0; i < page_count; i++) {
