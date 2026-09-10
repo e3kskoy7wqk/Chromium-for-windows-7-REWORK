@@ -1,0 +1,48 @@
+diff --git a/components/system_cpu/cpu_probe_win.cc b/components/system_cpu/cpu_probe_win.cc
+index 1a11bf5c4c3e5..4ae73eec4a313 100644
+--- a/components/system_cpu/cpu_probe_win.cc
++++ b/components/system_cpu/cpu_probe_win.cc
+@@ -77,6 +77,25 @@ std::optional<CpuSample> CpuProbeWin::BlockingTaskRunnerHelper::Update() {
+ 
+   PDH_STATUS pdh_status;
+ 
++typedef PDH_STATUS ( __stdcall * PdhAddEnglishCounterW_type) (
++  __in  PDH_HQUERY hQuery,
++  __in  LPCWSTR szFullCounterPath,
++  __in  DWORD_PTR dwUserData,
++  __out PDH_HCOUNTER * phCounter
++  );
++  PdhAddEnglishCounterW_type m_pfnPdhAddEnglishCounterW = NULL;
++  HMODULE m_hinstancePDH_DLL =
++    //If the function fails, the return value is NULL.
++    ::LoadLibraryW( L"pdh.dll" //LPCSTR / char *
++      );
++  if( m_hinstancePDH_DLL )
++  {
++    m_pfnPdhAddEnglishCounterW = (PdhAddEnglishCounterW_type)
++      ::GetProcAddress(m_hinstancePDH_DLL, "PdhAddEnglishCounterW" );
++    if( m_pfnPdhAddEnglishCounterW == NULL )
++      m_pfnPdhAddEnglishCounterW = (PdhAddEnglishCounterW_type)
++      ::GetProcAddress(m_hinstancePDH_DLL, "PdhAddCounterW" );
++  }
+   if (!cpu_query_.is_valid()) {
+     cpu_query_ = base::win::ScopedPdhQuery::Create();
+     if (!cpu_query_.is_valid()) {
+@@ -92,7 +111,7 @@ std::optional<CpuSample> CpuProbeWin::BlockingTaskRunnerHelper::Update() {
+     const auto* query_info = is_running_in_vm
+                                  ? kHypervisorLogicalProcessorCounter
+                                  : kProcessorCounter;
+-    pdh_status = PdhAddEnglishCounter(cpu_query_.get(), query_info, NULL,
++    pdh_status = m_pfnPdhAddEnglishCounterW(cpu_query_.get(), query_info, NULL,
+                                       &cpu_percent_utilization_);
+ 
+     // When Chrome is running under a different hypervisor, we can add the
+@@ -102,7 +121,7 @@ std::optional<CpuSample> CpuProbeWin::BlockingTaskRunnerHelper::Update() {
+       pdh_status = PdhCollectQueryData(cpu_query_.get());
+       if (pdh_status != ERROR_SUCCESS) {
+         query_info = kProcessorCounter;
+-        pdh_status = PdhAddEnglishCounter(cpu_query_.get(), query_info, NULL,
++        pdh_status = m_pfnPdhAddEnglishCounterW(cpu_query_.get(), query_info, NULL,
+                                           &cpu_percent_utilization_);
+       }
+     }

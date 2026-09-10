@@ -1,0 +1,20 @@
+diff --git a/chrome/browser/win/taskbar_manager.cc b/chrome/browser/win/taskbar_manager.cc
+index 542adc36a00f4..3fa87946bf6e6 100644
+--- a/chrome/browser/win/taskbar_manager.cc
++++ b/chrome/browser/win/taskbar_manager.cc
+@@ -76,7 +76,14 @@ std::optional<bool> IsPinningAllowed(
+ // `g_pin_task_runner` for why this is restricted to the pin sequence.
+ void SetProcessAppUserModelId(const std::wstring& app_user_model_id) {
+   CHECK(g_pin_task_runner.Get()->RunsTasksInCurrentSequence());
+-  ::SetCurrentProcessExplicitAppUserModelID(app_user_model_id.c_str());
++typedef HRESULT(WINAPI *pfnSetCurrentProcessExplicitAppUserModelID)(PCWSTR AppID);
++    pfnSetCurrentProcessExplicitAppUserModelID fnSetCurrentProcessExplicitAppUserModelID =
++        (pfnSetCurrentProcessExplicitAppUserModelID)GetProcAddress(GetModuleHandleW(L"Shell32.dll"),
++                                                                   "SetCurrentProcessExplicitAppUserModelID");
++
++    if (fnSetCurrentProcessExplicitAppUserModelID != NULL) {
++  fnSetCurrentProcessExplicitAppUserModelID(app_user_model_id.c_str());
++    }
+ }
+ 
+ void ReleaseProcessAppUserModelId();

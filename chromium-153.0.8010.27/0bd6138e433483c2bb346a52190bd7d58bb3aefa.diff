@@ -1,0 +1,337 @@
+diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
+index 29da923c078e4..18767b900d6a7 100644
+--- a/chrome/browser/about_flags.cc
++++ b/chrome/browser/about_flags.cc
+@@ -531,6 +531,8 @@ const FeatureEntry::Choice kUseAngleChoicesWindows[] = {
+     {flag_descriptions::kUseAngleDefault, "", ""},
+     {flag_descriptions::kUseAngleD3D11, switches::kUseANGLE,
+      gl::kANGLEImplementationD3D11Name},
++    {flag_descriptions::kUseAngleD3D9, switches::kUseANGLE,
++     gl::kANGLEImplementationD3D9Name},
+     {flag_descriptions::kUseAngleD3D11Warp, switches::kUseANGLE,
+      gl::kANGLEImplementationD3D11WarpName}};
+ #elif BUILDFLAG(IS_ANDROID)
+diff --git a/chrome/browser/flag_descriptions.h b/chrome/browser/flag_descriptions.h
+index 0a872906d5f3e..1ae0599257f11 100644
+--- a/chrome/browser/flag_descriptions.h
++++ b/chrome/browser/flag_descriptions.h
+@@ -6676,6 +6676,7 @@ inline constexpr char kUseAngleDescriptionWindows[] =
+     "computers by default.";
+ 
+ inline constexpr char kUseAngleD3D11[] = "D3D11";
++inline constexpr char kUseAngleD3D9[] = "D3D9";
+ inline constexpr char kUseAngleD3D11Warp[] = "D3D11 WARP";
+ 
+ inline constexpr char kUseWaitableSwapChainName[] = "Use waitable swap chains";
+diff --git a/components/viz/common/features.cc b/components/viz/common/features.cc
+index 5877128c6484a..28f35078e0f5c 100644
+--- a/components/viz/common/features.cc
++++ b/components/viz/common/features.cc
+@@ -517,11 +517,12 @@ bool ShouldRemoveRedirectionBitmap() {
+     return false;
+   }
+ 
+-  // Some users set ANGLE backend to OpenGL via chrome://flags and in
++  // Some users set ANGLE backend to D3D9 or OpenGL via chrome://flags and in
+   // that case too we would also use an ANGLE EGLSurface.
+   const std::string angle_backend =
+       command_line->GetSwitchValueASCII(switches::kUseANGLE);
+-  if (angle_backend == gl::kANGLEImplementationOpenGLName) {
++  if (angle_backend == gl::kANGLEImplementationD3D9Name ||
++      angle_backend == gl::kANGLEImplementationOpenGLName) {
+     return false;
+   }
+ 
+diff --git a/gpu/config/gpu_info_collector.cc b/gpu/config/gpu_info_collector.cc
+index 8d7756ef7df35..a193eb0a94f2a 100644
+--- a/gpu/config/gpu_info_collector.cc
++++ b/gpu/config/gpu_info_collector.cc
+@@ -167,6 +167,8 @@ std::string GetDisplayTypeString(gl::DisplayType type) {
+       return "SWIFT_SHADER";
+     case gl::ANGLE_WARP:
+       return "ANGLE_WARP";
++    case gl::ANGLE_D3D9:
++      return "ANGLE_D3D9";
+     case gl::ANGLE_D3D11:
+       return "ANGLE_D3D11";
+     case gl::ANGLE_OPENGL:
+diff --git a/tools/metrics/histograms/metadata/gpu/enums.xml b/tools/metrics/histograms/metadata/gpu/enums.xml
+index e2158cfd93b6e..eece0fca617ee 100644
+--- a/tools/metrics/histograms/metadata/gpu/enums.xml
++++ b/tools/metrics/histograms/metadata/gpu/enums.xml
+@@ -390,7 +390,7 @@ chromium-metrics-reviews@google.com.
+   <int value="0" label="Default"/>
+   <int value="1" label="SwiftShader"/>
+   <int value="2" label="ANGLE WARP"/>
+-  <int value="3" label="ANGLE D3D9 (deprecated)"/>
++  <int value="3" label="ANGLE D3D9"/>
+   <int value="4" label="ANGLE D3D11"/>
+   <int value="5" label="ANGLE OpenGL"/>
+   <int value="6" label="ANGLE OpenGL ES"/>
+diff --git a/ui/gl/angle_implementation.h b/ui/gl/angle_implementation.h
+index e1971a57996f7..76e6ed48d1eda 100644
+--- a/ui/gl/angle_implementation.h
++++ b/ui/gl/angle_implementation.h
+@@ -9,15 +9,16 @@ namespace gl {
+ 
+ enum class ANGLEImplementation {
+   kNone = 0,
+-  kD3D11 = 1,
+-  kOpenGL = 2,
+-  kOpenGLES = 3,
+-  kNull = 4,
+-  kVulkan = 5,
+-  kSwiftShader = 6,
+-  kMetal = 7,
+-  kDefault = 8,
+-  kD3D11Warp = 9,
++  kD3D9 = 1,
++  kD3D11 = 2,
++  kOpenGL = 3,
++  kOpenGLES = 4,
++  kNull = 5,
++  kVulkan = 6,
++  kSwiftShader = 7,
++  kMetal = 8,
++  kDefault = 9,
++  kD3D11Warp = 10,
+   kMaxValue = kD3D11Warp,
+ };
+ 
+diff --git a/ui/gl/gl_angle_util_win.cc b/ui/gl/gl_angle_util_win.cc
+index 3042bfa6cccb7..9888eaf262b01 100644
+--- a/ui/gl/gl_angle_util_win.cc
++++ b/ui/gl/gl_angle_util_win.cc
+@@ -77,4 +77,16 @@ Microsoft::WRL::ComPtr<ID3D11Device> QueryD3D11DeviceObjectFromANGLE() {
+   return d3d11_device;
+ }
+ 
++Microsoft::WRL::ComPtr<IDirect3DDevice9> QueryD3D9DeviceObjectFromANGLE() {
++  auto* display = GLSurfaceEGL::GetGLDisplayEGL();
++  if (!display) {
++    return nullptr;
++  }
++  Microsoft::WRL::ComPtr<IDirect3DDevice9> d3d9_device =
++      reinterpret_cast<IDirect3DDevice9*>(QueryDeviceObjectFromANGLE(
++          display->GetDisplay(), EGL_D3D9_DEVICE_ANGLE,
++          "EGL_ANGLE_device_d3d9"));
++  return d3d9_device;
++}
++
+ }  // namespace gl
+diff --git a/ui/gl/gl_angle_util_win.h b/ui/gl/gl_angle_util_win.h
+index a14f222ab5adf..3facabbedb140 100644
+--- a/ui/gl/gl_angle_util_win.h
++++ b/ui/gl/gl_angle_util_win.h
+@@ -6,6 +6,7 @@
+ #define UI_GL_GL_ANGLE_UTIL_WIN_H_
+ 
+ #include <d3d11.h>
++#include <d3d9.h>
+ #include <wrl/client.h>
+ 
+ #include "ui/gl/gl_export.h"
+@@ -14,6 +15,8 @@ namespace gl {
+ 
+ GL_EXPORT Microsoft::WRL::ComPtr<ID3D11Device>
+ QueryD3D11DeviceObjectFromANGLE();
++GL_EXPORT Microsoft::WRL::ComPtr<IDirect3DDevice9>
++QueryD3D9DeviceObjectFromANGLE();
+ 
+ }  // namespace gl
+ 
+diff --git a/ui/gl/gl_display.cc b/ui/gl/gl_display.cc
+index 376561c05311e..06f8b6cab6e65 100644
+--- a/ui/gl/gl_display.cc
++++ b/ui/gl/gl_display.cc
+@@ -180,6 +180,10 @@ EGLDisplay GetDisplayFromType(
+       }
+       return eglGetDisplay(display);
+     }
++    case ANGLE_D3D9:
++      return GetPlatformANGLEDisplay(
++          display, EGL_PLATFORM_ANGLE_TYPE_D3D9_ANGLE, enabled_angle_features,
++          disabled_angle_features, extra_display_attribs);
+     case ANGLE_D3D11:
+       return GetPlatformANGLEDisplay(
+           display, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE, enabled_angle_features,
+@@ -288,6 +292,8 @@ EGLDisplay GetDisplayFromType(
+ ANGLEImplementation GetANGLEImplementationFromDisplayType(
+     DisplayType display_type) {
+   switch (display_type) {
++    case ANGLE_D3D9:
++      return ANGLEImplementation::kD3D9;
+     case ANGLE_D3D11:
+     case ANGLE_D3D11_NULL:
+     case ANGLE_D3D11on12:
+@@ -323,6 +329,8 @@ const char* DisplayTypeString(DisplayType display_type) {
+       return "Default";
+     case SWIFT_SHADER:
+       return "SwiftShader";
++    case ANGLE_D3D9:
++      return "D3D9";
+     case ANGLE_D3D11:
+       return "D3D11";
+     case ANGLE_D3D11_WARP:
+diff --git a/ui/gl/gl_display.h b/ui/gl/gl_display.h
+index 9ea3900c12669..682e5d3480d43 100644
+--- a/ui/gl/gl_display.h
++++ b/ui/gl/gl_display.h
+@@ -52,7 +52,7 @@ enum DisplayType {
+   DEFAULT = 0,
+   SWIFT_SHADER = 1,
+   ANGLE_WARP = 2,
+-  ANGLE_D3D9 [[deprecated]] = 3,
++  ANGLE_D3D9 = 3,
+   ANGLE_D3D11 = 4,
+   ANGLE_OPENGL = 5,
+   ANGLE_OPENGLES = 6,
+diff --git a/ui/gl/gl_features.cc b/ui/gl/gl_features.cc
+index d7ef4195d16f3..d9dd7b4a44dda 100644
+--- a/ui/gl/gl_features.cc
++++ b/ui/gl/gl_features.cc
+@@ -375,6 +375,12 @@ bool IsSoftwareGLFallbackDueToCrashesAllowed(
+   return base::FeatureList::IsEnabled(kAllowSoftwareGLFallbackDueToCrashes);
+ }
+ 
++BASE_FEATURE(kAllowANGLED3D9Fallback, base::FEATURE_DISABLED_BY_DEFAULT);
++
++bool IsANGLED3D9FallbackAllowed() {
++  return base::FeatureList::IsEnabled(kAllowANGLED3D9Fallback);
++}
++
+ #if BUILDFLAG(IS_ANDROID)
+ BASE_FEATURE(kAndroidLimitRgb565DisplayToApi32,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+diff --git a/ui/gl/gl_features.h b/ui/gl/gl_features.h
+index 653478cf81293..0955408b4194c 100644
+--- a/ui/gl/gl_features.h
++++ b/ui/gl/gl_features.h
+@@ -87,6 +87,10 @@ GL_EXPORT bool IsAnySoftwareGLAllowed(const base::CommandLine* command_line);
+ GL_EXPORT bool IsSoftwareGLFallbackDueToCrashesAllowed(
+     const base::CommandLine* command_line);
+ 
++// Check if ANGLE's D3D9 backend is a valid fallback if D3D11 does not
++// initialize or is disabled.
++GL_EXPORT bool IsANGLED3D9FallbackAllowed();
++
+ #if BUILDFLAG(IS_ANDROID)
+ GL_EXPORT BASE_DECLARE_FEATURE(kAndroidLimitRgb565DisplayToApi32);
+ GL_EXPORT BASE_DECLARE_FEATURE(kAndroidSurfaceControlPartialDamage);
+diff --git a/ui/gl/gl_implementation.cc b/ui/gl/gl_implementation.cc
+index 3cf0f5aae8d55..5f2a5e965bfd4 100644
+--- a/ui/gl/gl_implementation.cc
++++ b/ui/gl/gl_implementation.cc
+@@ -96,6 +96,8 @@ std::string GLImplementationParts::ANGLEString() const {
+   switch (angle) {
+     case ANGLEImplementation::kNone:
+       return "none";
++    case ANGLEImplementation::kD3D9:
++      return "d3d9";
+     case ANGLEImplementation::kD3D11:
+       return "d3d11";
+     case ANGLEImplementation::kOpenGL:
+@@ -131,6 +133,8 @@ const struct {
+      GLImplementationParts(ANGLEImplementation::kDefault)},
+     {kGLImplementationANGLEName, kANGLEImplementationDefaultName,
+      GLImplementationParts(ANGLEImplementation::kDefault)},
++    {kGLImplementationANGLEName, kANGLEImplementationD3D9Name,
++     GLImplementationParts(ANGLEImplementation::kD3D9)},
+     {kGLImplementationANGLEName, kANGLEImplementationD3D11Name,
+      GLImplementationParts(ANGLEImplementation::kD3D11)},
+     {kGLImplementationANGLEName, kANGLEImplementationD3D11on12Name,
+diff --git a/ui/gl/gl_switches.cc b/ui/gl/gl_switches.cc
+index 9c25c013ab1d7..3600c21358c6f 100644
+--- a/ui/gl/gl_switches.cc
++++ b/ui/gl/gl_switches.cc
+@@ -31,6 +31,7 @@ const char kGLImplementationStubName[] = "stub";
+ const char kGLImplementationDisabledName[] = "disabled";
+ 
+ const char kANGLEImplementationDefaultName[]  = "default";
++const char kANGLEImplementationD3D9Name[]     = "d3d9";
+ const char kANGLEImplementationD3D11Name[]    = "d3d11";
+ const char kANGLEImplementationD3D11on12Name[] = "d3d11on12";
+ const char kANGLEImplementationD3D11WarpName[] = "d3d11-warp";
+diff --git a/ui/gl/gl_switches.h b/ui/gl/gl_switches.h
+index e64997249fdc7..54a3d8f7f86f9 100644
+--- a/ui/gl/gl_switches.h
++++ b/ui/gl/gl_switches.h
+@@ -25,6 +25,7 @@ GL_EXPORT extern const char kGLImplementationStubName[];
+ GL_EXPORT extern const char kGLImplementationDisabledName[];
+ 
+ GL_EXPORT extern const char kANGLEImplementationDefaultName[];
++GL_EXPORT extern const char kANGLEImplementationD3D9Name[];
+ GL_EXPORT extern const char kANGLEImplementationD3D11Name[];
+ GL_EXPORT extern const char kANGLEImplementationD3D11on12Name[];
+ GL_EXPORT extern const char kANGLEImplementationD3D11WarpName[];
+diff --git a/ui/gl/init/gl_display_initializer.cc b/ui/gl/init/gl_display_initializer.cc
+index 940e8741f18d2..00374e6d8f2a0 100644
+--- a/ui/gl/init/gl_display_initializer.cc
++++ b/ui/gl/init/gl_display_initializer.cc
+@@ -86,13 +86,18 @@ void GetEGLInitDisplays(bool supports_angle,
+ 
+   if (supports_angle_d3d) {
+     if (use_angle_default) {
+-      // Default mode for ANGLE - use D3D11.
++      // Default mode for ANGLE - try D3D11, else try D3D9
+       if (!GetGlWorkarounds().disable_d3d11) {
+         AddInitDisplay(init_displays, ANGLE_D3D11);
+       }
++      if (features::IsANGLED3D9FallbackAllowed()) {
++        AddInitDisplay(init_displays, ANGLE_D3D9);
++      }
+     } else {
+       if (requested_renderer == kANGLEImplementationD3D11Name) {
+         AddInitDisplay(init_displays, ANGLE_D3D11);
++      } else if (requested_renderer == kANGLEImplementationD3D9Name) {
++        AddInitDisplay(init_displays, ANGLE_D3D9);
+       } else if (requested_renderer == kANGLEImplementationD3D11NULLName) {
+         AddInitDisplay(init_displays, ANGLE_D3D11_NULL);
+       } else if (requested_renderer == kANGLEImplementationD3D11on12Name) {
+@@ -205,8 +210,10 @@ void GetDisplayInitializationParams(bool* supports_angle,
+   if (g_driver_egl.client_ext.b_EGL_ANGLE_platform_angle) {
+     supports_angle_d3d =
+         g_driver_egl.client_ext.b_EGL_ANGLE_platform_angle_d3d &&
+-        gl::GLImplementationParts(gl::ANGLEImplementation::kD3D11)
+-            .IsAllowed(allowed_impls);
++        (gl::GLImplementationParts(gl::ANGLEImplementation::kD3D9)
++             .IsAllowed(allowed_impls) ||
++         gl::GLImplementationParts(gl::ANGLEImplementation::kD3D11)
++             .IsAllowed(allowed_impls));
+     supports_angle_opengl =
+         g_driver_egl.client_ext.b_EGL_ANGLE_platform_angle_opengl &&
+         (gl::GLImplementationParts(gl::ANGLEImplementation::kOpenGL)
+diff --git a/ui/gl/mojom/gl_implementation.mojom b/ui/gl/mojom/gl_implementation.mojom
+index a9571cd54bea2..905cfe275ce71 100644
+--- a/ui/gl/mojom/gl_implementation.mojom
++++ b/ui/gl/mojom/gl_implementation.mojom
+@@ -17,6 +17,7 @@ enum GLImplementation {
+ // Maps to its namesake in ui/gl/gl_implementation.h.
+ enum ANGLEImplementation {
+   kNone,
++  kD3D9,
+   kD3D11,
+   kOpenGL,
+   kOpenGLES,
+diff --git a/ui/gl/mojom/gl_implementation_mojom_traits.cc b/ui/gl/mojom/gl_implementation_mojom_traits.cc
+index d456f82601e25..cdaa956912a11 100644
+--- a/ui/gl/mojom/gl_implementation_mojom_traits.cc
++++ b/ui/gl/mojom/gl_implementation_mojom_traits.cc
+@@ -56,6 +56,8 @@ EnumTraits<gl::mojom::ANGLEImplementation, gl::ANGLEImplementation>::ToMojom(
+   switch (impl) {
+     case gl::ANGLEImplementation::kNone:
+       return gl::mojom::ANGLEImplementation::kNone;
++    case gl::ANGLEImplementation::kD3D9:
++      return gl::mojom::ANGLEImplementation::kD3D9;
+     case gl::ANGLEImplementation::kD3D11:
+       return gl::mojom::ANGLEImplementation::kD3D11;
+     case gl::ANGLEImplementation::kOpenGL:
+@@ -85,6 +87,8 @@ EnumTraits<gl::mojom::ANGLEImplementation, gl::ANGLEImplementation>::FromMojom(
+   switch (input) {
+     case gl::mojom::ANGLEImplementation::kNone:
+       return gl::ANGLEImplementation::kNone;
++    case gl::mojom::ANGLEImplementation::kD3D9:
++      return gl::ANGLEImplementation::kD3D9;
+     case gl::mojom::ANGLEImplementation::kD3D11:
+       return gl::ANGLEImplementation::kD3D11;
+     case gl::mojom::ANGLEImplementation::kOpenGL:

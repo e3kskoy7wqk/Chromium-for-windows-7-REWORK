@@ -1,0 +1,35 @@
+diff --git a/crypto/unexportable_key_win.cc b/crypto/unexportable_key_win.cc
+--- a/crypto/unexportable_key_win.cc
++++ b/crypto/unexportable_key_win.cc
+@@ -19,6 +19,7 @@
+ #include "base/containers/to_vector.h"
+ #include "base/logging.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/scoped_native_library.h"
+ #include "base/notimplemented.h"
+ #include "base/numerics/safe_math.h"
+ #include "base/strings/string_number_conversions.h"
+@@ -680,7 +681,22 @@ class AttestationKeyWin : public WinKeyImpl<UnexportableAttestationKey> {
+   // overflow vulnerabilities in the OS API.
+   std::vector<uint8_t> resp(max_resp_size);
+   UINT32 resp_len = resp.size();
+-    TBS_RESULT tbs_result = ::Tbsip_Submit_Command(
++  // Using dynamic loading instead of using linker support for delay
++  // loading to prevent failed loads being treated as a fatal failure which
++  // can happen in rare cases due to missing or corrupted DLL file.
++  base::ScopedNativeLibrary tbs_library(base::LoadSystemLibrary(L"tbs.dll"));
++  if (!tbs_library.is_valid()) {
++    return std::nullopt;
++  }
++
++  decltype(Tbsip_Submit_Command)* tbsip_submit_command_proc =
++      reinterpret_cast<decltype(Tbsip_Submit_Command)*>(
++          tbs_library.GetFunctionPointer("Tbsip_Submit_Command"));
++  if (!tbsip_submit_command_proc) {
++    return std::nullopt;
++  }
++
++    TBS_RESULT tbs_result = tbsip_submit_command_proc(
+         h_context, TBS_COMMAND_LOCALITY_ZERO, TBS_COMMAND_PRIORITY_NORMAL,
+         cmd.data(), cmd.size(), resp.data(), &resp_len);
+ 

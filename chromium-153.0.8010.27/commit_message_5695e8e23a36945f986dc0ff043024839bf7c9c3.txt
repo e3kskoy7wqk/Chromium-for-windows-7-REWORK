@@ -1,0 +1,1 @@
+Updated StartupInformation for Windows 7 API support and memory handling.    2019/7/24 6:13:13    5695e8e23a36945f986dc0ff043024839bf7c9c3

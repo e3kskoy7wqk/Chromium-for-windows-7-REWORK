@@ -1,0 +1,1 @@
+Remove Windows XP support code in LocaleWin.cpp.    2016/1/26 13:49:40    ac2e6192636293e1c08f757f2780f950450e2861

@@ -1,0 +1,1 @@
+Call NCrypt functions directly.    2016/9/13 9:54:22    6239919963057a88a3690d621f98a13e62e79dde

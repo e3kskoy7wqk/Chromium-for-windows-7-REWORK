@@ -1,0 +1,277 @@
+diff --git "a/C:\\src\\org\\cdm_module.cc" "b/C:\\src\\chromium_150_7871_46_v2\\src\\media\\cdm\\cdm_module.cc"
+index 11841a5..152ee7c 100644
+--- a/media/cdm/cdm_module.cc
++++ b/media/cdm/cdm_module.cc
+@@ -17,6 +17,9 @@
+ 
+ #if BUILDFLAG(IS_WIN)
+ #include <windows.h>
++#include <dbghelp.h>
++#pragma comment(lib, "dbghelp.lib")
++#include "base/win/windows_version.h"
+ #endif
+ 
+ #if BUILDFLAG(ENABLE_CDM_HOST_VERIFICATION)
+@@ -40,6 +43,240 @@ static CdmModule* g_cdm_module = nullptr;
+ // UMA report prefix
+ const char kUmaPrefix[] = "Media.EME.Cdm";
+ 
++#if BUILDFLAG(IS_WIN)
++
++typedef BOOLEAN (APIENTRY *RtlGenRandomFunc)(PVOID, ULONG);
++static BOOL WINAPI My_ProcessPrng(PBYTE pbBuffer, SIZE_T cbBuffer) {
++  HMODULE hAdvApi = GetModuleHandleW(L"advapi32.dll");
++  if (!hAdvApi) {
++    hAdvApi = ::LoadLibraryW(L"advapi32.dll");
++  }
++  if (hAdvApi) {
++    RtlGenRandomFunc RtlGenRandom = reinterpret_cast<RtlGenRandomFunc>(
++        ::GetProcAddress(hAdvApi, "SystemFunction036"));
++    if (RtlGenRandom) {
++      return RtlGenRandom(pbBuffer, static_cast<ULONG>(cbBuffer));
++    }
++  }
++  return FALSE;
++}
++
++static BOOL WINAPI My_SetThreadInformation(HANDLE hThread,
++                                           DWORD ThreadInformationClass,
++                                           LPVOID ThreadInformation,
++                                           DWORD ThreadInformationSize) {
++  SetLastError(ERROR_SUCCESS);
++  return TRUE;
++}
++
++static BOOL WINAPI My_GetProcessMitigationPolicy(HANDLE hProcess,
++                                                 DWORD MitigationPolicy,
++                                                 PVOID lpBuffer,
++                                                 SIZE_T dwLength) {
++  if (lpBuffer && dwLength > 0) {
++    ZeroMemory(lpBuffer, dwLength);
++  }
++  SetLastError(ERROR_SUCCESS);
++  return TRUE;
++}
++
++typedef FARPROC (WINAPI *GetProcAddressProc)(HMODULE hModule, LPCSTR lpProcName);
++static GetProcAddressProc g_RealGetProcAddress = nullptr;
++
++static FARPROC WINAPI My_GetProcAddress(HMODULE hModule, LPCSTR lpProcName) {
++  if (!IS_INTRESOURCE(lpProcName)) {
++    if (strcmp(lpProcName, "ProcessPrng") == 0) {
++      return reinterpret_cast<FARPROC>(&My_ProcessPrng);
++    }
++    if (strcmp(lpProcName, "SetThreadInformation") == 0) {
++      return reinterpret_cast<FARPROC>(&My_SetThreadInformation);
++    }
++    if (strcmp(lpProcName, "GetProcessMitigationPolicy") == 0) {
++      return reinterpret_cast<FARPROC>(&My_GetProcessMitigationPolicy);
++    }
++  }
++
++  return g_RealGetProcAddress ? g_RealGetProcAddress(hModule, lpProcName) : nullptr;
++}
++
++static bool ReplaceKernel32ExportName(const char* old_name, const char* new_name) {
++  HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
++  if (!hKernel32) return false;
++
++  ULONG size = 0;
++  PIMAGE_EXPORT_DIRECTORY pExportDir = (PIMAGE_EXPORT_DIRECTORY)ImageDirectoryEntryToData(
++      hKernel32, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
++  if (!pExportDir) return false;
++
++  PDWORD pNames = (PDWORD)((PBYTE)hKernel32 + pExportDir->AddressOfNames);
++  for (DWORD i = 0; i < pExportDir->NumberOfNames; i++) {
++    char* pszName = (char*)((PBYTE)hKernel32 + pNames[i]);
++    if (strcmp(pszName, old_name) == 0) {
++      DWORD dwOldProtect = 0;
++      size_t new_name_len = strlen(new_name) + 1;
++
++      if (VirtualProtect(pszName, new_name_len, PAGE_READWRITE, &dwOldProtect)) {
++        memcpy(pszName, new_name, new_name_len);
++        VirtualProtect(pszName, new_name_len, dwOldProtect, &dwOldProtect);
++        FlushInstructionCache(GetCurrentProcess(), pszName, new_name_len);
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
++#if defined(_WIN64)
++static void* WriteTrampolineInKernel32(HMODULE hKernel32, void* target_func) {
++  PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)hKernel32;
++  PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PBYTE)hKernel32 + pDos->e_lfanew);
++
++  PIMAGE_SECTION_HEADER pSec = IMAGE_FIRST_SECTION(pNt);
++  for (WORD i = 0; i < pNt->FileHeader.NumberOfSections; i++, pSec++) {
++    if (memcmp(pSec->Name, ".text", 5) == 0) {
++      PBYTE pSecEnd = (PBYTE)hKernel32 + pSec->VirtualAddress + pSec->Misc.VirtualSize;
++      PBYTE pTrampolineLocation = (PBYTE)(((uintptr_t)pSecEnd + 15) & ~15);
++
++      DWORD dwOldProtect = 0;
++      size_t trampSize = 14;
++      if (VirtualProtect(pTrampolineLocation, trampSize, PAGE_EXECUTE_READWRITE, &dwOldProtect)) {
++        BYTE code[14] = {
++          0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, // JMP [RIP+0]
++          0,0,0,0,0,0,0,0
++        };
++        uintptr_t addr = reinterpret_cast<uintptr_t>(target_func);
++        memcpy(&code[6], &addr, sizeof(addr));
++
++        memcpy(pTrampolineLocation, code, trampSize);
++        VirtualProtect(pTrampolineLocation, trampSize, dwOldProtect, &dwOldProtect);
++        FlushInstructionCache(GetCurrentProcess(), pTrampolineLocation, trampSize);
++
++        return pTrampolineLocation;
++      }
++    }
++  }
++  return nullptr;
++}
++#endif
++
++static bool HookKernel32Export(const char* func_name, void* new_function) {
++  HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
++  if (!hKernel32) return false;
++
++  void* actual_target = new_function;
++
++#if defined(_WIN64)
++  actual_target = WriteTrampolineInKernel32(hKernel32, new_function);
++  if (!actual_target) return false;
++#endif
++
++  ULONG size = 0;
++  PIMAGE_EXPORT_DIRECTORY pExportDir = (PIMAGE_EXPORT_DIRECTORY)ImageDirectoryEntryToData(
++      hKernel32, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
++  if (!pExportDir) return false;
++
++  PDWORD pNames = (PDWORD)((PBYTE)hKernel32 + pExportDir->AddressOfNames);
++  PWORD pOrdinals = (PWORD)((PBYTE)hKernel32 + pExportDir->AddressOfNameOrdinals);
++  PDWORD pFunctions = (PDWORD)((PBYTE)hKernel32 + pExportDir->AddressOfFunctions);
++
++  for (DWORD i = 0; i < pExportDir->NumberOfNames; i++) {
++    char* pszName = (char*)((PBYTE)hKernel32 + pNames[i]);
++    if (strcmp(pszName, func_name) == 0) {
++      WORD ordinal = pOrdinals[i];
++      DWORD dwOldProtect = 0;
++
++      DWORD newRva = static_cast<DWORD>((PBYTE)actual_target - (PBYTE)hKernel32);
++
++      if (VirtualProtect(&pFunctions[ordinal], sizeof(DWORD), PAGE_READWRITE, &dwOldProtect)) {
++        pFunctions[ordinal] = newRva;
++        VirtualProtect(&pFunctions[ordinal], sizeof(DWORD), dwOldProtect, &dwOldProtect);
++        FlushInstructionCache(GetCurrentProcess(), &pFunctions[ordinal], sizeof(DWORD));
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
++static void PrepareHookWin7() {
++  if (base::win::GetVersion() != base::win::Version::WIN7) {
++    return;
++  }
++
++  static bool prepared = false;
++  if (prepared) return;
++  prepared = true;
++
++  HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
++  if (hKernel32) {
++    g_RealGetProcAddress = reinterpret_cast<GetProcAddressProc>(
++        ::GetProcAddress(hKernel32, "GetProcAddress"));
++  }
++
++  ReplaceKernel32ExportName("GetProcessPreferredUILanguages", "GetProcessMitigationPolicy");
++  ReplaceKernel32ExportName("SetThreadIdealProcessorEx", "SetThreadInformation");
++
++  HookKernel32Export("GetProcAddress", reinterpret_cast<void*>(&My_GetProcAddress));
++}
++
++static void PatchCdmImports(HMODULE hCdmModule) {
++  if (!hCdmModule) return;
++
++  if (base::win::GetVersion() != base::win::Version::WIN7) {
++    return;
++  }
++
++  ULONG size;
++  PIMAGE_IMPORT_DESCRIPTOR pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)ImageDirectoryEntryToData(
++      hCdmModule, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &size);
++
++  if (!pImportDesc) return;
++
++  for (; pImportDesc->Name; pImportDesc++) {
++    PSTR pszModName = (PSTR)((PBYTE)hCdmModule + pImportDesc->Name);
++
++    if (_stricmp(pszModName, "kernel32.dll") == 0 ||
++        _stricmp(pszModName, "bcryptprimitives.dll") == 0) {
++
++      PIMAGE_THUNK_DATA pThunk = (PIMAGE_THUNK_DATA)((PBYTE)hCdmModule + pImportDesc->FirstThunk);
++      PIMAGE_THUNK_DATA pOriginalThunk = (PIMAGE_THUNK_DATA)((PBYTE)hCdmModule + (pImportDesc->OriginalFirstThunk ? pImportDesc->OriginalFirstThunk : pImportDesc->FirstThunk));
++
++      for (; pThunk->u1.Function; pThunk++, pOriginalThunk++) {
++        if (IMAGE_SNAP_BY_ORDINAL(pOriginalThunk->u1.Ordinal)) {
++          continue;
++        }
++
++        PIMAGE_IMPORT_BY_NAME pImport = (PIMAGE_IMPORT_BY_NAME)((PBYTE)hCdmModule + pOriginalThunk->u1.AddressOfData);
++        if (!pImport) continue;
++
++        LPCSTR pszFuncName = (LPCSTR)pImport->Name;
++
++        FARPROC pTargetFunc = nullptr;
++
++        if (strcmp(pszFuncName, "GetProcAddress") == 0) {
++          pTargetFunc = reinterpret_cast<FARPROC>(&My_GetProcAddress);
++        } else if (strcmp(pszFuncName, "ProcessPrng") == 0) {
++          pTargetFunc = reinterpret_cast<FARPROC>(&My_ProcessPrng);
++        } else if (strcmp(pszFuncName, "SetThreadInformation") == 0) {
++          pTargetFunc = reinterpret_cast<FARPROC>(&My_SetThreadInformation);
++        } else if (strcmp(pszFuncName, "GetProcessMitigationPolicy") == 0) {
++          pTargetFunc = reinterpret_cast<FARPROC>(&My_GetProcessMitigationPolicy);
++        }
++
++        if (pTargetFunc) {
++          DWORD dwOldProtect;
++          if (VirtualProtect(&pThunk->u1.Function, sizeof(ULONG_PTR), PAGE_READWRITE, &dwOldProtect)) {
++            pThunk->u1.Function = (ULONG_PTR)pTargetFunc;
++            VirtualProtect(&pThunk->u1.Function, sizeof(ULONG_PTR), dwOldProtect, &dwOldProtect);
++            FlushInstructionCache(GetCurrentProcess(), &pThunk->u1.Function, sizeof(ULONG_PTR));
++          }
++        }
++      }
++    }
++  }
++}
++#endif  // BUILDFLAG(IS_WIN)
++
+ #if BUILDFLAG(ENABLE_CDM_HOST_VERIFICATION)
+ void InitCdmHostVerification(
+     base::NativeLibrary cdm_library,
+@@ -118,6 +355,10 @@ bool CdmModule::Initialize(const base::FilePath& cdm_path) {
+   initialized_ = true;
+   cdm_path_ = cdm_path;
+ 
++#if BUILDFLAG(IS_WIN)
++  PrepareHookWin7();
++#endif
++
+   // Load the CDM.
+   base::TimeTicks start = base::TimeTicks::Now();
+   library_ = base::ScopedNativeLibrary(cdm_path);
+@@ -132,6 +373,10 @@ bool CdmModule::Initialize(const base::FilePath& cdm_path) {
+     return false;
+   }
+ 
++#if BUILDFLAG(IS_WIN)
++  PatchCdmImports(library_.get());
++#endif
++
+   // Only report load time for success loads.
+   ReportLoadTime(kUmaPrefix, load_time);
+ 

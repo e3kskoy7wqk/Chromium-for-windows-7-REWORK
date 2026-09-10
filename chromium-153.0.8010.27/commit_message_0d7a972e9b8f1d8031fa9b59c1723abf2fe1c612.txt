@@ -1,0 +1,1 @@
+Bump the min-supported OS version in the installer.    2016/4/13 2:45:39    0d7a972e9b8f1d8031fa9b59c1723abf2fe1c612

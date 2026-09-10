@@ -1,0 +1,1 @@
+[views/win] Set capture exclusion affinity on system menus and owned popup windows    2026/8/13 3:43:10    5969a8ec10153ac5d0514edcafa57f5c87091652

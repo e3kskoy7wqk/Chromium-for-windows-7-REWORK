@@ -1,0 +1,1 @@
+3.5 MB system-wide footprint impact due to thread-locals in libANGLE    2021-07-23 17:23 PDT    070b8db9d03184bac4b8a80a3326e1b2b0506e0b

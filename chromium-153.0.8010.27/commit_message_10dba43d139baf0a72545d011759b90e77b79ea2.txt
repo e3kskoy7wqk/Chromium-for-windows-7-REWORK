@@ -1,0 +1,1 @@
+Remove D3D11 dependency from HDRMetadataHelperWin    2026/4/15 7:02:53    10dba43d139baf0a72545d011759b90e77b79ea2

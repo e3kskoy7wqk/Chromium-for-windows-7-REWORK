@@ -1,0 +1,1 @@
+Removing useless Win7 checks + standardize its use    2017/6/3 6:38:43    dddfcf1b9e97593f1321a6744a37e91e8a32d7ab

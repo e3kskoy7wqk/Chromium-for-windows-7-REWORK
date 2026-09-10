@@ -1,0 +1,13 @@
+diff --git a/content/browser/gpu/gpu_data_manager_impl_private.cc b/content/browser/gpu/gpu_data_manager_impl_private.cc
+index a32aa0c19cde6..edeb438da575f 100644
+--- a/content/browser/gpu/gpu_data_manager_impl_private.cc
++++ b/content/browser/gpu/gpu_data_manager_impl_private.cc
+@@ -444,7 +336,7 @@ GpuDataManagerImplPrivate::GpuDataManagerImplPrivate(GpuDataManagerImpl* owner)
+       observer_list_(base::MakeRefCounted<GpuDataManagerObserverList>()) {
+   DCHECK(owner_);
+   InitializeGpuModes();
+-#if BUILDFLAG(IS_WIN)
++#if 0
+   EnableIntelShaderCache();
+ #endif  // BUILDFLAG(IS_WIN)
+   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
