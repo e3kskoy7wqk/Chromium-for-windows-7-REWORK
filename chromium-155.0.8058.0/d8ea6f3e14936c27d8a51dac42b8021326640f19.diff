@@ -1,0 +1,84 @@
+diff --git a/ui/base/ime/win/tsf_input_scope.cc b/ui/base/ime/win/tsf_input_scope.cc
+index e2a79de6f846f..b138707be2238 100644
+--- a/ui/base/ime/win/tsf_input_scope.cc
++++ b/ui/base/ime/win/tsf_input_scope.cc
+@@ -108,6 +108,9 @@ typedef HRESULT (WINAPI *SetInputScopesFunc)(HWND window_handle,
+                                              WCHAR*, /* unused */
+                                              WCHAR* /* unused */);
+ 
++SetInputScopesFunc g_set_input_scopes = NULL;
++bool g_get_proc_done = false;
++
+ InputScope ConvertTextInputTypeToInputScope(TextInputType text_input_type) {
+   // Following mapping is based in IE10 on Windows 8.
+   switch (text_input_type) {
+@@ -149,6 +152,21 @@ InputScope ConvertTextInputModeToInputScope(TextInputMode text_input_mode) {
+ 
+ }  // namespace
+ 
++void InitializeTsfForInputScopes() {
++  DCHECK(base::CurrentUIThread::IsSet());
++  // Thread safety is not required because this function is under UI thread.
++  if (!g_get_proc_done) {
++    g_get_proc_done = true;
++
++    HMODULE module = NULL;
++    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, L"msctf.dll",
++        &module)) {
++      g_set_input_scopes = reinterpret_cast<SetInputScopesFunc>(
++          GetProcAddress(module, "SetInputScopes"));
++    }
++  }
++}
++
+ std::vector<InputScope> GetInputScopes(TextInputType text_input_type,
+                                        TextInputMode text_input_mode) {
+   std::vector<InputScope> input_scopes;
+@@ -178,4 +196,16 @@ ITfInputScope* CreateInputScope(TextInputType text_input_type,
+   }
+ }
+ 
++void SetInputScopeForTsfUnawareWindow(HWND window_handle,
++                                      TextInputType text_input_type,
++                                      TextInputMode text_input_mode) {
++  if (!g_set_input_scopes)
++    return;
++
++  std::vector<InputScope> input_scopes = GetInputScopes(text_input_type,
++                                                        text_input_mode);
++  g_set_input_scopes(window_handle, &input_scopes[0], input_scopes.size(),
++                     NULL, 0, NULL, NULL);
++}
++
+ }  // namespace ui::tsf_inputscope
+diff --git a/ui/base/ime/win/tsf_input_scope.h b/ui/base/ime/win/tsf_input_scope.h
+index f369f9a9341d9..e8c159f0844dc 100644
+--- a/ui/base/ime/win/tsf_input_scope.h
++++ b/ui/base/ime/win/tsf_input_scope.h
+@@ -16,6 +16,10 @@
+ namespace ui {
+ namespace tsf_inputscope {
+ 
++// Initializes the TSF for input scopes. It loads the tsf dll and get the
++// function pointer for setting the input scopes in TSF.
++COMPONENT_EXPORT(UI_BASE_IME_WIN) void InitializeTsfForInputScopes();
++
+ // Returns InputScope list corresoponding to ui::TextInputType and
+ // ui::TextInputMode.
+ // This function is only used from following functions but declared for test.
+@@ -34,6 +38,15 @@ ITfInputScope* CreateInputScope(TextInputType text_input_type,
+ COMPONENT_EXPORT(UI_BASE_IME_WIN)
+ void SetInputScope(HWND window_handle, InputScope input_scope);
+ 
++// A wrapper of the SetInputScopes API exported by msctf.dll.
++// http://msdn.microsoft.com/en-us/library/windows/desktop/ms629026.aspx
++// Does nothing on Windows XP in case TSF is disabled.
++// NOTE: For TSF-aware window, you should use ITfInputScope instead.
++COMPONENT_EXPORT(UI_BASE_IME_WIN)
++void SetInputScopeForTsfUnawareWindow(HWND window_handle,
++                                      TextInputType text_input_type,
++                                      TextInputMode text_input_mode);
++
+ }  // namespace tsf_inputscope
+ }  // namespace ui
+ 

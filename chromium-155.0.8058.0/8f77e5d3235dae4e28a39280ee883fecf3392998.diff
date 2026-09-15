@@ -1,0 +1,43 @@
+diff --git a/third_party/angle/src/gpu_info_util/SystemInfo_win.cpp b/third_party/angle/src/gpu_info_util/SystemInfo_win.cpp
+index 32c1a3aed8..bff6ed82bb 100644
+--- a/third_party/angle/src/gpu_info_util/SystemInfo_win.cpp
++++ b/third_party/angle/src/gpu_info_util/SystemInfo_win.cpp
+@@ -14,6 +14,7 @@
+ // Windows.h needs to be included first
+ #include <windows.h>
+ 
++#include <strsafe.h>
+ #include <dxgi.h>
+ 
+ #include <array>
+@@ -27,16 +28,28 @@ namespace
+ 
+ bool GetDevicesFromDXGI(std::vector<GPUDeviceInfo> *devices)
+ {
++
++typedef HRESULT (APIENTRY *PFN_CreateDXGIFactory1)(REFIID riid, void **ppFactory);
++static PFN_CreateDXGIFactory1 fpCreateDXGIFactory1;
++
++    TCHAR systemPath[MAX_PATH] = TEXT("");
++    GetSystemDirectory(systemPath, MAX_PATH);
++    StringCchCat(systemPath, MAX_PATH, TEXT("\\dxgi.dll"));
++    HMODULE dxgi_module = LoadLibrary(systemPath);
+ #if defined(ANGLE_ENABLE_WINDOWS_UWP)
++    fpCreateDXGIFactory1 = dxgi_module == NULL ? NULL :
++        (PFN_CreateDXGIFactory1)GetProcAddress(dxgi_module, "CreateDXGIFactory1");
+     IDXGIFactory1 *factory;
+     if (!SUCCEEDED(
+-            CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory))))
++            fpCreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory))))
+     {
+         return false;
+     }
+ #else
++    fpCreateDXGIFactory1 = dxgi_module == NULL ? NULL :
++        (PFN_CreateDXGIFactory1)GetProcAddress(dxgi_module, "CreateDXGIFactory");
+     IDXGIFactory *factory;
+-    if (!SUCCEEDED(CreateDXGIFactory(__uuidof(IDXGIFactory), reinterpret_cast<void **>(&factory))))
++    if (!SUCCEEDED(fpCreateDXGIFactory1(__uuidof(IDXGIFactory), reinterpret_cast<void **>(&factory))))
+     {
+         return false;
+     }

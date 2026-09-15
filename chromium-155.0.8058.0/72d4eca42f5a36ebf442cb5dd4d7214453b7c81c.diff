@@ -1,0 +1,127 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.cc b/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.cc
+index dcaa8d3b2e282..907853ef216f4 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.cc
+@@ -10,7 +10,9 @@
+ #include "partition_alloc/random.h"
+ 
+ #if PA_BUILDFLAG(IS_WIN)
+-#include <windows.h>
++#include <windows.h>  // Must be in front of other Windows header files.
++
++#include <versionhelpers.h>
+ #endif
+ 
+ namespace partition_alloc {
+@@ -22,10 +24,26 @@ uintptr_t GetRandomPageBase() {
+   random <<= 32ULL;
+   random |= static_cast<uintptr_t>(internal::RandomValue());
+ 
+-  // The ASLRMask() and ASLROffset() constants will be suitable for the
+-  // OS and build configuration.
++// The ASLRMask() and ASLROffset() constants will be suitable for the
++// OS and build configuration.
++#if PA_BUILDFLAG(IS_WIN) && !defined(MEMORY_TOOL_REPLACES_ALLOCATOR)
++  // Windows >= 8.1 has the full 47 bits. Use them where available.
++  static bool windows_81 = false;
++  static bool windows_81_initialized = false;
++  if (!windows_81_initialized) {
++    windows_81 = IsWindows8Point1OrGreater();
++    windows_81_initialized = true;
++  }
++  if (!windows_81) {
++    random &= internal::ASLRMaskBefore8_10();
++  } else {
++    random &= internal::ASLRMask();
++  }
++  random += internal::ASLROffset();
++#else
+   random &= internal::ASLRMask();
+   random += internal::ASLROffset();
++#endif  // PA_BUILDFLAG(IS_WIN) && !defined(MEMORY_TOOL_REPLACES_ALLOCATOR)
+ #else  // PA_BUILDFLAG(HAS_64_BIT_POINTERS)
+ #if PA_BUILDFLAG(IS_WIN)
+   // On win32 host systems the randomization plus huge alignment causes
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.h b/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.h
+index e4767ca7bd394..e76125677f17e 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/address_space_randomization.h
+@@ -56,12 +56,16 @@ AslrMask(uintptr_t bits) {
+ 
+   #elif PA_BUILDFLAG(IS_WIN)
+ 
+-    // Windows 8.10 and newer support the full 48 bit address range. Since
+-    // ASLROffset() is non-zero and may cause a carry, use 47 bit masks. See
++    // Windows 8.10 and newer support the full 48 bit address range. Older
++    // versions of Windows only support 44 bits. Since ASLROffset() is non-zero
++    // and may cause a carry, use 47 and 43 bit masks. See
+     // http://www.alex-ionescu.com/?p=246
+     PA_ALWAYS_INLINE constexpr uintptr_t ASLRMask() {
+       return AslrMask(47);
+     }
++    PA_ALWAYS_INLINE constexpr uintptr_t ASLRMaskBefore8_10() {
++      return AslrMask(43);
++    }
+     // Try not to map pages into the range where Windows loads DLLs by default.
+     PA_ALWAYS_INLINE constexpr uintptr_t ASLROffset() {
+       return 0x80000000ULL;
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+index 7c73ccda1500e..f3bb11989a44d 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+@@ -5,6 +5,8 @@
+ #ifndef PARTITION_ALLOC_PAGE_ALLOCATOR_INTERNALS_WIN_H_
+ #define PARTITION_ALLOC_PAGE_ALLOCATOR_INTERNALS_WIN_H_
+ 
++#include <versionhelpers.h>
++
+ #include <cstdint>
+ 
+ #include "partition_alloc/buildflags.h"
+@@ -16,6 +18,17 @@
+ 
+ namespace partition_alloc::internal {
+ 
++namespace {
++
++// On Windows, discarded pages are not returned to the system immediately and
++// not guaranteed to be zeroed when returned to the application.
++using DiscardVirtualMemoryFunction = DWORD(WINAPI*)(PVOID virtualAddress,
++                                                    SIZE_T size);
++DiscardVirtualMemoryFunction s_discard_virtual_memory =
++    reinterpret_cast<DiscardVirtualMemoryFunction>(-1);
++
++}  // namespace
++
+ // |VirtualAlloc| will fail if allocation at the hint address is blocked.
+ constexpr bool kHintIsAdvisory = false;
+ std::atomic<int32_t> s_allocPageErrorCode{ERROR_SUCCESS};
+@@ -224,10 +237,27 @@ bool TryRecommitSystemPagesInternal(
+ }
+ 
+ void DiscardSystemPagesInternal(uintptr_t address, size_t length) {
++  if (s_discard_virtual_memory ==
++      reinterpret_cast<DiscardVirtualMemoryFunction>(-1)) {
++    // DiscardVirtualMemory's minimum supported client is Windows 8.1 Update.
++    // So skip GetProcAddress("DiscardVirtualMemory") if windows version is
++    // smaller than Windows 8.1.
++    if (IsWindows8Point1OrGreater()) {
++      s_discard_virtual_memory =
++          reinterpret_cast<DiscardVirtualMemoryFunction>(GetProcAddress(
++              GetModuleHandle(L"Kernel32.dll"), "DiscardVirtualMemory"));
++    } else {
++      s_discard_virtual_memory = nullptr;
++    }
++  }
++
+   void* ptr = reinterpret_cast<void*>(address);
+   // Use DiscardVirtualMemory when available because it releases faster than
+   // MEM_RESET.
+-  DWORD ret = DiscardVirtualMemory(ptr, length);
++  DWORD ret = 1;
++  if (s_discard_virtual_memory) {
++    ret = s_discard_virtual_memory(ptr, length);
++  }
+   // DiscardVirtualMemory is buggy in Win10 SP0, so fall back to MEM_RESET on
+   // failure.
+   if (ret) {

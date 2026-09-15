@@ -1,0 +1,64 @@
+# Copyright (c) 2026 mjd7989
+#
+# Fix Chromium uninstallation on Windows older than Vista by
+# bypassing RunDeElevated() when launching chrome.exe, allowing the
+# uninstaller to wait for the process and properly remove browser files.
+#
+
+diff --git "a/C:\\src\\org\\launch_chrome.cc" "b/C:\\src\\chromium_150_7871_253\\src\\chrome\\installer\\setup\\launch_chrome.cc"
+index a5d073d..d728020 100644
+--- a/chrome/installer/setup/launch_chrome.cc
++++ b/chrome/installer/setup/launch_chrome.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <windows.h>
++
+ #include "chrome/installer/setup/launch_chrome.h"
+ 
+ #include "base/command_line.h"
+@@ -11,6 +13,7 @@
+ #include "base/process/process.h"
+ #include "base/types/expected_macros.h"
+ #include "base/win/elevation_util.h"
++#include "base/win/windows_version.h"
+ #include "chrome/common/chrome_switches.h"
+ #include "chrome/installer/util/util_constants.h"
+ 
+@@ -41,6 +44,26 @@ bool LaunchChromeAndWait(const base::FilePath& application_path,
+   base::CommandLine cmd(application_path.Append(kChromeExe));
+   cmd.AppendArguments(options, false);
+ 
++  base::Process chrome_handle;
++
++  if (base::win::GetVersion() < base::win::Version::VISTA) {
++    chrome_handle = base::LaunchProcess(cmd, base::LaunchOptions());
++    if (!chrome_handle.IsValid()) {
++      PLOG(ERROR) << "Failed to launch: " << cmd.GetCommandLineString();
++      return false;
++    }
++
++    if (::WaitForSingleObject(chrome_handle.Handle(), INFINITE) == WAIT_OBJECT_0) {
++      DWORD code = 0;
++      if (::GetExitCodeProcess(chrome_handle.Handle(), &code)) {
++        if (exit_code)
++          *exit_code = static_cast<int32_t>(code);
++        return true;
++      }
++    }
++    PLOG(ERROR) << "Wait for process exit failed";
++    return false;
++  } else {
+   ASSIGN_OR_RETURN(base::Process chrome_handle, base::win::RunDeElevated(cmd),
+                    [&cmd](DWORD error_code) {
+                      ::SetLastError(error_code);
+@@ -48,7 +71,7 @@ bool LaunchChromeAndWait(const base::FilePath& application_path,
+                          << "Failed to launch: " << cmd.GetCommandLineString();
+                      return false;
+                    });
+-
++  }
+   int ret = STILL_ACTIVE;
+   if (!chrome_handle.WaitForExit(&ret)) {
+     PLOG(ERROR) << "Wait for process exit failed";

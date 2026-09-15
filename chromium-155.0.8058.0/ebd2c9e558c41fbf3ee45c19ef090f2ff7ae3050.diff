@@ -1,0 +1,98 @@
+diff --git a/components/os_crypt/async/common/encryptor.cc b/components/os_crypt/async/common/encryptor.cc
+index 120fdc4b4ab7d..e8a13739dc699 100644
+--- a/components/os_crypt/async/common/encryptor.cc
++++ b/components/os_crypt/async/common/encryptor.cc
+@@ -49,7 +49,16 @@ Encryptor::Key::Key(base::span<const uint8_t> key,
+ {
+ #if BUILDFLAG(IS_WIN)
+   if (!encrypted_) {
+-    encrypted_ = ::CryptProtectMemory(std::data(key_), std::size(key_),
++    typedef BOOL (WINAPI *PFNCRYPTPROTECTMEMORY)( LPVOID, DWORD, DWORD );
++    PFNCRYPTPROTECTMEMORY   pCryptProtectMemory;
++    pCryptProtectMemory = reinterpret_cast< PFNCRYPTPROTECTMEMORY >( GetProcAddress( GetModuleHandleW( L"crypt32.dll" ), "CryptProtectMemory" ) );
++    if ( pCryptProtectMemory == NULL )
++    {
++    encrypted_ =TRUE;
++    } // if
++
++    else
++    encrypted_ = pCryptProtectMemory(std::data(key_), std::size(key_),
+                                       CRYPTPROTECTMEMORY_SAME_PROCESS);
+   }
+ #endif
+@@ -114,9 +123,15 @@ std::vector<uint8_t> Encryptor::Key::Encrypt(
+       };
+ 
+       if (encrypted_) {
+-        ::CryptUnprotectMemory(std::data(decrypted_key),
++        typedef BOOL (WINAPI *PFNCRYPTUNPROTECTMEMORY)( LPVOID, DWORD, DWORD );
++        PFNCRYPTUNPROTECTMEMORY pCryptUnprotectMemory;
++        pCryptUnprotectMemory = reinterpret_cast< PFNCRYPTUNPROTECTMEMORY >( GetProcAddress( GetModuleHandleW( L"crypt32.dll" ), "CryptUnprotectMemory" ) );
++        if ( pCryptUnprotectMemory != NULL )
++        {
++        pCryptUnprotectMemory(std::data(decrypted_key),
+                                std::size(decrypted_key),
+                                CRYPTPROTECTMEMORY_SAME_PROCESS);
++        } // if
+         key = base::span<const uint8_t>(decrypted_key);
+       }
+ #endif  // BUILDFLAG(IS_WIN)
+@@ -158,9 +173,15 @@ std::optional<std::vector<uint8_t>> Encryptor::Key::Decrypt(
+         ::SecureZeroMemory(decrypted_key.data(), decrypted_key.size());
+       };
+       if (encrypted_) {
+-        ::CryptUnprotectMemory(std::data(decrypted_key),
++        typedef BOOL (WINAPI *PFNCRYPTUNPROTECTMEMORY)( LPVOID, DWORD, DWORD );
++        PFNCRYPTUNPROTECTMEMORY pCryptUnprotectMemory;
++        pCryptUnprotectMemory = reinterpret_cast< PFNCRYPTUNPROTECTMEMORY >( GetProcAddress( GetModuleHandleW( L"crypt32.dll" ), "CryptUnprotectMemory" ) );
++        if ( pCryptUnprotectMemory != NULL )
++        {
++        pCryptUnprotectMemory(std::data(decrypted_key),
+                                std::size(decrypted_key),
+                                CRYPTPROTECTMEMORY_SAME_PROCESS);
++        } // if
+         key = base::span<const uint8_t>(decrypted_key);
+       }
+ #endif  // BUILDFLAG(IS_WIN)
+diff --git a/components/os_crypt/async/common/encryptor_mojom_traits.cc b/components/os_crypt/async/common/encryptor_mojom_traits.cc
+index d7ef48b18b1f2..27146ed37de9d 100644
+--- a/components/os_crypt/async/common/encryptor_mojom_traits.cc
++++ b/components/os_crypt/async/common/encryptor_mojom_traits.cc
+@@ -95,9 +95,18 @@ bool StructTraits<os_crypt_async::mojom::KeyDataView,
+   std::copy(memory_span.begin(), memory_span.end(), out->key_.begin());
+ 
+ #if BUILDFLAG(IS_WIN)
++    typedef BOOL (WINAPI *PFNCRYPTPROTECTMEMORY)( LPVOID, DWORD, DWORD );
++    PFNCRYPTPROTECTMEMORY   pCryptProtectMemory;
+     SecureZeroMemory(std::data(memory_span), std::size(memory_span));
++    pCryptProtectMemory = reinterpret_cast< PFNCRYPTPROTECTMEMORY >( GetProcAddress( GetModuleHandleW( L"crypt32.dll" ), "CryptProtectMemory" ) );
++    if ( pCryptProtectMemory == NULL )
++    {
++    out->encrypted_ =TRUE;
++    } // if
++
++    else
+     out->encrypted_ =
+-        ::CryptProtectMemory(std::data(out->key_), std::size(out->key_),
++        pCryptProtectMemory(std::data(out->key_), std::size(out->key_),
+                              CRYPTPROTECTMEMORY_SAME_PROCESS);
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+@@ -128,10 +137,16 @@ base::UnsafeSharedMemoryRegion StructTraits<os_crypt_async::mojom::KeyDataView,
+   memory_span.copy_from(in.key_);
+ #if BUILDFLAG(IS_WIN)
+   if (in.encrypted_) {
++    typedef BOOL (WINAPI *PFNCRYPTUNPROTECTMEMORY)( LPVOID, DWORD, DWORD );
++    PFNCRYPTUNPROTECTMEMORY pCryptUnprotectMemory;
++    pCryptUnprotectMemory = reinterpret_cast< PFNCRYPTUNPROTECTMEMORY >( GetProcAddress( GetModuleHandleW( L"crypt32.dll" ), "CryptUnprotectMemory" ) );
++    if ( pCryptUnprotectMemory != NULL )
++    {
+     // Not much we can do if this fails.
+     std::ignore =
+-        ::CryptUnprotectMemory(std::data(memory_span), std::size(memory_span),
++        pCryptUnprotectMemory(std::data(memory_span), std::size(memory_span),
+                                CRYPTPROTECTMEMORY_SAME_PROCESS);
++    } // if
+   }
+ #endif  // BUILDFLAG(IS_WIN)
+   return region;

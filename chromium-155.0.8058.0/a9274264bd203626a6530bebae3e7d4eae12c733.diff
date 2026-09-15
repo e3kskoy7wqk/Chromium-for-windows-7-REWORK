@@ -1,0 +1,58 @@
+diff --git a/chrome/app/BUILD.gn b/chrome/app/BUILD.gn
+index c1d8337fa746c..15ca3ae7c80bb 100644
+--- a/chrome/app/BUILD.gn
++++ b/chrome/app/BUILD.gn
+@@ -48,11 +48,7 @@ source_set("chrome_dll_resources") {
+   deps = [ ":command_ids" ]
+ 
+   if (is_win) {
+-    sources += [
+-      "chrome_dll.rc",
+-      "etw_events/chrome_events_win.rc",
+-    ]
+-
++    sources += [ "chrome_dll.rc" ]
+     deps += [
+       "//build:branding_buildflags",
+       "//printing/buildflags",
+diff --git a/chrome/app/etw_events/MSG00001.bin b/chrome/app/etw_events/MSG00001.bin
+deleted file mode 100644
+index bcedca53bb0df2af00e1cf5234d07d546aa18c81..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 180
+zcmZQ!U|?W`ViO<@1O_0S0VG%$7y>}J2FM1gnE=9bfNT>W&zT{Ep@<=$A(tVQL4m=Q
+zp$tgpF_bV^0ePwnhCosSNE<O|GVn5R0riLg^>_kRqyhCnL>Pc-5Mo6@lM;dYGlBAX
+VP!$qD`Cx`hhGL+2Do`G#4*)w*6I1{I
+
+diff --git a/chrome/app/etw_events/chrome_events_win.rc b/chrome/app/etw_events/chrome_events_win.rc
+deleted file mode 100644
+index 3dba33dbcc97e..0000000000000
+--- a/chrome/app/etw_events/chrome_events_win.rc
++++ /dev/null
+@@ -1,3 +0,0 @@
+-LANGUAGE 0x9,0x1
+-1 11 "MSG00001.bin"
+-1 WEVT_TEMPLATE "chrome_events_winTEMP.BIN"
+diff --git a/chrome/app/etw_events/chrome_events_winTEMP.BIN b/chrome/app/etw_events/chrome_events_winTEMP.BIN
+deleted file mode 100644
+index 1bec89083be6a1519f39beec0c4f4b2fe4fbcf56..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 1402
+zcmb`H&r4KM6vxkdzVSyP37IGr%tG)71d~>Xn|zHAk{QRx_<B+>3!(f0{(w=-cH&Ch
+z<fcUs)S_jJR?)JBe}D)<L5rXkZ3CCV>vNnp&YR}C(lea<J@@?h-gAd@U$!_gxtS74
+ziN#Ok+vb<UI|CoRw{J2(`>q__=*2hVg+V}0gtW59ly$TPeTTNAJC2AAz6VvlgUWY}
+z<R-8m)X)f+z3&z>*cw;eLzNeMuM?b>=d#8LPh^>$ND$o1|AItw18>s*immyo>Dd40
+zMb}~J)!?JYJr7Df#mj@2EbbFUqx3Ys-6ozqg>D7XahYYErPOw#Xc*jGbrRmIc$#xB
+z9Vw8sOcD3BYCD_D+76Ys8!E4xDpTUi0!(W#+3i-P_HILMpQ-kOxKfsRNuTtRmYcBH
+z6&AOFWx&L8@q{I$k0sfllL}AMnY$UH8|NIlQJ&P9yBUV1`5d}Yo)&oGQ5M_ce~sm{
+z4l|PU9T<E+48FexUw3>+lJAzm=No)W_&VsNHmQ|;ZQ^);#7$GAcSy$SXQMt=<xk6y
+zmYrIs(IjWBPM=wQEP0+r{bK0$g8EmZ9k01tmX}kO)%X>PO!?WV>UV=QmCQbQ-5Aeg
+zk>@=s6RdO8sN}scKL#o%X{!DaOF#Di`DISg55pq0E64AIZ;d;hBlTEv-ou%yt>}e?
+cU<|B|2H2`+#ImLS59lYHzY_tCZ|Nfc0K}uUUH||9
+

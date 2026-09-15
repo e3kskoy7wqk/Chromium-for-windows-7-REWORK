@@ -1,0 +1,94 @@
+# Copyright (c) 2026 mjd7989
+#
+# Prevent GPU process crashes on Windows older than Vista by falling
+# back to SwiftShader-WebGL before ANGLE initialization when the user
+# has not explicitly selected a GL or ANGLE via flags, and, if that
+# also fails, continuing without any acceleration.
+#
+# Rebased for Chromium 155.0.8058.0 with the existing Windows XP patches.
+#
+
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index 58a0dbd8083f3..b2a5688ab5ba6 100644
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -68,6 +68,7 @@
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
+ #include "gpu/config/gpu_driver_bug_workarounds.h"
+ #include "services/on_device_model/ml_internal_buildflags.h"
+ #include "ui/gl/dc_surface_solid_color_pool.h"
+@@ -376,6 +377,17 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+ #endif  //  BUILDFLAG(IS_CHROMEOS)
+   gpu_preferences_ = gpu_preferences;
+ 
++#if BUILDFLAG(IS_WIN)
++  const bool user_has_gl_switch = command_line->HasSwitch(switches::kUseGL);
++  const bool user_has_angle_switch = command_line->HasSwitch(switches::kUseANGLE);
++
++  if (base::win::GetVersion() < base::win::Version::VISTA &&
++      !user_has_gl_switch && !user_has_angle_switch) {
++    command_line->AppendSwitchASCII(
++        switches::kUseGL, gl::kGLImplementationSwiftShaderForWebGLName);
++  }
++#endif  // BUILDFLAG(IS_WIN)
++
+   // Record the number of recent GPU process crashes as a crash key so that it
+   // is included in crash reports if this GPU process terminates unexpectedly.
+   if (command_line->HasSwitch(switches::kGpuRecentCrashCount)) {
+@@ -520,6 +532,17 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+         /*init_bindings*/ false, gl::GpuPreference::kDefault);
+     if (!gl_display) {
+       VLOG(1) << "gl::init::InitializeGLNoExtensionsOneOff failed";
++#if BUILDFLAG(IS_WIN)
++      if (base::win::GetVersion() < base::win::Version::VISTA) {
++        gl::SetGLImplementation(gl::kGLImplementationDisabled);
++        gpu_info_.gl_implementation_parts =
++            gl::GLImplementationParts(gl::kGLImplementationDisabled);
++        gpu_preferences_.gr_context_type = GrContextType::kNone;
++        gpu_feature_info_.status_values.fill(kGpuFeatureStatusDisabled);
++        init_successful_ = true;
++        return true;
++      }
++#endif  // BUILDFLAG(IS_WIN)
+       return false;
+     }
+   }
+@@ -1042,6 +1065,18 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+                                   const GpuPreferences& gpu_preferences) {
+   gpu_preferences_ = gpu_preferences;
++
++#if BUILDFLAG(IS_WIN)
++  const bool user_has_gl_switch = command_line->HasSwitch(switches::kUseGL);
++  const bool user_has_angle_switch = command_line->HasSwitch(switches::kUseANGLE);
++
++  if (base::win::GetVersion() < base::win::Version::VISTA &&
++      !user_has_gl_switch && !user_has_angle_switch) {
++    command_line->AppendSwitchASCII(
++        switches::kUseGL, gl::kGLImplementationSwiftShaderForWebGLName);
++  }
++#endif  // BUILDFLAG(IS_WIN)
++
+   init_successful_ = true;
+ 
+ #if BUILDFLAG(IS_ANDROID)
+@@ -1120,6 +1155,16 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+       /*gpu_preference=*/gl::GpuPreference::kDefault);
+   if (!gl_display) {
+     VLOG(1) << "gl::init::InitializeGLNoExtensionsOneOff failed";
++#if BUILDFLAG(IS_WIN)
++    if (base::win::GetVersion() < base::win::Version::VISTA) {
++      gl::SetGLImplementation(gl::kGLImplementationDisabled);
++      gpu_info_.gl_implementation_parts =
++          gl::GLImplementationParts(gl::kGLImplementationDisabled);
++      gpu_preferences_.gr_context_type = GrContextType::kNone;
++      gpu_feature_info_.status_values.fill(kGpuFeatureStatusDisabled);
++      init_successful_ = true;
++    }
++#endif  // BUILDFLAG(IS_WIN)
+     return;
+   }
+   bool gl_disabled = gl::GetGLImplementation() == gl::kGLImplementationDisabled;

@@ -1,0 +1,36 @@
+diff --git a/ui/display/win/display_config_helper.cc b/ui/display/win/display_config_helper.cc
+index ee77605a6b0c0..18e5ec0fcd849 100644
+--- a/ui/display/win/display_config_helper.cc
++++ b/ui/display/win/display_config_helper.cc
+@@ -84,16 +84,29 @@ float GetMonitorScaleFactor(HMONITOR monitor,
+ namespace {
+ 
+ std::vector<DISPLAYCONFIG_PATH_INFO> GetDisplayConfigPathInfos() {
++    LONG (WINAPI * pfnQueryDisplayConfig)(UINT Flags,UINT *pNumPathArrayElements, DISPLAYCONFIG_PATH_INFO *pPathInfoArray,
++                                      UINT *pNumModeInfoArrayElements, DISPLAYCONFIG_MODE_INFO *pModeInfoArray,
++                                      DISPLAYCONFIG_TOPOLOGY_ID *pCurrentTopologyId) = 0;
++    LONG (WINAPI * pfnGetDisplayConfigBufferSizes)(UINT Flags, UINT *pNumPathArrayElements, UINT *pNumModeInfoArrayElements) = 0;
++    HMODULE hUser = GetModuleHandleW(L"user32.dll");
++    if (hUser)
++    {
++        *(uintptr_t *)&pfnQueryDisplayConfig = (uintptr_t)GetProcAddress(hUser, "QueryDisplayConfig");
++
++        *(uintptr_t *)&pfnGetDisplayConfigBufferSizes = (uintptr_t)GetProcAddress(hUser, "GetDisplayConfigBufferSizes");
++    }
++    if (!pfnQueryDisplayConfig || !pfnGetDisplayConfigBufferSizes)
++      return {};
+   for (LONG result = ERROR_INSUFFICIENT_BUFFER;
+        result == ERROR_INSUFFICIENT_BUFFER;) {
+     uint32_t path_elements, mode_elements;
+-    if (::GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_elements,
++    if (pfnGetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_elements,
+                                     &mode_elements) != ERROR_SUCCESS) {
+       return {};
+     }
+     std::vector<DISPLAYCONFIG_PATH_INFO> path_infos(path_elements);
+     std::vector<DISPLAYCONFIG_MODE_INFO> mode_infos(mode_elements);
+-    result = ::QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_elements,
++    result = pfnQueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_elements,
+                                 path_infos.data(), &mode_elements,
+                                 mode_infos.data(), nullptr);
+     if (result == ERROR_SUCCESS) {
