@@ -16,3 +16,8 @@ might also work on Windows XP SP3 and Windows Vista.
 ## Building
 
 see https://github.com/e3kskoy7wqk/Chromium-for-windows-7-REWORK/issues/37.
+
+## Other Projects Using This Repository
+
+* [Chromium for Windows 2000](https://github.com/mjd7989/Chromium-for-windows-2000) by mjd7989
+* [Electron for Windows 7](https://github.com/e3kskoy7wqk/Electron-for-windows-7)
