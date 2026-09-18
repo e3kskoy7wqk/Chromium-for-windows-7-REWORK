@@ -1,0 +1,1 @@
+Refactored hwnd_message_handler to be more readable. Changed the names of delegate booleans to make more sense. Removed version branches for unsupported versions of Windows.    2016/3/19 2:42:18    840fc096207741050490badb7730f5a21b761fc4

@@ -1,0 +1,1 @@
+DirectX9 Backend Removal: Remove shader model 3 code paths    2026/7/9 6:48:59    fdb5d1f7570e6d7c4c2bfa8e8b7307e0abb8454c

@@ -1,0 +1,1 @@
+opus: Enable run-time detected AVX2    2026/7/1 15:38:10    192237ba04c5f1bd34fb67fe2961a027d0544a9f

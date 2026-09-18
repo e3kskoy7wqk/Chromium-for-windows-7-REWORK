@@ -1,0 +1,97 @@
+diff --git a/device/gamepad/xinput_data_fetcher_win.cc b/device/gamepad/xinput_data_fetcher_win.cc
+index 7f9dfa10ef024..1493dccfaa523 100644
+--- a/device/gamepad/xinput_data_fetcher_win.cc
++++ b/device/gamepad/xinput_data_fetcher_win.cc
+@@ -291,6 +291,8 @@ bool XInputDataFetcherWin::GetXInputDllFunctions() {
+   xinput_get_state_ = nullptr;
+   xinput_get_state_ex_ = nullptr;
+   xinput_set_state_ = nullptr;
++  XInputEnableFunc xinput_enable = reinterpret_cast<XInputEnableFunc>(
++      xinput_dll_.GetFunctionPointer("XInputEnable"));
+   xinput_get_capabilities_ = reinterpret_cast<XInputGetCapabilitiesFunc>(
+       xinput_dll_.GetFunctionPointer("XInputGetCapabilities"));
+   if (!xinput_get_capabilities_)
+@@ -310,7 +312,13 @@ bool XInputDataFetcherWin::GetXInputDllFunctions() {
+   xinput_set_state_ =
+       reinterpret_cast<XInputHapticGamepadWin::XInputSetStateFunc>(
+           xinput_dll_.GetFunctionPointer("XInputSetState"));
+-  return !!xinput_set_state_;
++  if (!xinput_set_state_)
++    return false;
++  if (xinput_enable) {
++    // XInputEnable is unavailable before Win8 and deprecated in Win10.
++    xinput_enable(true);
++  }
++  return true;
+ }
+ 
+ // static
+@@ -343,6 +351,20 @@ XInputDataFetcherWin::GetXInputGetStateExFunctionCallback() {
+   return *instance;
+ }
+ 
++// static
++void XInputDataFetcherWin::OverrideXInputEnableFuncForTesting(
++    XInputDataFetcherWin::XInputEnableFunctionCallback callback) {
++  GetXInputEnableCallback() = callback;
++}
++
++// static
++XInputDataFetcherWin::XInputEnableFunctionCallback&
++XInputDataFetcherWin::GetXInputEnableCallback() {
++  static base::NoDestructor<XInputDataFetcherWin::XInputEnableFunctionCallback>
++      instance;
++  return *instance;
++}
++
+ bool XInputDataFetcherWin::GetXInputDllFunctionsForWgiDataFetcher() {
+   xinput_get_capabilities_ = nullptr;
+   if (GetXInputGetCapabilitiesFunctionCallback()) {
+@@ -363,7 +385,21 @@ bool XInputDataFetcherWin::GetXInputDllFunctionsForWgiDataFetcher() {
+     xinput_get_state_ex_ = reinterpret_cast<XInputGetStateExFunc>(
+         ::GetProcAddress(xinput_dll_.get(), kXInputGetStateExOrdinal));
+   }
+-  return !!xinput_get_state_ex_;
++  if (!xinput_get_state_ex_)
++    return false;
++
++  XInputEnableFunc xinput_enable = nullptr;
++  if (GetXInputEnableCallback()) {
++    xinput_enable = GetXInputEnableCallback().Run();
++  } else {
++    xinput_enable = reinterpret_cast<XInputEnableFunc>(
++        xinput_dll_.GetFunctionPointer("XInputEnable"));
++  }
++  if (xinput_enable) {
++    // XInputEnable is unavailable before Win8 and deprecated in Win10.
++    xinput_enable(true);
++  }
++  return true;
+ }
+ 
+ void XInputDataFetcherWin::InitializeForWgiDataFetcher() {
+diff --git a/device/gamepad/xinput_data_fetcher_win.h b/device/gamepad/xinput_data_fetcher_win.h
+index aa06285561f8d..fe8aa1163377d 100644
+--- a/device/gamepad/xinput_data_fetcher_win.h
++++ b/device/gamepad/xinput_data_fetcher_win.h
+@@ -97,6 +97,11 @@ class DEVICE_GAMEPAD_EXPORT XInputDataFetcherWin : public GamepadDataFetcher {
+   static void OverrideXInputGetStateExFuncForTesting(
+       XInputGetStateExFunctionCallback callback);
+ 
++  using XInputEnableFunctionCallback =
++      base::RepeatingCallback<XInputEnableFunc()>;
++  static void OverrideXInputEnableFuncForTesting(
++      XInputEnableFunctionCallback callback);
++
+   void InitializeForWgiDataFetcher();
+ 
+   bool IsAnyMetaButtonPressed();
+@@ -121,6 +126,8 @@ class DEVICE_GAMEPAD_EXPORT XInputDataFetcherWin : public GamepadDataFetcher {
+   static XInputGetStateExFunctionCallback&
+   GetXInputGetStateExFunctionCallback();
+ 
++  static XInputEnableFunctionCallback& GetXInputEnableCallback();
++
+   base::ScopedNativeLibrary xinput_dll_;
+   bool xinput_available_;
+ 

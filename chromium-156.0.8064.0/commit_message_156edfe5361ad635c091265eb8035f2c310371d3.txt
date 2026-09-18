@@ -1,0 +1,1 @@
+Switch Windows CRYPTO_MUTEX implementation to SRWLOCK.    2016/6/1 5:11:36    156edfe5361ad635c091265eb8035f2c310371d3
