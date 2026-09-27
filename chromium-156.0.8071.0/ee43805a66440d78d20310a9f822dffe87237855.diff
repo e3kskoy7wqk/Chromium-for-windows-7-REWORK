@@ -1,0 +1,39 @@
+diff --git a/v8/src/base/platform/time.cc b/v8/src/base/platform/time.cc
+index f71af151655..0e4df010bad 100644
+--- a/v8/src/base/platform/time.cc
++++ b/v8/src/base/platform/time.cc
+@@ -69,6 +69,16 @@ V8_INLINE int64_t ClockNow(clockid_t clk_id) {
+ }
+
+ #elif V8_OS_WIN
++// Returns a pointer to the QueryThreadCycleTime() function from Windows.
++// Can't statically link to it because it is not available on XP.
++using QueryThreadCycleTimePtr = decltype(::QueryThreadCycleTime)*;
++QueryThreadCycleTimePtr GetQueryThreadCycleTimeFunction() {
++  static const QueryThreadCycleTimePtr query_thread_cycle_time_fn =
++      reinterpret_cast<QueryThreadCycleTimePtr>(::GetProcAddress(
++          ::GetModuleHandle(L"kernel32.dll"), "QueryThreadCycleTime"));
++  return query_thread_cycle_time_fn;
++}
++
+ // Returns the current value of the performance counter.
+ V8_INLINE uint64_t QPCNowRaw() {
+   LARGE_INTEGER perf_counter_now = {};
+@@ -546,7 +531,7 @@ struct GetForThread {
+ #else
+   // Get the number of TSC ticks used by the current thread.
+   ULONG64 thread_cycle_time = 0;
+-  ::QueryThreadCycleTime(thread_handle, &thread_cycle_time);
++  GetQueryThreadCycleTimeFunction()(thread_handle, &thread_cycle_time);
+ 
+   // Get the frequency of the TSC.
+   double tsc_ticks_per_second = TSCTicksPerSecond();
+@@ -636,7 +623,7 @@ ThreadTicks ThreadTicks::Now() {
+ 
+ // static
+ bool ThreadTicks::IsSupportedWin() {
+-  static bool is_supported = base::CPU().has_non_stop_time_stamp_counter();
++  static bool is_supported = GetQueryThreadCycleTimeFunction() && base::CPU().has_non_stop_time_stamp_counter();
+   return is_supported;
+ }
+ 

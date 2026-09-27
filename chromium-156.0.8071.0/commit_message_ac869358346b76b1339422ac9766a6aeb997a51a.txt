@@ -1,0 +1,1 @@
+Move IsFullScreenMode into //ui/base/fullscreen_win.    2017/5/19 18:37:03    ac869358346b76b1339422ac9766a6aeb997a51a

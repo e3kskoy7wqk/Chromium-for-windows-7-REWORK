@@ -1,0 +1,53 @@
+diff --git a/base/win/default_apps_util.cc b/base/win/default_apps_util.cc
+index 08475da1f40e4..5ce1fdf498cb0 100644
+--- a/base/win/default_apps_util.cc
++++ b/base/win/default_apps_util.cc
+@@ -31,6 +31,10 @@ std::wstring GetTargetForDefaultAppsSettings(base::WStringPiece protocol) {
+ 
+ namespace base::win {
+ 
++bool CanLaunchDefaultAppsSettingsModernDialog() {
++  return GetVersion() >= Version::WIN8;
++}
++
+ bool LaunchDefaultAppsSettingsModernDialog(std::wstring_view protocol) {
+   // The appModelId looks arbitrary but it is the same in Win8 and Win10. There
+   // is no easy way to retrieve the appModelId from the registry.
+@@ -38,6 +42,9 @@ bool LaunchDefaultAppsSettingsModernDialog(base::WStringPiece protocol) {
+       L"windows.immersivecontrolpanel_cw5n1h2txyewy"
+       L"!microsoft.windows.immersivecontrolpanel";
+ 
++  if (!CanLaunchDefaultAppsSettingsModernDialog())
++    return false;
++
+   Microsoft::WRL::ComPtr<IApplicationActivationManager> activator;
+   HRESULT hr =
+       ::CoCreateInstance(CLSID_ApplicationActivationManager, nullptr,
+diff --git a/base/win/default_apps_util.h b/base/win/default_apps_util.h
+index ed39e0aa919bd..714862fe12a69 100644
+--- a/base/win/default_apps_util.h
++++ b/base/win/default_apps_util.h
+@@ -10,6 +10,10 @@
+ 
+ namespace base::win {
+ 
++// Returns true if the OS has a default apps settings dialog. This method
++// returns false on Win7.
++BASE_EXPORT bool CanLaunchDefaultAppsSettingsModernDialog();
++
+ // Launches the Windows 'settings' modern app with the 'default apps' view
+ // focused. On Windows 10, if `protocol` is not empty, it also highlights
+ // the `protocol` in the dialog. Returns true if the default apps dialog was
+diff --git a/chrome/browser/ui/webui/app_management/app_management_page_handler_base.cc b/chrome/browser/ui/webui/app_management/app_management_page_handler_base.cc
+index 24b1e565022e0..e76d5673451d9 100644
+--- a/chrome/browser/ui/webui/app_management/app_management_page_handler_base.cc
++++ b/chrome/browser/ui/webui/app_management/app_management_page_handler_base.cc
+@@ -114,7 +111,7 @@ bool ShouldHideStoragePermission(const std::string app_id) {
+ // will be shown instead.
+ bool CanShowDefaultAppAssociationsUi() {
+ #if BUILDFLAG(IS_WIN)
+-  return true;
++  return base::win::CanLaunchDefaultAppsSettingsModernDialog();
+ #else
+   return false;
+ #endif

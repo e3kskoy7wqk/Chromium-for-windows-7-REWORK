@@ -1,0 +1,69 @@
+diff --git a/chrome/browser/permissions/system/system_media_source_win.cc b/chrome/browser/permissions/system/system_media_source_win.cc
+index 2164cab4f294f..2f2026a17cb67 100644
+--- a/chrome/browser/permissions/system/system_media_source_win.cc
++++ b/chrome/browser/permissions/system/system_media_source_win.cc
+@@ -13,6 +13,7 @@
+ 
+ #include "base/memory/raw_ref.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/scoped_native_library.h"
+ #include "base/win/core_winrt_util.h"
+ #include "base/win/post_async_results.h"
+ 
+@@ -71,6 +76,33 @@ class SuppressMessagePumpFilter
+   }
+ };
+ 
++static bool
++IsCurrentThreadSTALegacy()
++{
++  // We don't use RefPtr for token because CoGetContextToken does *not*
++  // increment its refcount!
++  IUnknown* token = nullptr;
++  HRESULT hr =
++    CoGetContextToken(reinterpret_cast<ULONG_PTR*>(&token));
++  if (FAILED(hr)) {
++    return false;
++  }
++
++  ComPtr<IComThreadingInfo> threadingInfo;
++  hr = token->QueryInterface(IID_PPV_ARGS(&threadingInfo));
++  if (FAILED(hr)) {
++    return false;
++  }
++
++  APTTYPE aptType;
++  hr = threadingInfo->GetCurrentApartmentType(&aptType);
++  if (FAILED(hr)) {
++    return false;
++  }
++
++  return aptType == APTTYPE_STA;
++}
++
+ SystemMediaSourceWin::Status SystemPermissionStatusImpl(
+     std::string_view capability_name) {
+   using ::ABI::Windows::Security::Authorization::AppCapabilityAccess::
+@@ -82,8 +114,21 @@ SystemMediaSourceWin::Status SystemPermissionStatusImpl(
+ 
+   APTTYPE apt_type;
+   APTTYPEQUALIFIER apt_qualifier;
+-  bool has_sta = SUCCEEDED(CoGetApartmentType(&apt_type, &apt_qualifier)) &&
++  typedef HRESULT(WINAPI * CoGetApartmentTypeFunc)(APTTYPE*, APTTYPEQUALIFIER*);
++
++  // Dynamic link to the API so the same test binary can run on older systems.
++  base::ScopedNativeLibrary com_library(base::FilePath(L"ole32.dll"));
++  CoGetApartmentTypeFunc co_get_apartment_type =
++      reinterpret_cast<CoGetApartmentTypeFunc>(
++          com_library.GetFunctionPointer("CoGetApartmentType"));
++  bool has_sta;
++  if (!co_get_apartment_type) {
++    // XP and Vista do not expose the newer API.
++    has_sta = IsCurrentThreadSTALegacy();
++  } else{
++  has_sta = SUCCEEDED(co_get_apartment_type(&apt_type, &apt_qualifier)) &&
+                  apt_type == APTTYPE_STA;
++  }
+ 
+   auto filter = Microsoft::WRL::Make<SuppressMessagePumpFilter>();
+   ComPtr<IMessageFilter> old_filter;

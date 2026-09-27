@@ -1,0 +1,1 @@
+[Chrome ELF] New NT registry API.    2016/7/14 6:35:34    84fd669f74832ccab02fcbb8b96dc4ed58d11b43

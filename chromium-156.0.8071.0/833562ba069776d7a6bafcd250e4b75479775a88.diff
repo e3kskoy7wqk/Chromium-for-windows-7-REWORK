@@ -1,0 +1,30 @@
+diff --git a/base/system/sys_info_win.cc b/base/system/sys_info_win.cc
+index 683ea13ccc5d1..2c8a3037f218b 100644
+--- a/base/system/sys_info_win.cc
++++ b/base/system/sys_info_win.cc
+@@ -40,14 +40,23 @@ std::vector<BYTE> GetCoreEfficiencyClasses() {
+   absl::InlinedVector<BYTE, kReservedSize> buffer;
+   buffer.resize(kReservedSize);
+   DWORD byte_length = kReservedSize;
+-  if (!GetLogicalProcessorInformationEx(
++    typedef BOOL (WINAPI *PFnGetLogicalProcessorInformationEx)(LOGICAL_PROCESSOR_RELATIONSHIP, PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, PDWORD);
++    PFnGetLogicalProcessorInformationEx pfnGetLogicalProcessorInformationEx
++        = (PFnGetLogicalProcessorInformationEx) GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
++                                                                "GetLogicalProcessorInformationEx");
++    if (pfnGetLogicalProcessorInformationEx == NULL)
++    {
++        return {};
++    }
++
++  if (!pfnGetLogicalProcessorInformationEx(
+           RelationProcessorCore,
+           reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
+               buffer.data()),
+           &byte_length)) {
+     DPCHECK(GetLastError() == ERROR_INSUFFICIENT_BUFFER);
+     buffer.resize(byte_length);
+-    if (!GetLogicalProcessorInformationEx(
++    if (!pfnGetLogicalProcessorInformationEx(
+             RelationProcessorCore,
+             reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
+                 buffer.data()),

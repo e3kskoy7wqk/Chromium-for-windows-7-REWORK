@@ -1,0 +1,13 @@
+diff --git a/third_party/ink/src/ink/strokes/stroke.cc b/third_party/ink/src/ink/strokes/stroke.cc
+index 6b1e666..8730ebb 100644
+--- a/third_party/ink/src/ink/strokes/stroke.cc
++++ b/third_party/ink/src/ink/strokes/stroke.cc
+@@ -150,7 +150,7 @@ void Stroke::RegenerateShape() {
+   // Create thread local stroke shape resources to save allocations if
+   // `thread_local` is supported, which is almost always. If not, fall back to a
+   // regular local variable.
+-#ifdef ABSL_HAVE_THREAD_LOCAL
++#if 0
+   thread_local
+ #endif
+       ShapeGenerationResources shape_gen;

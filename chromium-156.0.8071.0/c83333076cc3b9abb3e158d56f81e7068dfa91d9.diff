@@ -1,0 +1,22 @@
+diff --git a/third_party/swiftshader/BUILD.gn b/third_party/swiftshader/BUILD.gn
+index da23872ce..83affe0c6 100644
+--- a/third_party/swiftshader/BUILD.gn
++++ b/third_party/swiftshader/BUILD.gn
+@@ -27,7 +27,17 @@ config("swiftshader_config") {
+     if (swiftshader_startup_dialog) {
+       defines += [ "DEBUGGER_WAIT_DIALOG" ]
+     }
++  } else {
++    defines += [ "ANGLE_DISABLE_TRACE" ]
+   }
++
++  if (!is_win || is_clang) {
++    defines +=
++        [ "NO_SANITIZE_FUNCTION=__attribute__((no_sanitize(\"function\")))" ]
++  } else {
++    defines += [ "NO_SANITIZE_FUNCTION=" ]
++  }
++
+   if (is_win) {
+     # Disable MSVC warnings about std::aligned_storage being broken before
+     # VS 2017 15.8

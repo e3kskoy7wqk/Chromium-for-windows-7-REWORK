@@ -1,0 +1,100 @@
+diff --git a/services/device/utils/setupdi_utils_win.cc b/services/device/utils/setupdi_utils_win.cc
+index 52c4240709b38..0832b8e97721c 100644
+--- a/services/device/utils/setupdi_utils_win.cc
++++ b/services/device/utils/setupdi_utils_win.cc
+@@ -24,6 +24,17 @@ std::ostream& operator<<(std::ostream& os, const DEVPROPKEY& value) {
+ 
+ }  // namespace
+ 
++typedef BOOL (WINAPI *FN_SetupDiGetDevicePropertyW)(
++  __in       HDEVINFO DeviceInfoSet,
++  __in       PSP_DEVINFO_DATA DeviceInfoData,
++  __in       const DEVPROPKEY *PropertyKey,
++  __out      DEVPROPTYPE *PropertyType,
++  __out_opt  PBYTE PropertyBuffer,
++  __in       DWORD PropertyBufferSize,
++  __out_opt  PDWORD RequiredSize,
++  __in       DWORD Flags
++);
++
+ std::optional<std::wstring> GetDeviceStringProperty(
+     HDEVINFO dev_info,
+     SP_DEVINFO_DATA* dev_info_data,
+@@ -31,7 +42,13 @@ std::optional<std::wstring> GetDeviceStringProperty(
+     device_event_log::LogType log_type) {
+   DEVPROPTYPE property_type;
+   DWORD required_size;
+-  if (SetupDiGetDeviceProperty(dev_info, dev_info_data, &property,
++    FN_SetupDiGetDevicePropertyW fn_SetupDiGetDevicePropertyW = (FN_SetupDiGetDevicePropertyW)
++        GetProcAddress (LoadLibraryW (L"Setupapi.dll"), "SetupDiGetDevicePropertyW");
++
++    if (fn_SetupDiGetDevicePropertyW == NULL)
++        return std::nullopt;
++
++  if (fn_SetupDiGetDevicePropertyW(dev_info, dev_info_data, &property,
+                                &property_type, /*PropertyBuffer=*/nullptr,
+                                /*PropertyBufferSize=*/0, &required_size,
+                                /*Flags=*/0)) {
+@@ -60,7 +77,7 @@ std::optional<std::wstring> GetDeviceStringProperty(
+   }
+ 
+   std::wstring buffer;
+-  if (!SetupDiGetDeviceProperty(
++  if (!fn_SetupDiGetDevicePropertyW(
+           dev_info, dev_info_data, &property, &property_type,
+           reinterpret_cast<PBYTE>(base::WriteInto(&buffer, required_size)),
+           required_size, /*RequiredSize=*/nullptr, /*Flags=*/0)) {
+@@ -79,7 +96,13 @@ std::optional<std::vector<std::wstring>> GetDeviceStringListProperty(
+     device_event_log::LogType log_type) {
+   DEVPROPTYPE property_type;
+   DWORD required_size;
+-  if (SetupDiGetDeviceProperty(dev_info, dev_info_data, &property,
++    FN_SetupDiGetDevicePropertyW fn_SetupDiGetDevicePropertyW = (FN_SetupDiGetDevicePropertyW)
++        GetProcAddress (LoadLibraryW (L"Setupapi.dll"), "SetupDiGetDevicePropertyW");
++
++    if (fn_SetupDiGetDevicePropertyW == NULL)
++        return std::nullopt;
++
++  if (fn_SetupDiGetDevicePropertyW(dev_info, dev_info_data, &property,
+                                &property_type, /*PropertyBuffer=*/nullptr,
+                                /*PropertyBufferSize=*/0, &required_size,
+                                /*Flags=*/0)) {
+@@ -110,7 +133,7 @@ std::optional<std::vector<std::wstring>> GetDeviceStringListProperty(
+   }
+ 
+   std::wstring buffer;
+-  if (!SetupDiGetDeviceProperty(
++  if (!fn_SetupDiGetDevicePropertyW(
+           dev_info, dev_info_data, &property, &property_type,
+           reinterpret_cast<PBYTE>(base::WriteInto(&buffer, required_size)),
+           required_size, /*RequiredSize=*/nullptr, /*Flags=*/0)) {
+@@ -131,7 +154,13 @@ std::optional<uint32_t> GetDeviceUint32Property(
+     device_event_log::LogType log_type) {
+   DEVPROPTYPE property_type;
+   uint32_t buffer;
+-  if (!SetupDiGetDeviceProperty(dev_info, dev_info_data, &property,
++    FN_SetupDiGetDevicePropertyW fn_SetupDiGetDevicePropertyW = (FN_SetupDiGetDevicePropertyW)
++        GetProcAddress (LoadLibraryW (L"Setupapi.dll"), "SetupDiGetDevicePropertyW");
++
++    if (fn_SetupDiGetDevicePropertyW == NULL)
++        return std::nullopt;
++
++  if (!fn_SetupDiGetDevicePropertyW(dev_info, dev_info_data, &property,
+                                 &property_type,
+                                 reinterpret_cast<PBYTE>(&buffer),
+                                 sizeof(buffer), /*RequiredSize=*/nullptr,
+@@ -161,7 +190,13 @@ std::optional<std::string> GetDeviceGuidProperty(
+     device_event_log::LogType log_type) {
+   DEVPROPTYPE property_type;
+   GUID buffer;
+-  if (!SetupDiGetDeviceProperty(dev_info, dev_info_data, &property,
++    FN_SetupDiGetDevicePropertyW fn_SetupDiGetDevicePropertyW = (FN_SetupDiGetDevicePropertyW)
++        GetProcAddress (LoadLibraryW (L"Setupapi.dll"), "SetupDiGetDevicePropertyW");
++
++    if (fn_SetupDiGetDevicePropertyW == NULL)
++        return std::nullopt;
++
++  if (!fn_SetupDiGetDevicePropertyW(dev_info, dev_info_data, &property,
+                                 &property_type,
+                                 reinterpret_cast<PBYTE>(&buffer),
+                                 sizeof(buffer), /*RequiredSize=*/nullptr,

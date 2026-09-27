@@ -1,0 +1,52 @@
+diff --git a/media/base/win/media_foundation_package_locator_helper.cc b/media/base/win/media_foundation_package_locator_helper.cc
+index 5f0a180c480cf..691e25b23f5e0 100644
+--- a/media/base/win/media_foundation_package_locator_helper.cc
++++ b/media/base/win/media_foundation_package_locator_helper.cc
+@@ -17,6 +17,20 @@ std::vector<base::FilePath> MediaFoundationPackageInstallPaths(
+     std::wstring_view decoder_lib_name,
+     MediaFoundationCodecPackage codec_package) {
+   std::vector<base::FilePath> package_paths;  // Collected paths to return.
++    // These functions are only available on Windows 8 and above, load them dynamically for compatibility with Windows 7
++    typedef LONG(WINAPI * PFN_GetPackagesByPackageFamily)(PCWSTR, UINT32 *, PWSTR *, UINT32 *, WCHAR *);
++    PFN_GetPackagesByPackageFamily fpGetPackagesByPackageFamily =
++        (PFN_GetPackagesByPackageFamily)(void *)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GetPackagesByPackageFamily");
++    if (!fpGetPackagesByPackageFamily) {
++        return package_paths;
++    }
++    typedef LONG(WINAPI * PFN_GetPackagePathByFullName)(PCWSTR, UINT32 *, PWSTR);
++    PFN_GetPackagePathByFullName fpGetPackagePathByFullName =
++        (PFN_GetPackagePathByFullName)(void *)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GetPackagePathByFullName");
++    if (!fpGetPackagePathByFullName) {
++        return package_paths;
++    }
++
+   for (const auto& package_family_name : package_family_names) {
+     // Loop for each package family name.
+     DVLOG(2) << __func__ << ": Use package_family_name=" << package_family_name;
+@@ -24,7 +38,7 @@ std::vector<base::FilePath> MediaFoundationPackageInstallPaths(
+     uint32_t package_count = 0;
+     uint32_t buffer_size = 0;
+     long rc =
+-        GetPackagesByPackageFamily(package_family_name.data(), &package_count,
++        fpGetPackagesByPackageFamily(package_family_name.data(), &package_count,
+                                    nullptr, &buffer_size, nullptr);
+     if ((rc != ERROR_SUCCESS && rc != ERROR_INSUFFICIENT_BUFFER) ||
+         package_count == 0) {
+@@ -37,7 +51,7 @@ std::vector<base::FilePath> MediaFoundationPackageInstallPaths(
+     // Allocate required sizes to get all the package fullnames.
+     std::vector<wchar_t> buffer(buffer_size);
+     std::vector<wchar_t*> package_full_names(package_count);
+-    rc = GetPackagesByPackageFamily(package_family_name.data(), &package_count,
++    rc = fpGetPackagesByPackageFamily(package_family_name.data(), &package_count,
+                                     package_full_names.data(), &buffer_size,
+                                     buffer.data());
+     if (package_count == 0) {
+@@ -50,7 +64,7 @@ std::vector<base::FilePath> MediaFoundationPackageInstallPaths(
+     for (const wchar_t* package_full_name : package_full_names) {
+       DVLOG(2) << __func__ << ": package_full_name=" << package_full_name;
+       uint32_t package_path_len = std::size(package_path);
+-      rc = GetPackagePathByFullName(package_full_name, &package_path_len,
++      rc = fpGetPackagePathByFullName(package_full_name, &package_path_len,
+                                     package_path);
+       if (rc != ERROR_SUCCESS) {
+         DLOG(WARNING) << "Cannot find " << package_full_name << ". rc=" << rc;

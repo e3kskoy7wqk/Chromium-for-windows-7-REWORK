@@ -1,0 +1,1 @@
+Call SetProcessMitigationPolicy directly for Win 10+    2022/12/2 1:13:36    c11fc5168add0639555796318bfb63404184ef52

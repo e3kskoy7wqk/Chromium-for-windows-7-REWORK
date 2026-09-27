@@ -1,0 +1,1 @@
+Fail fast D3D11 QueryInterface calls    2025/12/9 4:20:51    b02e914476cc0359819163489b323c4be3f34ef9

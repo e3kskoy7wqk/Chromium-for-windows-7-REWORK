@@ -1,0 +1,53 @@
+diff --git a/chrome/install_static/user_data_dir.cc b/chrome/install_static/user_data_dir.cc
+index b23583064b019..2f00f08247409 100644
+--- a/chrome/install_static/user_data_dir.cc
++++ b/chrome/install_static/user_data_dir.cc
+@@ -82,6 +82,48 @@ bool GetDefaultUserDataDirectory(const InstallConstants& mode,
+   // (https://msdn.microsoft.com/library/windows/desktop/dd378457.aspx).
+   std::wstring user_data_dir = GetEnvironmentString(L"LOCALAPPDATA");
+ 
++typedef
++BOOL
++(WINAPI *PFN_GETWININET_CACHE_PATH) (
++    HWND hwnd,
++    LPWSTR pszPath,
++    int csidl,
++    BOOL fCreate
++    );
++
++
++  if (user_data_dir.empty()) {
++    PFN_GETWININET_CACHE_PATH pfnSHGetSpecialFolderPath;
++    HMODULE hShell32 = NULL;
++    BOOL ReturnVal;
++
++    hShell32 = LoadLibraryW(L"shell32.dll");
++    if (hShell32 == NULL) {
++        goto EXIT_THE_FUNCTION;
++    }
++
++    pfnSHGetSpecialFolderPath = (PFN_GETWININET_CACHE_PATH)
++                                        GetProcAddress(hShell32,
++                                                       "SHGetSpecialFolderPathW");
++    if (pfnSHGetSpecialFolderPath == NULL) {
++        goto EXIT_THE_FUNCTION;
++    }
++#define CSIDL_LOCAL_APPDATA             0x001c        // <user name>\Local Settings\Applicaiton Data (non roaming)
++
++    user_data_dir.resize(MAX_PATH + 1);
++    ReturnVal = pfnSHGetSpecialFolderPath(NULL,
++                                          (LPWSTR)&user_data_dir[0],
++                                          CSIDL_LOCAL_APPDATA,
++                                          FALSE);
++    if (!ReturnVal) {
++        goto EXIT_THE_FUNCTION;
++    }
++
++    user_data_dir.resize(wcslen(&user_data_dir[0]));
++  }
++
++EXIT_THE_FUNCTION:
++
+   if (user_data_dir.empty()) {
+     // LOCALAPPDATA was not set; fallback to the temporary files path.
+     DWORD size = ::GetTempPath(0, nullptr);

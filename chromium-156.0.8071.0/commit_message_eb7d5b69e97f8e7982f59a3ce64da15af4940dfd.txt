@@ -1,0 +1,1 @@
+Replace the last CRITICAL_SECTION with SRWLOCK.    2018/12/4 4:37:35    eb7d5b69e97f8e7982f59a3ce64da15af4940dfd

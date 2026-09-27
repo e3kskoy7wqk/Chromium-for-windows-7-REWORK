@@ -1,0 +1,1 @@
+Enable default DACL lockdown for sandboxed processes.    2016/4/2 2:14:17    329ab2d697eb8b8968a5451728a75a8e1d85532a

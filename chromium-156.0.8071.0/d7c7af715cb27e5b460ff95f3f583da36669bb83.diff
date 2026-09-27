@@ -1,0 +1,150 @@
+diff --git a/chrome/browser/password_manager/password_manager_util_win.cc b/chrome/browser/password_manager/password_manager_util_win.cc
+index 0d21181df9fd9..c7f3e069e7a6e 100644
+--- a/chrome/browser/password_manager/password_manager_util_win.cc
++++ b/chrome/browser/password_manager/password_manager_util_win.cc
+@@ -21,6 +21,8 @@
+ 
+ #include "base/containers/heap_array.h"
+ #include "base/containers/span.h"
++#include "base/feature_list.h"
++#include "base/win/windows_version.h"
+ #include "base/logging.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/threading/hang_watcher.h"
+@@ -44,6 +46,17 @@ namespace {
+ 
+ const unsigned kMaxPasswordRetries = 3;
+ 
++const unsigned kCredUiDefaultFlags =
++    CREDUI_FLAGS_GENERIC_CREDENTIALS | CREDUI_FLAGS_EXCLUDE_CERTIFICATES |
++    CREDUI_FLAGS_KEEP_USERNAME | CREDUI_FLAGS_ALWAYS_SHOW_UI |
++    CREDUI_FLAGS_DO_NOT_PERSIST;
++
++// TODO(crbug.com/574581) Remove this feature once this is confirmed to work
++// as expected.
++BASE_FEATURE(kCredUIPromptForWindowsCredentialsFeature,
++             "CredUIPromptForWindowsCredentials",
++             base::FEATURE_ENABLED_BY_DEFAULT);
++
+ struct PasswordCheckPrefs {
+   void Read(PrefService* local_state);
+   void Write(PrefService* local_state);
+@@ -300,11 +313,95 @@ bool DeviceAuthenticationPresent(const WCHAR* username,
+          !CheckBlankPassword(username, local_state);
+ }
+ 
+-}  // namespace
++// Authenticate the user using the old Windows credential prompt.
++// TODO(crbug.com/574581) Remove this feature once this is confirmed to work
++// as expected.
++bool AuthenticateUserOld(gfx::NativeWindow window,
++                         const std::u16string& password_prompt,
++                         PrefService* local_state) {
++  bool retval = false;
++  CREDUI_INFO cui = {};
++  WCHAR username[CREDUI_MAX_USERNAME_LENGTH + 1] = {};
++  WCHAR displayname[CREDUI_MAX_USERNAME_LENGTH + 1] = {};
++  WCHAR password[CREDUI_MAX_PASSWORD_LENGTH + 1] = {};
++  DWORD username_length = std::size(username);
++  std::u16string product_name = l10n_util::GetStringUTF16(IDS_PRODUCT_NAME);
++  bool use_principalname = false;
+ 
+-bool AuthenticateUser(gfx::NativeWindow window,
+-                      const std::u16string& password_prompt,
+-                      PrefService* local_state) {
++  // On a domain, we obtain the User Principal Name for domain authentication.
++  if (GetUserNameEx(NameUserPrincipal, username, &username_length)) {
++    use_principalname = true;
++  } else {
++    username_length = std::size(username);
++    // Otherwise, we're a workstation, use the plain local username.
++    if (!GetUserName(username, &username_length)) {
++      DLOG(ERROR) << "Unable to obtain username " << GetLastError();
++      return false;
++    }
++    if (CheckBlankPassword(username, local_state)) {
++      return true;
++    }
++  }
++
++  // Keep the current account name separate from the editable prompt buffer.
++  username_length = std::size(displayname);
++  if (!GetUserNameEx(NameDisplay, displayname, &username_length)) {
++    base::span(displayname).copy_from(base::span(username));
++  }
++
++  cui.cbSize = sizeof(cui);
++  cui.hwndParent = window->GetHost()->GetAcceleratedWidget();
++  cui.pszMessageText = base::as_wcstr(password_prompt);
++  cui.pszCaptionText = base::as_wcstr(product_name);
++
++  // The user can take unbounded time to answer the password prompt.
++  base::HangWatcher::InvalidateActiveExpectations();
++
++  BOOL save_password = FALSE;
++  DWORD cred_error = NO_ERROR;
++  size_t tries = 0;
++  do {
++    tries++;
++    absl::Cleanup password_cleaner = [&password] {
++      ::SecureZeroMemory(password, sizeof(password));
++    };
++
++    cred_error = CredUIPromptForCredentialsW(
++        &cui, base::as_wcstr(product_name), nullptr, 0, displayname,
++        std::size(displayname), password, std::size(password), &save_password,
++        kCredUiDefaultFlags |
++            (tries > 1 ? CREDUI_FLAGS_INCORRECT_PASSWORD : 0));
++
++    if (cred_error == NO_ERROR) {
++      HANDLE handle = INVALID_HANDLE_VALUE;
++      if (LogonUser(username, use_principalname ? nullptr : L".", password,
++                    LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
++                    &handle)) {
++        retval = true;
++        CloseHandle(handle);
++      } else {
++        DWORD error = GetLastError();
++        if (error == ERROR_ACCOUNT_RESTRICTION && password[0] == L'\0') {
++          // Password is blank, so permit.
++          retval = true;
++        } else {
++          DLOG(WARNING) << "Unable to authenticate " << error;
++        }
++      }
++    }
++  } while (cred_error == NO_ERROR && !retval && tries < kMaxPasswordRetries);
++  return retval;
++}
++
++// Authenticate the user using the new Windows credential prompt.  The new
++// prompt allows the user to authenticate using additional credential providers,
++// such as PINs, smartcards, fingerprint scanners, and so on.  It also still
++// allows the user to authenticate with their password.  This old prompt only
++// supported password authentication which is not enough for enterprise
++// environments.
++bool AuthenticateUserNew(gfx::NativeWindow window,
++                         const std::u16string& password_prompt,
++                         PrefService* local_state) {
+   bool retval = false;
+   WCHAR cur_username[CREDUI_MAX_USERNAME_LENGTH + 1] = {};
+   DWORD cur_username_length = std::size(cur_username);
+@@ -377,6 +474,18 @@ bool AuthenticateUser(gfx::NativeWindow window,
+   return retval;
+ }
+ 
++}  // namespace
++
++bool AuthenticateUser(gfx::NativeWindow window,
++                      const std::u16string& password_prompt,
++                      PrefService* local_state) {
++  if (base::win::GetVersion() < base::win::Version::VISTA ||
++      !base::FeatureList::IsEnabled(kCredUIPromptForWindowsCredentialsFeature)) {
++    return AuthenticateUserOld(window, password_prompt, local_state);
++  }
++  return AuthenticateUserNew(window, password_prompt, local_state);
++}
++
+ bool CanAuthenticateWithScreenLock(PrefService* local_state) {
+   WCHAR cur_username[CREDUI_MAX_USERNAME_LENGTH + 1] = {};
+   DWORD cur_username_length = std::size(cur_username);

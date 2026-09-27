@@ -1,0 +1,1 @@
+[sqlite_vfs] Use 128-bit file identifiers on Windows when possible    2026/8/17 22:31:42    0bf7837c896b8dc8b37fe001d5253d093b7eb9a6

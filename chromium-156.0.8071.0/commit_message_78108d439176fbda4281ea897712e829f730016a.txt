@@ -1,0 +1,1 @@
+Make `StrokeInputModeler` class concrete again, and move model-specific implementation behind a new `InputModelImpl` interface    2025/10/7 2:09:52    78108d439176fbda4281ea897712e829f730016a

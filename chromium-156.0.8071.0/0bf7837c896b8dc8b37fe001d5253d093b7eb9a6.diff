@@ -1,0 +1,21 @@
+diff --git a/components/sqlite_vfs/file_system_id.cc b/components/sqlite_vfs/file_system_id.cc
+index 7a26f8156e0fa..faf2f356e8bb8 100644
+--- a/components/sqlite_vfs/file_system_id.cc
++++ b/components/sqlite_vfs/file_system_id.cc
+@@ -30,16 +30,6 @@ std::optional<FileSystemId> GetFileSystemId(Client client,
+ #if BUILDFLAG(IS_WIN)
+     // Try to get the full 128-bit identifier for the file. Note that not all
+     // versions of Windows and all filesystems support this.
+-    FILE_ID_INFO id_info = {};
+-    if (::GetFileInformationByHandleEx(file.GetPlatformFile(), FileIdInfo,
+-                                       &id_info, sizeof(id_info)) &&
+-        !std::ranges::all_of(id_info.FileId.Identifier,
+-                             [](uint8_t b) { return b == 0; })) {
+-      return FileSystemId{
+-          .volume_serial_number = id_info.VolumeSerialNumber,
+-          .file_id = std::to_array(id_info.FileId.Identifier),
+-      };
+-    }
+ 
+     // Fall-back to getting the 64-bit file index.
+     BY_HANDLE_FILE_INFORMATION info = {};

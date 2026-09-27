@@ -1,0 +1,1058 @@
+diff --git a/build/config/BUILDCONFIG.gn b/build/config/BUILDCONFIG.gn
+--- a/build/config/BUILDCONFIG.gn
++++ b/build/config/BUILDCONFIG.gn
+@@ -738,6 +738,16 @@
+         deps += [ "//build/config:${_target_type}_deps" ]
+       }
+ 
++      if (current_os == "win" &&
++          (current_cpu == "x86" || current_cpu == "x64") &&
++          current_toolchain == default_toolchain) {
++        deps += [ "//base/win/w2kcompat:xp_kernel32" ]
++        configsA = configs
++        configs = []
++        configs += [ "//build/config/win:enlyze_win2k_compat" ]
++        configs += configsA
++      }
++
+       if (!defined(public_deps)) {
+         public_deps = []
+       }
+diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
+--- a/build/config/win/BUILD.gn
++++ b/build/config/win/BUILD.gn
+@@ -95,7 +95,7 @@ config("compiler") {
+     cflags += [ "/D__WRL_ENABLE_FUNCTION_STATICS__" ]
+ 
+     # Tell clang which version of MSVC to emulate.
+-    cflags += [ "-fmsc-version=1934" ]
++    cflags += [ "-fmsc-version=1916" ]
+ 
+     if (is_component_build) {
+       cflags += [
+@@ -224,6 +224,16 @@
+   ]
+ }
+ 
++config("enlyze_win2k_compat") {
++  if (current_os == "win" &&
++      (current_cpu == "x86" || current_cpu == "x64") &&
++      current_toolchain == default_toolchain) {
++    libs = [
++      get_label_info("//base/win/w2kcompat:xp_kernel32", "target_out_dir") +
++          "/xp_kernel32.lib",
++    ]
++  }
++}
+ # This is included by reference in the //build/config/compiler:runtime_library
+ # config that is applied to all targets. It is here to separate out the logic
+ # that is Windows-only. Please see that target for advice on what should go in
+diff --git a/base/win/w2kcompat/BUILD.gn b/base/win/w2kcompat/BUILD.gn
+new file mode 100644
+--- /dev/null
++++ b/base/win/w2kcompat/BUILD.gn
+@@ -0,0 +1,36 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++assert(is_win)
++
++if (current_os == "win" &&
++    (current_cpu == "x86" || current_cpu == "x64") &&
++    current_toolchain == default_toolchain) {
++  config("xp_kernel32_build") {
++    cflags = [ "-fno-builtin" ]
++    cflags_cc = [ "/std:c++17" ]
++  }
++
++  static_library("xp_kernel32") {
++    sources = [
++      "EnlyzeWinCompatLibInternal.h",
++      "targetver.h",
++      "xp_kernel32.cpp",
++    ]
++
++    if (current_cpu == "x86") {
++      sources += [ "xp_forwarders_kernel32.asm" ]
++    } else {
++      sources += [ "xp_forwarders_kernel32A.asm" ]
++    }
++
++    configs -= [ "//build/config/compiler:chromium_code" ]
++    configs += [
++      "//build/config/compiler:no_chromium_code",
++      ":xp_kernel32_build",
++    ]
++
++    use_libcxx_modules = false
++  }
++}
+diff --git a/base/win/w2kcompat/EnlyzeWinCompatLib.h b/base/win/w2kcompat/EnlyzeWinCompatLib.h
+new file mode 100644
+--- /dev/null
++++ b/base/win/w2kcompat/EnlyzeWinCompatLib.h
+@@ -0,0 +1,29 @@
++//
++// EnlyzeWinCompatLib - Let MSVC v141_xp targeted applications run on even older Windows versions
++// Copyright (c) 2021 Colin Finck, ENLYZE GmbH <c.finck@enlyze.com>
++// SPDX-License-Identifier: MIT
++//
++
++// To include EnlyzeWinCompatLib in your application, do the following:
++//   1. Add it as a Project Dependency.
++//   2. Turn off Visual Studio's default "Inherit from parent or project defaults" option
++//      in Project Properties -> Linker -> Input -> Additional Dependencies.
++//   3. Include this file in your application.
++//
++// This ensures that EnlyzeWinCompatLib's compatibility code is linked before the Win32 libraries
++// and therefore preferred.
++
++#pragma once
++
++#pragma comment(lib, "kernel32.lib")
++#pragma comment(lib, "user32.lib")
++#pragma comment(lib, "gdi32.lib")
++#pragma comment(lib, "winspool.lib")
++#pragma comment(lib, "comdlg32.lib")
++#pragma comment(lib, "advapi32.lib")
++#pragma comment(lib, "shell32.lib")
++#pragma comment(lib, "ole32.lib")
++#pragma comment(lib, "oleaut32.lib")
++#pragma comment(lib, "uuid.lib")
++#pragma comment(lib, "odbc32.lib")
++#pragma comment(lib, "odbccp32.lib")
+diff --git a/base/win/w2kcompat/EnlyzeWinCompatLibInternal.h b/base/win/w2kcompat/EnlyzeWinCompatLibInternal.h
+new file mode 100644
+--- /dev/null
++++ b/base/win/w2kcompat/EnlyzeWinCompatLibInternal.h
+@@ -0,0 +1,11 @@
++//
++// EnlyzeWinCompatLib - Let MSVC v141_xp targeted applications run on even older Windows versions
++// Copyright (c) 2021 Colin Finck, ENLYZE GmbH <c.finck@enlyze.com>
++// SPDX-License-Identifier: MIT
++//
++
++#pragma once
++
++#include "targetver.h"
++#include <Windows.h>
++#include <intrin.h>
+diff --git a/base/win/w2kcompat/targetver.h b/base/win/w2kcompat/targetver.h
+new file mode 100644
+--- /dev/null
++++ b/base/win/w2kcompat/targetver.h
+@@ -0,0 +1,14 @@
++//
++// EnlyzeWinCompatLib - Let MSVC v141_xp targeted applications run on even older Windows versions
++// Copyright (c) 2021 Colin Finck, ENLYZE GmbH <c.finck@enlyze.com>
++// SPDX-License-Identifier: MIT
++//
++
++#pragma once
++
++#ifdef _WIN32_WINNT
++#undef _WIN32_WINNT
++#endif
++
++#define _WIN32_WINNT _WIN32_WINNT_WIN2K
++#include <SDKDDKVer.h>
+diff --git a/base/win/w2kcompat/xp_forwarders_kernel32.asm b/base/win/w2kcompat/xp_forwarders_kernel32.asm
+new file mode 100644
+--- /dev/null
++++ b/base/win/w2kcompat/xp_forwarders_kernel32.asm
+@@ -0,0 +1,124 @@
++;
++; EnlyzeWinCompatLib - Synchronization & FLS Assembly Wrappers (x86 / stdcall)
++; Copyright (c) 2021 Colin Finck, ENLYZE GmbH <c.finck@enlyze.com>
++; SPDX-License-Identifier: MIT
++;
++
++.model flat
++
++EXTERN _LibAcquireSRWLockExclusive@4 : PROC
++EXTERN _LibAcquireSRWLockShared@4 : PROC
++EXTERN _LibReleaseSRWLockExclusive@4 : PROC
++EXTERN _LibReleaseSRWLockShared@4 : PROC
++EXTERN _LibFlsAlloc@4 : PROC
++EXTERN _LibFlsFree@4 : PROC
++EXTERN _LibFlsGetValue@4 : PROC
++EXTERN _LibFlsSetValue@8 : PROC
++EXTERN _LibInitializeCriticalSectionEx@12 : PROC
++EXTERN _LibSleepConditionVariableSRW@16 : PROC
++EXTERN _LibWakeConditionVariable@4 : PROC
++EXTERN _LibWakeAllConditionVariable@4 : PROC
++
++.code
++
++PUBLIC _AcquireSRWLockExclusive@4
++_AcquireSRWLockExclusive@4 PROC
++    jmp _LibAcquireSRWLockExclusive@4
++_AcquireSRWLockExclusive@4 ENDP
++
++PUBLIC _AcquireSRWLockShared@4
++_AcquireSRWLockShared@4 PROC
++    jmp _LibAcquireSRWLockShared@4
++_AcquireSRWLockShared@4 ENDP
++
++PUBLIC _ReleaseSRWLockExclusive@4
++_ReleaseSRWLockExclusive@4 PROC
++    jmp _LibReleaseSRWLockExclusive@4
++_ReleaseSRWLockExclusive@4 ENDP
++
++PUBLIC _ReleaseSRWLockShared@4
++_ReleaseSRWLockShared@4 PROC
++    jmp _LibReleaseSRWLockShared@4
++_ReleaseSRWLockShared@4 ENDP
++
++PUBLIC _FlsAlloc@4
++_FlsAlloc@4 PROC
++    jmp _LibFlsAlloc@4
++_FlsAlloc@4 ENDP
++
++PUBLIC _FlsFree@4
++_FlsFree@4 PROC
++    jmp _LibFlsFree@4
++_FlsFree@4 ENDP
++
++PUBLIC _FlsGetValue@4
++_FlsGetValue@4 PROC
++    jmp _LibFlsGetValue@4
++_FlsGetValue@4 ENDP
++
++PUBLIC _FlsSetValue@8
++_FlsSetValue@8 PROC
++    jmp _LibFlsSetValue@8
++_FlsSetValue@8 ENDP
++
++PUBLIC _InitializeCriticalSectionEx@12
++_InitializeCriticalSectionEx@12 PROC
++    jmp _LibInitializeCriticalSectionEx@12
++_InitializeCriticalSectionEx@12 ENDP
++
++PUBLIC _SleepConditionVariableSRW@16
++_SleepConditionVariableSRW@16 PROC
++    jmp _LibSleepConditionVariableSRW@16
++_SleepConditionVariableSRW@16 ENDP
++
++PUBLIC _WakeConditionVariable@4
++_WakeConditionVariable@4 PROC
++    jmp _LibWakeConditionVariable@4
++_WakeConditionVariable@4 ENDP
++
++PUBLIC _WakeAllConditionVariable@4
++_WakeAllConditionVariable@4 PROC
++    jmp _LibWakeAllConditionVariable@4
++_WakeAllConditionVariable@4 ENDP
++
++CONST SEGMENT
++
++PUBLIC __imp__AcquireSRWLockExclusive@4
++__imp__AcquireSRWLockExclusive@4 dd _LibAcquireSRWLockExclusive@4
++
++PUBLIC __imp__AcquireSRWLockShared@4
++__imp__AcquireSRWLockShared@4 dd _LibAcquireSRWLockShared@4
++
++PUBLIC __imp__ReleaseSRWLockExclusive@4
++__imp__ReleaseSRWLockExclusive@4 dd _LibReleaseSRWLockExclusive@4
++
++PUBLIC __imp__ReleaseSRWLockShared@4
++__imp__ReleaseSRWLockShared@4 dd _LibReleaseSRWLockShared@4
++
++PUBLIC __imp__FlsAlloc@4
++__imp__FlsAlloc@4 dd _LibFlsAlloc@4
++
++PUBLIC __imp__FlsFree@4
++__imp__FlsFree@4 dd _LibFlsFree@4
++
++PUBLIC __imp__FlsGetValue@4
++__imp__FlsGetValue@4 dd _LibFlsGetValue@4
++
++PUBLIC __imp__FlsSetValue@8
++__imp__FlsSetValue@8 dd _LibFlsSetValue@8
++
++PUBLIC __imp__InitializeCriticalSectionEx@12
++__imp__InitializeCriticalSectionEx@12 dd _LibInitializeCriticalSectionEx@12
++
++PUBLIC __imp__SleepConditionVariableSRW@16
++__imp__SleepConditionVariableSRW@16 dd _LibSleepConditionVariableSRW@16
++
++PUBLIC __imp__WakeConditionVariable@4
++__imp__WakeConditionVariable@4 dd _LibWakeConditionVariable@4
++
++PUBLIC __imp__WakeAllConditionVariable@4
++__imp__WakeAllConditionVariable@4 dd _LibWakeAllConditionVariable@4
++
++CONST ENDS
++
++END
+diff --git a/base/win/w2kcompat/xp_forwarders_kernel32A.asm b/base/win/w2kcompat/xp_forwarders_kernel32A.asm
+new file mode 100644
+--- /dev/null
++++ b/base/win/w2kcompat/xp_forwarders_kernel32A.asm
+@@ -0,0 +1,123 @@
++;
++; EnlyzeWinCompatLib - Synchronization & FLS Assembly Wrappers (x64)
++; Copyright (c) 2021 Colin Finck, ENLYZE GmbH <c.finck@enlyze.com>
++; SPDX-License-Identifier: MIT
++;
++
++OPTION CASEMAP:NONE
++
++EXTERN LibAcquireSRWLockExclusive : PROC
++EXTERN LibAcquireSRWLockShared : PROC
++EXTERN LibReleaseSRWLockExclusive : PROC
++EXTERN LibReleaseSRWLockShared : PROC
++EXTERN LibFlsAlloc : PROC
++EXTERN LibFlsFree : PROC
++EXTERN LibFlsGetValue : PROC
++EXTERN LibFlsSetValue : PROC
++EXTERN LibInitializeCriticalSectionEx : PROC
++EXTERN LibSleepConditionVariableSRW : PROC
++EXTERN LibWakeConditionVariable : PROC
++EXTERN LibWakeAllConditionVariable : PROC
++
++.code
++
++PUBLIC AcquireSRWLockExclusive
++AcquireSRWLockExclusive PROC
++    jmp LibAcquireSRWLockExclusive
++AcquireSRWLockExclusive ENDP
++
++PUBLIC AcquireSRWLockShared
++AcquireSRWLockShared PROC
++    jmp LibAcquireSRWLockShared
++AcquireSRWLockShared ENDP
++
++PUBLIC ReleaseSRWLockExclusive
++ReleaseSRWLockExclusive PROC
++    jmp LibReleaseSRWLockExclusive
++ReleaseSRWLockExclusive ENDP
++
++PUBLIC ReleaseSRWLockShared
++ReleaseSRWLockShared PROC
++    jmp LibReleaseSRWLockShared
++ReleaseSRWLockShared ENDP
++
++PUBLIC FlsAlloc
++FlsAlloc PROC
++    jmp LibFlsAlloc
++FlsAlloc ENDP
++
++PUBLIC FlsFree
++FlsFree PROC
++    jmp LibFlsFree
++FlsFree ENDP
++
++PUBLIC FlsGetValue
++FlsGetValue PROC
++    jmp LibFlsGetValue
++FlsGetValue ENDP
++
++PUBLIC FlsSetValue
++FlsSetValue PROC
++    jmp LibFlsSetValue
++FlsSetValue ENDP
++
++PUBLIC InitializeCriticalSectionEx
++InitializeCriticalSectionEx PROC
++    jmp LibInitializeCriticalSectionEx
++InitializeCriticalSectionEx ENDP
++
++PUBLIC SleepConditionVariableSRW
++SleepConditionVariableSRW PROC
++    jmp LibSleepConditionVariableSRW
++SleepConditionVariableSRW ENDP
++
++PUBLIC WakeConditionVariable
++WakeConditionVariable PROC
++    jmp LibWakeConditionVariable
++WakeConditionVariable ENDP
++
++PUBLIC WakeAllConditionVariable
++WakeAllConditionVariable PROC
++    jmp LibWakeAllConditionVariable
++WakeAllConditionVariable ENDP
++
++.const
++ALIGN 8
++
++PUBLIC __imp_AcquireSRWLockExclusive
++__imp_AcquireSRWLockExclusive dq LibAcquireSRWLockExclusive
++
++PUBLIC __imp_AcquireSRWLockShared
++__imp_AcquireSRWLockShared dq LibAcquireSRWLockShared
++
++PUBLIC __imp_ReleaseSRWLockExclusive
++__imp_ReleaseSRWLockExclusive dq LibReleaseSRWLockExclusive
++
++PUBLIC __imp_ReleaseSRWLockShared
++__imp_ReleaseSRWLockShared dq LibReleaseSRWLockShared
++
++PUBLIC __imp_FlsAlloc
++__imp_FlsAlloc dq LibFlsAlloc
++
++PUBLIC __imp_FlsFree
++__imp_FlsFree dq LibFlsFree
++
++PUBLIC __imp_FlsGetValue
++__imp_FlsGetValue dq LibFlsGetValue
++
++PUBLIC __imp_FlsSetValue
++__imp_FlsSetValue dq LibFlsSetValue
++
++PUBLIC __imp_InitializeCriticalSectionEx
++__imp_InitializeCriticalSectionEx dq LibInitializeCriticalSectionEx
++
++PUBLIC __imp_SleepConditionVariableSRW
++__imp_SleepConditionVariableSRW dq LibSleepConditionVariableSRW
++
++PUBLIC __imp_WakeConditionVariable
++__imp_WakeConditionVariable dq LibWakeConditionVariable
++
++PUBLIC __imp_WakeAllConditionVariable
++__imp_WakeAllConditionVariable dq LibWakeAllConditionVariable
++
++END
+diff --git a/base/win/w2kcompat/xp_kernel32.cpp b/base/win/w2kcompat/xp_kernel32.cpp
+new file mode 100644
+--- /dev/null
++++ b/base/win/w2kcompat/xp_kernel32.cpp
+@@ -0,0 +1,637 @@
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <winternl.h>
++#include "EnlyzeWinCompatLibInternal.h"
++
++typedef void* HSTRING;
++
++// EnlyzeWinCompatLib - Let Clang-compiled applications run on older Windows versions
++// Copyright (c) 2021 Colin Finck, ENLYZE GmbH <c.finck@enlyze.com>
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 mjd7989 - implementations of all functions below.
++
++static void my_memcpy(void* dest, const void* src, size_t num) {
++    unsigned char* d = (unsigned char*)dest;
++    const unsigned char* s = (const unsigned char*)src;
++    while (num--) *d++ = *s++;
++}
++
++#if defined(__clang__) && __has_warning("-Wcast-function-type-mismatch")
++#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
++#endif
++
++template <typename T>
++static T FetchProcCached(LPCWSTR dllName, const char* procName, T* cacheSlot) {
++    T pfn = (T)InterlockedCompareExchangePointer((PVOID*)cacheSlot, NULL, NULL);
++    if (pfn) return pfn;
++
++    HMODULE hMod = GetModuleHandleW(dllName);
++    if (!hMod) hMod = LoadLibraryW(dllName);
++    if (hMod) {
++        pfn = reinterpret_cast<T>(GetProcAddress(hMod, procName));
++        if (pfn) {
++            InterlockedExchangePointer((PVOID*)cacheSlot, (PVOID)pfn);
++            return pfn;
++        }
++    }
++    InterlockedExchangePointer((PVOID*)cacheSlot, (PVOID)(LONG_PTR)-1);
++    return nullptr;
++}
++
++#define FETCH_PROC_EX(dll, procName, type, varName) \
++    static type pfn_slot_##varName = nullptr; \
++    type varName = nullptr; \
++    if ((LONG_PTR)pfn_slot_##varName != -1) \
++        varName = FetchProcCached<type>(dll, procName, &pfn_slot_##varName)
++
++#define FETCH_PROC(dll, name, type) FETCH_PROC_EX(dll, #name, type, pfn)
++
++// ============================================================================
++// KERNEL32
++// ============================================================================
++
++#ifndef FLS_OUT_OF_INDEXES
++#define FLS_OUT_OF_INDEXES ((DWORD)0xFFFFFFFF)
++#endif
++
++#ifndef CONDITION_VARIABLE_LOCKMODE_SHARED
++#define CONDITION_VARIABLE_LOCKMODE_SHARED 0x00000001
++#endif
++
++typedef void (WINAPI *PFLS_CALLBACK_FUNCTION)(PVOID lpFlsData);
++
++typedef void (WINAPI *PFN_AcquireSRWLockExclusive)(PSRWLOCK Lock);
++typedef void (WINAPI *PFN_AcquireSRWLockShared)(PSRWLOCK Lock);
++typedef void (WINAPI *PFN_ReleaseSRWLockExclusive)(PSRWLOCK Lock);
++typedef void (WINAPI *PFN_ReleaseSRWLockShared)(PSRWLOCK Lock);
++typedef DWORD (WINAPI *PFN_FlsAlloc)(PFLS_CALLBACK_FUNCTION lpCallback);
++typedef BOOL (WINAPI *PFN_FlsFree)(DWORD dwFlsIndex);
++typedef PVOID (WINAPI *PFN_FlsGetValue)(DWORD dwFlsIndex);
++typedef BOOL (WINAPI *PFN_FlsSetValue)(DWORD dwFlsIndex, PVOID lpFlsData);
++typedef BOOL (WINAPI *PFN_InitializeCriticalSectionEx)(LPCRITICAL_SECTION lpCriticalSection, DWORD dwSpinCount, DWORD Flags);
++typedef BOOL (WINAPI *PFN_SleepConditionVariableSRW)(PCONDITION_VARIABLE ConditionVariable, PSRWLOCK SRWLock, DWORD dwMilliseconds, ULONG Flags);
++typedef void (WINAPI *PFN_WakeAllConditionVariable)(PCONDITION_VARIABLE ConditionVariable);
++typedef void (WINAPI *PFN_WakeConditionVariable)(PCONDITION_VARIABLE ConditionVariable);
++
++// --- SRW LOCK FALLBACK STRUCTURES ---
++
++struct XP_SRW_WAITER {
++    XP_SRW_WAITER* next;
++    HANDLE event;
++    BOOL shared;
++    BOOL granted;
++};
++
++struct XP_SRW_FALLBACK {
++    CRITICAL_SECTION lock;
++    LONG activeReaders;
++    BOOL writerActive;
++    LONG waitingReaders;
++    LONG waitingWriters;
++    XP_SRW_WAITER* waiters;
++};
++
++static XP_SRW_FALLBACK* XPCompatCreateSRWFallback(PSRWLOCK Lock) {
++    if (!Lock) return NULL;
++
++    XP_SRW_FALLBACK* existing = (XP_SRW_FALLBACK*)Lock->Ptr;
++    if (existing) return existing;
++
++    XP_SRW_FALLBACK* p = (XP_SRW_FALLBACK*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(XP_SRW_FALLBACK));
++    if (!p) return NULL;
++
++    InitializeCriticalSection(&p->lock);
++    p->activeReaders = 0;
++    p->writerActive = FALSE;
++    p->waitingReaders = 0;
++    p->waitingWriters = 0;
++    p->waiters = NULL;
++
++    PVOID old = InterlockedCompareExchangePointer(&Lock->Ptr, p, NULL);
++    if (old != NULL) {
++        DeleteCriticalSection(&p->lock);
++        HeapFree(GetProcessHeap(), 0, p);
++        return (XP_SRW_FALLBACK*)old;
++    }
++
++    return p;
++}
++
++static void XPCompatSRWAddWaiter(XP_SRW_FALLBACK* p, XP_SRW_WAITER* waiter) {
++    waiter->next = NULL;
++    if (!p->waiters) {
++        p->waiters = waiter;
++        return;
++    }
++    XP_SRW_WAITER* q = p->waiters;
++    while (q->next) q = q->next;
++    q->next = waiter;
++}
++
++static void XPCompatSRWGrantWaiters(XP_SRW_FALLBACK* p) {
++    if (p->writerActive || p->activeReaders != 0) return;
++
++    if (p->waitingWriters > 0) {
++        XP_SRW_WAITER* prev = NULL;
++        XP_SRW_WAITER* cur = p->waiters;
++        while (cur) {
++            if (!cur->shared) {
++                if (prev) prev->next = cur->next;
++                else p->waiters = cur->next;
++
++                cur->next = NULL;
++                p->waitingWriters--;
++                p->writerActive = TRUE;
++                cur->granted = TRUE;
++                SetEvent(cur->event);
++                return;
++            }
++            prev = cur;
++            cur = cur->next;
++        }
++        return;
++    }
++
++    XP_SRW_WAITER* prev = NULL;
++    XP_SRW_WAITER* cur = p->waiters;
++    while (cur) {
++        XP_SRW_WAITER* next = cur->next;
++        if (cur->shared) {
++            if (prev) prev->next = next;
++            else p->waiters = next;
++
++            cur->next = NULL;
++            p->waitingReaders--;
++            p->activeReaders++;
++            cur->granted = TRUE;
++            SetEvent(cur->event);
++        } else {
++            prev = cur;
++        }
++        cur = next;
++    }
++}
++
++// --- CONDITION VARIABLE FALLBACK STRUCTURES ---
++
++struct XP_CV_WAITER {
++    XP_CV_WAITER* next;
++    HANDLE event;
++    BOOL signaled;
++};
++
++struct XP_CV_FALLBACK {
++    CRITICAL_SECTION lock;
++    XP_CV_WAITER* waiters;
++    LONG waiterCount;
++};
++
++static XP_CV_FALLBACK* XPCompatCreateCVFallback(PCONDITION_VARIABLE ConditionVariable) {
++    if (!ConditionVariable) return NULL;
++
++    XP_CV_FALLBACK* existing = (XP_CV_FALLBACK*)ConditionVariable->Ptr;
++    if (existing) return existing;
++
++    XP_CV_FALLBACK* p = (XP_CV_FALLBACK*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(XP_CV_FALLBACK));
++    if (!p) return NULL;
++
++    InitializeCriticalSection(&p->lock);
++    p->waiters = NULL;
++    p->waiterCount = 0;
++
++    PVOID old = InterlockedCompareExchangePointer(&ConditionVariable->Ptr, p, NULL);
++    if (old != NULL) {
++        DeleteCriticalSection(&p->lock);
++        HeapFree(GetProcessHeap(), 0, p);
++        return (XP_CV_FALLBACK*)old;
++    }
++
++    return p;
++}
++
++static void XPCompatCVAddWaiter(XP_CV_FALLBACK* p, XP_CV_WAITER* waiter) {
++    waiter->next = NULL;
++    if (!p->waiters) {
++        p->waiters = waiter;
++    } else {
++        XP_CV_WAITER* q = p->waiters;
++        while (q->next) q = q->next;
++        q->next = waiter;
++    }
++    p->waiterCount++;
++}
++
++static BOOL XPCompatCVRemoveWaiter(XP_CV_FALLBACK* p, XP_CV_WAITER* waiter) {
++    XP_CV_WAITER* prev = NULL;
++    XP_CV_WAITER* cur = p->waiters;
++    while (cur) {
++        if (cur == waiter) {
++            if (prev) prev->next = cur->next;
++            else p->waiters = cur->next;
++
++            cur->next = NULL;
++            if (p->waiterCount > 0) p->waiterCount--;
++            return TRUE;
++        }
++        prev = cur;
++        cur = cur->next;
++    }
++    return FALSE;
++}
++
++// --- FLS EMULATION STRUCTURES ---
++
++struct XP_FLS_SLOT {
++    BOOL inUse;
++    DWORD tlsIndex;
++    PFLS_CALLBACK_FUNCTION callback;
++};
++
++static CRITICAL_SECTION g_FlsLock;
++static volatile LONG g_FlsInitState = 0;
++static XP_FLS_SLOT* g_FlsSlots = NULL;
++static DWORD g_FlsSlotCount = 0;
++#define XP_FLS_INITIAL_SLOTS 128
++
++static BOOL XPCompatInitFls() {
++    LONG state = InterlockedCompareExchange(&g_FlsInitState, 1, 0);
++    if (state == 0) {
++        InitializeCriticalSection(&g_FlsLock);
++        g_FlsSlotCount = XP_FLS_INITIAL_SLOTS;
++        g_FlsSlots = (XP_FLS_SLOT*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(XP_FLS_SLOT) * g_FlsSlotCount);
++
++        if (!g_FlsSlots) {
++            InterlockedExchange(&g_FlsInitState, 0);
++            return FALSE;
++        }
++        InterlockedExchange(&g_FlsInitState, 2);
++        return TRUE;
++    }
++    while (g_FlsInitState != 2) Sleep(0);
++    return g_FlsSlots != NULL;
++}
++
++static BOOL XPCompatGrowFlsSlots() {
++    DWORD oldCount = g_FlsSlotCount;
++    DWORD newCount = oldCount ? oldCount * 2 : XP_FLS_INITIAL_SLOTS;
++    if (newCount < oldCount) return FALSE;
++
++    XP_FLS_SLOT* newSlots = (XP_FLS_SLOT*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(XP_FLS_SLOT) * newCount);
++    if (!newSlots) return FALSE;
++
++    if (g_FlsSlots && oldCount) {
++        my_memcpy(newSlots, g_FlsSlots, sizeof(XP_FLS_SLOT) * oldCount);
++        HeapFree(GetProcessHeap(), 0, g_FlsSlots);
++    }
++
++    g_FlsSlots = newSlots;
++    g_FlsSlotCount = newCount;
++    return TRUE;
++}
++
++struct XP_FLS_CALLBACK_ITEM {
++    PFLS_CALLBACK_FUNCTION callback;
++    PVOID data;
++};
++
++extern "C" void WINAPI XPCompatCallFlsCallbacks() {
++    if (g_FlsInitState != 2 || !g_FlsSlots) return;
++
++    XP_FLS_CALLBACK_ITEM* items = NULL;
++    DWORD itemCount = 0;
++
++    EnterCriticalSection(&g_FlsLock);
++    for (DWORD i = 0; i < g_FlsSlotCount; ++i) {
++        if (!g_FlsSlots[i].inUse || !g_FlsSlots[i].callback) continue;
++        PVOID data = TlsGetValue(g_FlsSlots[i].tlsIndex);
++        if (data) itemCount++;
++    }
++
++    if (itemCount) {
++        items = (XP_FLS_CALLBACK_ITEM*)HeapAlloc(GetProcessHeap(), 0, sizeof(XP_FLS_CALLBACK_ITEM) * itemCount);
++    }
++
++    if (items) {
++        DWORD n = 0;
++        for (DWORD i = 0; i < g_FlsSlotCount; ++i) {
++            if (!g_FlsSlots[i].inUse || !g_FlsSlots[i].callback) continue;
++            PVOID data = TlsGetValue(g_FlsSlots[i].tlsIndex);
++            if (!data) continue;
++
++            TlsSetValue(g_FlsSlots[i].tlsIndex, NULL);
++            items[n].callback = g_FlsSlots[i].callback;
++            items[n].data = data;
++            n++;
++        }
++    }
++    LeaveCriticalSection(&g_FlsLock);
++
++    if (items) {
++        for (DWORD n = 0; n < itemCount; ++n) {
++            if (items[n].callback) items[n].callback(items[n].data);
++        }
++        HeapFree(GetProcessHeap(), 0, items);
++    }
++}
++
++// ============================================================================
++// EXPORTED FUNCTIONS
++// ============================================================================
++
++extern "C" void WINAPI LibAcquireSRWLockExclusive(PSRWLOCK Lock) {
++    if (!Lock) return;
++
++    FETCH_PROC(L"kernel32.dll", AcquireSRWLockExclusive, PFN_AcquireSRWLockExclusive);
++    if (pfn) { pfn(Lock); return; }
++
++    XP_SRW_FALLBACK* p = XPCompatCreateSRWFallback(Lock);
++    if (!p) return;
++
++    XP_SRW_WAITER waiter;
++    waiter.next = NULL;
++    waiter.shared = FALSE;
++    waiter.granted = FALSE;
++    waiter.event = CreateEventW(NULL, TRUE, FALSE, NULL);
++    if (!waiter.event) return;
++
++    EnterCriticalSection(&p->lock);
++    if (!p->writerActive && p->activeReaders == 0 && p->waitingWriters == 0) {
++        p->writerActive = TRUE;
++        LeaveCriticalSection(&p->lock);
++        CloseHandle(waiter.event);
++        return;
++    }
++
++    p->waitingWriters++;
++    XPCompatSRWAddWaiter(p, &waiter);
++    LeaveCriticalSection(&p->lock);
++
++    WaitForSingleObject(waiter.event, INFINITE);
++    CloseHandle(waiter.event);
++}
++
++extern "C" void WINAPI LibAcquireSRWLockShared(PSRWLOCK Lock) {
++    if (!Lock) return;
++
++    FETCH_PROC(L"kernel32.dll", AcquireSRWLockShared, PFN_AcquireSRWLockShared);
++    if (pfn) { pfn(Lock); return; }
++
++    XP_SRW_FALLBACK* p = XPCompatCreateSRWFallback(Lock);
++    if (!p) return;
++
++    XP_SRW_WAITER waiter;
++    waiter.next = NULL;
++    waiter.shared = TRUE;
++    waiter.granted = FALSE;
++    waiter.event = CreateEventW(NULL, TRUE, FALSE, NULL);
++    if (!waiter.event) return;
++
++    EnterCriticalSection(&p->lock);
++    if (!p->writerActive && p->waitingWriters == 0) {
++        p->activeReaders++;
++        LeaveCriticalSection(&p->lock);
++        CloseHandle(waiter.event);
++        return;
++    }
++
++    p->waitingReaders++;
++    XPCompatSRWAddWaiter(p, &waiter);
++    LeaveCriticalSection(&p->lock);
++
++    WaitForSingleObject(waiter.event, INFINITE);
++    CloseHandle(waiter.event);
++}
++
++extern "C" void WINAPI LibReleaseSRWLockExclusive(PSRWLOCK Lock) {
++    if (!Lock) return;
++
++    FETCH_PROC(L"kernel32.dll", ReleaseSRWLockExclusive, PFN_ReleaseSRWLockExclusive);
++    if (pfn) { pfn(Lock); return; }
++
++    XP_SRW_FALLBACK* p = (XP_SRW_FALLBACK*)Lock->Ptr;
++    if (!p) return;
++
++    EnterCriticalSection(&p->lock);
++    if (p->writerActive) p->writerActive = FALSE;
++    XPCompatSRWGrantWaiters(p);
++    LeaveCriticalSection(&p->lock);
++}
++
++extern "C" void WINAPI LibReleaseSRWLockShared(PSRWLOCK Lock) {
++    if (!Lock) return;
++
++    FETCH_PROC(L"kernel32.dll", ReleaseSRWLockShared, PFN_ReleaseSRWLockShared);
++    if (pfn) { pfn(Lock); return; }
++
++    XP_SRW_FALLBACK* p = (XP_SRW_FALLBACK*)Lock->Ptr;
++    if (!p) return;
++
++    EnterCriticalSection(&p->lock);
++    if (p->activeReaders > 0) p->activeReaders--;
++    if (p->activeReaders == 0) XPCompatSRWGrantWaiters(p);
++    LeaveCriticalSection(&p->lock);
++}
++
++extern "C" DWORD WINAPI LibFlsAlloc(PVOID lpCallback) {
++    FETCH_PROC(L"kernel32.dll", FlsAlloc, PFN_FlsAlloc);
++    if (pfn) return pfn((PFLS_CALLBACK_FUNCTION)lpCallback);
++
++    if (!XPCompatInitFls()) return FLS_OUT_OF_INDEXES;
++
++    EnterCriticalSection(&g_FlsLock);
++    for (;;) {
++        for (DWORD i = 0; i < g_FlsSlotCount; ++i) {
++            if (!g_FlsSlots[i].inUse) {
++                DWORD tlsIndex = TlsAlloc();
++                if (tlsIndex == TLS_OUT_OF_INDEXES) {
++                    LeaveCriticalSection(&g_FlsLock);
++                    return FLS_OUT_OF_INDEXES;
++                }
++                g_FlsSlots[i].inUse = TRUE;
++                g_FlsSlots[i].tlsIndex = tlsIndex;
++                g_FlsSlots[i].callback = (PFLS_CALLBACK_FUNCTION)lpCallback;
++                LeaveCriticalSection(&g_FlsLock);
++                return i;
++            }
++        }
++        if (!XPCompatGrowFlsSlots()) {
++            LeaveCriticalSection(&g_FlsLock);
++            return FLS_OUT_OF_INDEXES;
++        }
++    }
++}
++
++extern "C" BOOL WINAPI LibFlsFree(DWORD dwFlsIndex) {
++    FETCH_PROC(L"kernel32.dll", FlsFree, PFN_FlsFree);
++    if (pfn) return pfn(dwFlsIndex);
++
++    if (!XPCompatInitFls()) return FALSE;
++
++    EnterCriticalSection(&g_FlsLock);
++    if (dwFlsIndex >= g_FlsSlotCount || !g_FlsSlots[dwFlsIndex].inUse) {
++        LeaveCriticalSection(&g_FlsLock);
++        SetLastError(ERROR_INVALID_PARAMETER);
++        return FALSE;
++    }
++
++    DWORD tlsIndex = g_FlsSlots[dwFlsIndex].tlsIndex;
++    g_FlsSlots[dwFlsIndex].inUse = FALSE;
++    g_FlsSlots[dwFlsIndex].tlsIndex = TLS_OUT_OF_INDEXES;
++    g_FlsSlots[dwFlsIndex].callback = NULL;
++
++    BOOL result = TlsFree(tlsIndex);
++    LeaveCriticalSection(&g_FlsLock);
++    return result;
++}
++
++extern "C" PVOID WINAPI LibFlsGetValue(DWORD dwFlsIndex) {
++    FETCH_PROC(L"kernel32.dll", FlsGetValue, PFN_FlsGetValue);
++    if (pfn) return pfn(dwFlsIndex);
++
++    if (!XPCompatInitFls()) return NULL;
++
++    EnterCriticalSection(&g_FlsLock);
++    if (dwFlsIndex >= g_FlsSlotCount || !g_FlsSlots[dwFlsIndex].inUse) {
++        LeaveCriticalSection(&g_FlsLock);
++        SetLastError(ERROR_INVALID_PARAMETER);
++        return NULL;
++    }
++
++    DWORD tlsIndex = g_FlsSlots[dwFlsIndex].tlsIndex;
++    PVOID value = TlsGetValue(tlsIndex);
++    LeaveCriticalSection(&g_FlsLock);
++    return value;
++}
++
++extern "C" BOOL WINAPI LibFlsSetValue(DWORD dwFlsIndex, PVOID lpFlsData) {
++    FETCH_PROC(L"kernel32.dll", FlsSetValue, PFN_FlsSetValue);
++    if (pfn) return pfn(dwFlsIndex, lpFlsData);
++
++    if (!XPCompatInitFls()) return FALSE;
++
++    EnterCriticalSection(&g_FlsLock);
++    if (dwFlsIndex >= g_FlsSlotCount || !g_FlsSlots[dwFlsIndex].inUse) {
++        LeaveCriticalSection(&g_FlsLock);
++        SetLastError(ERROR_INVALID_PARAMETER);
++        return FALSE;
++    }
++
++    DWORD tlsIndex = g_FlsSlots[dwFlsIndex].tlsIndex;
++    BOOL result = TlsSetValue(tlsIndex, lpFlsData);
++    LeaveCriticalSection(&g_FlsLock);
++    return result;
++}
++
++extern "C" BOOL WINAPI LibInitializeCriticalSectionEx(LPCRITICAL_SECTION lpCriticalSection, DWORD dwSpinCount, DWORD Flags) {
++    if (!lpCriticalSection) {
++        SetLastError(ERROR_INVALID_PARAMETER);
++        return FALSE;
++    }
++
++    FETCH_PROC(L"kernel32.dll", InitializeCriticalSectionEx, PFN_InitializeCriticalSectionEx);
++    if (pfn) return pfn(lpCriticalSection, dwSpinCount, Flags);
++
++    typedef BOOL (WINAPI *PFN_ICSASC)(LPCRITICAL_SECTION, DWORD);
++    FETCH_PROC_EX(L"kernel32.dll", "InitializeCriticalSectionAndSpinCount", PFN_ICSASC, pfnSpin);
++    if (pfnSpin) return pfnSpin(lpCriticalSection, dwSpinCount);
++
++    InitializeCriticalSection(lpCriticalSection);
++    return TRUE;
++}
++
++extern "C" BOOL WINAPI LibSleepConditionVariableSRW(PCONDITION_VARIABLE ConditionVariable, PSRWLOCK SRWLock, DWORD dwMilliseconds, ULONG Flags) {
++    if (!ConditionVariable || !SRWLock) {
++        SetLastError(ERROR_INVALID_PARAMETER);
++        return FALSE;
++    }
++
++    FETCH_PROC(L"kernel32.dll", SleepConditionVariableSRW, PFN_SleepConditionVariableSRW);
++    if (pfn) return pfn(ConditionVariable, SRWLock, dwMilliseconds, Flags);
++
++    XP_CV_FALLBACK* cv = XPCompatCreateCVFallback(ConditionVariable);
++    if (!cv) {
++        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
++        return FALSE;
++    }
++
++    XP_CV_WAITER waiter;
++    waiter.next = NULL;
++    waiter.signaled = FALSE;
++    waiter.event = CreateEventW(NULL, TRUE, FALSE, NULL);
++    if (!waiter.event) return FALSE;
++
++    EnterCriticalSection(&cv->lock);
++    XPCompatCVAddWaiter(cv, &waiter);
++    LeaveCriticalSection(&cv->lock);
++
++    if (Flags & CONDITION_VARIABLE_LOCKMODE_SHARED) LibReleaseSRWLockShared(SRWLock);
++    else LibReleaseSRWLockExclusive(SRWLock);
++
++    DWORD result = WaitForSingleObject(waiter.event, dwMilliseconds);
++    BOOL woke = FALSE;
++
++    EnterCriticalSection(&cv->lock);
++    if (waiter.signaled) {
++        woke = TRUE;
++    } else {
++        if (XPCompatCVRemoveWaiter(cv, &waiter)) woke = FALSE;
++        else woke = TRUE;
++    }
++    LeaveCriticalSection(&cv->lock);
++
++    CloseHandle(waiter.event);
++
++    if (Flags & CONDITION_VARIABLE_LOCKMODE_SHARED) LibAcquireSRWLockShared(SRWLock);
++    else LibAcquireSRWLockExclusive(SRWLock);
++
++    if (woke) return TRUE;
++
++    if (result == WAIT_TIMEOUT) SetLastError(ERROR_TIMEOUT);
++    else SetLastError(ERROR_FUNCTION_FAILED);
++    return FALSE;
++}
++
++extern "C" void WINAPI LibWakeConditionVariable(PCONDITION_VARIABLE ConditionVariable) {
++    if (!ConditionVariable) return;
++
++    FETCH_PROC(L"kernel32.dll", WakeConditionVariable, PFN_WakeConditionVariable);
++    if (pfn) { pfn(ConditionVariable); return; }
++
++    XP_CV_FALLBACK* cv = (XP_CV_FALLBACK*)ConditionVariable->Ptr;
++    if (!cv) return;
++
++    EnterCriticalSection(&cv->lock);
++    XP_CV_WAITER* waiter = cv->waiters;
++    if (waiter) {
++        cv->waiters = waiter->next;
++        waiter->next = NULL;
++        if (cv->waiterCount > 0) cv->waiterCount--;
++        waiter->signaled = TRUE;
++        SetEvent(waiter->event);
++    }
++    LeaveCriticalSection(&cv->lock);
++}
++
++extern "C" void WINAPI LibWakeAllConditionVariable(PCONDITION_VARIABLE ConditionVariable) {
++    if (!ConditionVariable) return;
++
++    FETCH_PROC(L"kernel32.dll", WakeAllConditionVariable, PFN_WakeAllConditionVariable);
++    if (pfn) { pfn(ConditionVariable); return; }
++
++    XP_CV_FALLBACK* cv = (XP_CV_FALLBACK*)ConditionVariable->Ptr;
++    if (!cv) return;
++
++    EnterCriticalSection(&cv->lock);
++    XP_CV_WAITER* waiter = cv->waiters;
++    cv->waiters = NULL;
++    cv->waiterCount = 0;
++
++    while (waiter) {
++        XP_CV_WAITER* next = waiter->next;
++        waiter->next = NULL;
++        waiter->signaled = TRUE;
++        SetEvent(waiter->event);
++        waiter = next;
++    }
++    LeaveCriticalSection(&cv->lock);
++}

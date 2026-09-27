@@ -1,0 +1,1 @@
+win7dep: Remove obsolete Win7/8 code from cbui    2022/12/22 18:58:14    fb6c6605c9a248bcc42a74bd68fc42dddb51d272

@@ -1,0 +1,1066 @@
+diff --git a/third_party/dav1d/libdav1d/src/thread.h b/third_party/dav1d/libdav1d/src/thread.h
+index b2529fc..6e1087f 100644
+--- a/third_party/dav1d/libdav1d/src/thread.h
++++ b/third_party/dav1d/libdav1d/src/thread.h
+@@ -46,8 +46,11 @@ typedef struct {
+ } pthread_attr_t;
+ 
+ typedef SRWLOCK pthread_mutex_t;
+-typedef CONDITION_VARIABLE pthread_cond_t;
+-typedef INIT_ONCE pthread_once_t;
++typedef void *pthread_cond_t;
++typedef volatile LONG pthread_once_t;
++#define MY_PTHREAD_ONCE_INIT  0
++#define MY_PTHREAD_ONCE_INPROGRESS 1
++#define MY_PTHREAD_ONCE_DONE 2
+ 
+ void dav1d_init_thread(void);
+ void dav1d_set_thread_name(const wchar_t *name);
+@@ -80,10 +83,420 @@ static inline int pthread_attr_setstacksize(pthread_attr_t *const attr,
+     return 0;
+ }
+ 
++//
++// Push lock definitions
++//
++typedef struct _EX_PUSH_LOCK {
++
++#define EX_PUSH_LOCK_WAITING   0x1
++#define EX_PUSH_LOCK_EXCLUSIVE 0x2
++#define EX_PUSH_LOCK_SHARE_INC 0x4
++
++    union {
++        struct {
++            ULONG_PTR Waiting : 1;
++            ULONG_PTR Exclusive : 1;
++            ULONG_PTR Shared : sizeof (ULONG_PTR) * 8 - 2;
++        };
++        ULONG_PTR Value;
++        PVOID Ptr;
++    };
++} EX_PUSH_LOCK, *PEX_PUSH_LOCK;
++
++
++//
++// This is a block held on the local stack of the waiting threads.
++//
++
++typedef  struct _EX_PUSH_LOCK_WAIT_BLOCK *PEX_PUSH_LOCK_WAIT_BLOCK;
++
++typedef struct _EX_PUSH_LOCK_WAIT_BLOCK {
++    HANDLE WakeEvent;
++    PEX_PUSH_LOCK_WAIT_BLOCK Next;
++    PEX_PUSH_LOCK_WAIT_BLOCK Last;
++    PEX_PUSH_LOCK_WAIT_BLOCK Previous;
++    ULONG ShareCount;
++    BOOLEAN Exclusive;
++} EX_PUSH_LOCK_WAIT_BLOCK;
++
++#undef ASSERT
++#define ASSERT(x)
++
++static
++void
++ExInitializePushLock (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Initialize a push lock structure
++
++Arguments:
++
++    PushLock - Push lock to be initialized
++
++Return Value:
++
++    None
++
++--*/
++{
++    PushLock->Value = 0;
++}
++
++static
++void
++ExfAcquirePushLockExclusive (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Acquire a push lock exclusively
++
++Arguments:
++
++    PushLock - Push lock to be acquired
++
++Return Value:
++
++    None
++
++--*/
++{
++    EX_PUSH_LOCK OldValue, NewValue;
++    EX_PUSH_LOCK_WAIT_BLOCK WaitBlock;
++
++    OldValue = *PushLock;
++    while (1) {
++        //
++        // If the lock is already held exclusively/shared or there are waiters then
++        // we need to wait.
++        //
++        if (OldValue.Value == 0) {
++            NewValue.Value = OldValue.Value + EX_PUSH_LOCK_EXCLUSIVE;
++            NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                              NewValue.Ptr,
++                                                              OldValue.Ptr);
++            if (NewValue.Ptr == OldValue.Ptr) {
++                break;
++            }
++        } else {
++            WaitBlock.WakeEvent = CreateEvent ( NULL, FALSE, FALSE, NULL );
++            WaitBlock.Exclusive = TRUE;
++            WaitBlock.Last = NULL;
++            WaitBlock.Previous = NULL;
++            //
++            // Move the sharecount to our wait block if need be.
++            //
++            if (OldValue.Waiting) {
++                WaitBlock.Next = (PEX_PUSH_LOCK_WAIT_BLOCK)
++                                     (OldValue.Value - EX_PUSH_LOCK_WAITING);
++                WaitBlock.ShareCount = 0;
++            } else {
++                WaitBlock.Next = NULL;
++                WaitBlock.ShareCount = (ULONG) OldValue.Shared;
++            }
++            NewValue.Ptr = ((PUCHAR) &WaitBlock) + EX_PUSH_LOCK_WAITING;
++            ASSERT ((NewValue.Value & EX_PUSH_LOCK_WAITING) != 0);
++            NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                              NewValue.Ptr,
++                                                              OldValue.Ptr);
++            if (NewValue.Ptr == OldValue.Ptr) {
++                WaitForSingleObject(WaitBlock.WakeEvent, INFINITE);
++                ASSERT ((WaitBlock.ShareCount == 0) && (WaitBlock.Next == NULL));
++                CloseHandle(WaitBlock.WakeEvent);
++                break;
++            }
++            CloseHandle(WaitBlock.WakeEvent);
++
++        }
++        OldValue = NewValue;
++    }
++}
++
++static
++void
++ExfReleasePushLock (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Release a push lock that was acquired exclusively or shared
++
++Arguments:
++
++    PushLock - Push lock to be released
++
++Return Value:
++
++    None
++
++--*/
++{
++    EX_PUSH_LOCK OldValue, NewValue;
++    PEX_PUSH_LOCK_WAIT_BLOCK WaitBlock, NextWaitBlock, ReleaseWaitList, Previous;
++    PEX_PUSH_LOCK_WAIT_BLOCK LastWaitBlock, FirstWaitBlock;
++    ULONG ShareCount;
++#if 0
++    KIRQL OldIrql;
++#endif
++
++    OldValue = *PushLock;
++    while (1) {
++        if (!OldValue.Waiting) {
++            //
++            // Either we hold the lock exclusive or shared but not both.
++            //
++            ASSERT (OldValue.Exclusive ^ (OldValue.Shared > 0));
++
++            //
++            // We must hold the lock exclusive or shared. We make the assuption that
++            // the exclusive bit is just below the share count here.
++            //
++            NewValue.Value = (OldValue.Value - EX_PUSH_LOCK_EXCLUSIVE) &
++                             ~EX_PUSH_LOCK_EXCLUSIVE;
++            NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                              NewValue.Ptr,
++                                                              OldValue.Ptr);
++            if (NewValue.Ptr == OldValue.Ptr) {
++                break;
++            }
++            //
++            // Either we gained a new waiter or another shared owner arrived or left
++            //
++            ASSERT (NewValue.Waiting || (NewValue.Shared > 0 && !NewValue.Exclusive));
++            OldValue = NewValue;
++        } else {
++            //
++            // There are waiters chained to the lock. We have to release the share count,
++            // last exclusive or last chain of shared waiters.
++            //
++            WaitBlock = (PEX_PUSH_LOCK_WAIT_BLOCK)
++                           (OldValue.Value - EX_PUSH_LOCK_WAITING);
++
++            FirstWaitBlock = WaitBlock;
++            ReleaseWaitList = WaitBlock;
++            Previous = NULL;
++            LastWaitBlock = NULL;
++            ShareCount = 0;
++            do {
++
++                if (WaitBlock->Last != NULL) {
++                    LastWaitBlock = WaitBlock;
++                    WaitBlock = WaitBlock->Last;
++                    Previous = WaitBlock->Previous;
++                    ReleaseWaitList = WaitBlock;
++                    ASSERT (WaitBlock->Next == NULL);
++                    ASSERT (Previous != NULL);
++                    ShareCount = 0;
++                }
++
++                if (WaitBlock->Exclusive) {
++                    //
++                    // This is an exclusive waiter. If this was the first exclusive waited to a shared acquire
++                    // then it will have the saved share count. If we acquired the lock shared then the count
++                    // must contain a bias for this thread. Release that and if we are not the last shared
++                    // accessor then exit. A later shared release thread will wake the exclusive
++                    // waiter.
++                    //
++                    if (WaitBlock->ShareCount != 0) {
++                        if (InterlockedDecrement ((PLONG)&WaitBlock->ShareCount) != 0) {
++                            return;
++                        }
++                    }
++                    //
++                    // Reset count of share acquires waiting.
++                    //
++                    ShareCount = 0;
++                } else {
++                    //
++                    // This is a shared waiter. Record the number of these to update the head or the
++                    // previous exclusive waiter.
++                    //
++                    ShareCount++;
++                }
++                NextWaitBlock = WaitBlock->Next;
++                if (NextWaitBlock != NULL) {
++
++                    NextWaitBlock->Previous = WaitBlock;
++
++                    if (NextWaitBlock->Exclusive) {
++                        //
++                        // The next block is exclusive. This may be the entry to free.
++                        //
++                        Previous = WaitBlock;
++                        ReleaseWaitList = NextWaitBlock;
++                    } else {
++                        //
++                        // The next block is shared. If the chain start is exclusive then skip to this one
++                        // as the exclusive isn't the thread we will wake up.
++                        //
++                        if (ReleaseWaitList->Exclusive) {
++                            Previous = WaitBlock;
++                            ReleaseWaitList = NextWaitBlock;
++                        }
++                    }
++                }
++
++                WaitBlock = NextWaitBlock;
++            } while (WaitBlock != NULL);
++
++            //
++            // If our release chain is everything then we have to update the header
++            //
++            if (Previous == NULL) {
++                NewValue.Value = 0;
++                NewValue.Exclusive = ReleaseWaitList->Exclusive;
++                NewValue.Shared = ShareCount;
++                ASSERT (((ShareCount > 0) ^ (ReleaseWaitList->Exclusive)) && !NewValue.Waiting);
++
++                NewValue.Ptr = InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                                                  NewValue.Ptr,
++                                                                  OldValue.Ptr);
++                if (NewValue.Ptr != OldValue.Ptr) {
++                    //
++                    // We are releasing so we could have only gained another waiter
++                    //
++                    ASSERT (NewValue.Waiting);
++                    OldValue = NewValue;
++                    continue;
++                }
++            } else {
++
++                if (LastWaitBlock != NULL) {
++                    LastWaitBlock->Last = NULL;
++                }
++                //
++                // Truncate the chain at this position and save the share count for all the shared owners to
++                // decrement later.
++                //
++                Previous->Next = NULL;
++                ASSERT (Previous->ShareCount == 0);
++                Previous->ShareCount = ShareCount;
++
++                //
++                // Add a pointer to make future searches faster
++                //
++                if (Previous->Exclusive && FirstWaitBlock != Previous) {
++                    FirstWaitBlock->Last = Previous;
++                    ASSERT (Previous->Previous != NULL);
++                }
++                //
++                // We are either releasing multiple share accessors or a single exclusive
++                //
++                ASSERT ((ShareCount > 0) ^ ReleaseWaitList->Exclusive);
++            }
++
++#if 0
++            //
++            // If we are waking more than one thread then raise to DPC level to prevent us
++            // getting rescheduled part way through the operation
++            //
++
++            OldIrql = DISPATCH_LEVEL;
++            if (ShareCount > 1) {
++                KeRaiseIrql (DISPATCH_LEVEL, &OldIrql);
++            }
++#endif
++
++            //
++            //
++            // Release the chain of threads we located.
++            //
++            do {
++                NextWaitBlock = ReleaseWaitList->Next;
++                //
++                // All the chain should have the same type (Exclusive/Shared).
++                //
++                ASSERT (NextWaitBlock == NULL || (ReleaseWaitList->Exclusive == NextWaitBlock->Exclusive));
++                ASSERT (!ReleaseWaitList->Exclusive || (ReleaseWaitList->ShareCount == 0));
++#if 0
++                KeSetEventBoostPriority (&ReleaseWaitList->WakeEvent, NULL);
++#endif
++                SetEvent (ReleaseWaitList->WakeEvent);
++                ReleaseWaitList = NextWaitBlock;
++            } while (ReleaseWaitList != NULL);
++
++#if 0
++            if (OldIrql != DISPATCH_LEVEL) {
++                KeLowerIrql (OldIrql);
++            }
++#endif
++
++
++            break;
++        }
++    }
++}
++
++static
++void
++ExAcquirePushLockExclusive (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Acquire a push lock exclusively
++
++Arguments:
++
++    PushLock - Push lock to be acquired
++
++Return Value:
++
++    None
++
++--*/
++{
++    if (InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                           (PVOID)EX_PUSH_LOCK_EXCLUSIVE,
++                                           NULL) != NULL) {
++        ExfAcquirePushLockExclusive (PushLock);
++    }
++}
++
++static
++void
++ExReleasePushLockExclusive (
++     PEX_PUSH_LOCK PushLock
++     )
++/*++
++
++Routine Description:
++
++    Release a push lock that was acquired exclusively
++
++Arguments:
++
++    PushLock - Push lock to be released
++
++Return Value:
++
++    None
++
++--*/
++{
++    ASSERT (PushLock->Value & (EX_PUSH_LOCK_WAITING|EX_PUSH_LOCK_EXCLUSIVE));
++
++    if (InterlockedCompareExchangePointer (&PushLock->Ptr,
++                                           NULL,
++                                           (PVOID)EX_PUSH_LOCK_EXCLUSIVE) != (PVOID)EX_PUSH_LOCK_EXCLUSIVE) {
++        ExfReleasePushLock (PushLock);
++    }
++}
++
+ static inline int pthread_mutex_init(pthread_mutex_t *const mutex,
+                                      const void *const attr)
+ {
+-    InitializeSRWLock(mutex);
++    ExInitializePushLock((PEX_PUSH_LOCK)mutex);
+     return 0;
+ }
+ 
+@@ -92,15 +505,565 @@ static inline int pthread_mutex_destroy(pthread_mutex_t *const mutex) {
+ }
+ 
+ static inline int pthread_mutex_lock(pthread_mutex_t *const mutex) {
+-    AcquireSRWLockExclusive(mutex);
++    ExAcquirePushLockExclusive((PEX_PUSH_LOCK)mutex);
+     return 0;
+ }
+ 
+ static inline int pthread_mutex_unlock(pthread_mutex_t *const mutex) {
+-    ReleaseSRWLockExclusive(mutex);
++    ExReleasePushLockExclusive((PEX_PUSH_LOCK)mutex);
+     return 0;
+ }
+ 
++#define pthread_testcancel()
++#define LIFE_COND 0xC0BAB1FD
++#define DEAD_COND 0xC0DEADBF
++
++#define STATIC_COND_INITIALIZER(x)		((pthread_cond_t)(x) == ((pthread_cond_t)PTHREAD_COND_INITIALIZER))
++
++typedef struct cond_t cond_t;
++struct cond_t
++{
++    unsigned int valid;   
++    int busy;
++    LONG waiters_count_; /* Number of waiting threads.  */
++    LONG waiters_count_unblock_; /* Number of waiting threads whitch can be unblocked.  */
++    LONG waiters_count_gone_; /* Number of waiters which are gone.  */
++    CRITICAL_SECTION waiters_count_lock_; /* Serialize access to <waiters_count_>.  */
++    CRITICAL_SECTION waiters_q_lock_; /* Serialize access to sema_q.  */
++    LONG value_q;
++    CRITICAL_SECTION waiters_b_lock_; /* Serialize access to sema_b.  */
++    LONG value_b;
++    HANDLE sema_q; /* Semaphore used to queue up threads waiting for the condition to
++                 become signaled.  */
++    HANDLE sema_b; /* Semaphore used to queue up threads waiting for the condition which
++                 became signaled.  */
++};
++
++#define __pthread_shallcancel() (0)
++
++static int do_sema_b_wait (HANDLE sema, int nointerrupt, DWORD timeout,CRITICAL_SECTION *cs, LONG *val);
++static int do_sema_b_release(HANDLE sema, LONG count,CRITICAL_SECTION *cs, LONG *val);
++static void cleanup_wait(void *arg);
++
++typedef struct sCondWaitHelper {
++    cond_t *c;
++    pthread_mutex_t *external_mutex;
++    int *r;
++} sCondWaitHelper;
++
++static inline int do_sema_b_wait_intern (HANDLE sema, int nointerrupt, DWORD timeout);
++
++static inline int
++pthread_cond_init (pthread_cond_t *c, const void *a)
++{
++  cond_t *_c;
++  int r = 0;
++
++  if (!c)
++    return EINVAL;
++#if 0
++  if (a && *a == PTHREAD_PROCESS_SHARED)
++    return ENOSYS;
++#endif
++
++  if ( !(_c = (cond_t *)HeapAlloc(GetProcessHeap(), 0, sizeof(*_c))) ) {
++      return ENOMEM; 
++  }
++  _c->valid  = DEAD_COND;
++  _c->busy = 0;
++  _c->waiters_count_ = 0;
++  _c->waiters_count_gone_ = 0;
++  _c->waiters_count_unblock_ = 0;
++
++  _c->sema_q = CreateSemaphore (NULL,       /* no security */
++      0,          /* initially 0 */
++      0x7fffffff, /* max count */
++      NULL);      /* unnamed  */
++  _c->sema_b =  CreateSemaphore (NULL,       /* no security */
++      0,          /* initially 0 */
++      0x7fffffff, /* max count */
++      NULL);  
++  if (_c->sema_q == NULL || _c->sema_b == NULL) {
++      if (_c->sema_q != NULL)
++        CloseHandle (_c->sema_q);
++      if (_c->sema_b != NULL)
++        CloseHandle (_c->sema_b);
++      HeapFree(GetProcessHeap(), 0, _c);
++      r = EAGAIN;
++  } else {
++      InitializeCriticalSection(&_c->waiters_count_lock_);
++      InitializeCriticalSection(&_c->waiters_b_lock_);
++      InitializeCriticalSection(&_c->waiters_q_lock_);
++      _c->value_q = 0;
++      _c->value_b = 1;
++  }
++  if (!r)
++    {
++      _c->valid = LIFE_COND;
++      *c = (pthread_cond_t)_c;
++    }
++  else
++    *c = (pthread_cond_t)NULL;
++  return r;
++}
++
++extern pthread_mutex_t cond_locked;
++
++static int
++cond_static_init (pthread_cond_t *c)
++{
++  int r = 0;
++  
++  pthread_mutex_lock (&cond_locked);
++  if (c == NULL)
++    r = EINVAL;
++  else if (*c == 0)
++    r = pthread_cond_init (c, NULL);
++  else
++    /* We assume someone was faster ... */
++    r = 0;
++  pthread_mutex_unlock (&cond_locked);
++  return r;
++}
++
++static inline int
++pthread_cond_destroy (pthread_cond_t *c)
++{
++  cond_t *_c;
++  int r;
++  if (!c || 0)
++    return EINVAL;
++  if (*c == 0)
++    {
++      pthread_mutex_lock (&cond_locked);
++      if (*c == 0)
++      {
++        *c = (pthread_cond_t)NULL;
++        r = 0;
++      }
++      else
++        r = EBUSY;
++      pthread_mutex_unlock (&cond_locked);
++      return r;
++    }
++  _c = (cond_t *) *c;
++  r = do_sema_b_wait(_c->sema_b, 0, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++  if (r != 0)
++    return r;
++  if (!TryEnterCriticalSection (&_c->waiters_count_lock_))
++    {
++       do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++       return EBUSY;
++    }
++  if (_c->waiters_count_ > _c->waiters_count_gone_)
++    {
++      r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++      if (!r) r = EBUSY;
++      LeaveCriticalSection(&_c->waiters_count_lock_);
++      return r;
++    }
++  *c = (pthread_cond_t)NULL;
++  do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++
++  if (!CloseHandle (_c->sema_q) && !r)
++    r = EINVAL;
++  if (!CloseHandle (_c->sema_b) && !r)
++    r = EINVAL;
++  LeaveCriticalSection (&_c->waiters_count_lock_);
++  DeleteCriticalSection(&_c->waiters_count_lock_);
++  DeleteCriticalSection(&_c->waiters_b_lock_);
++  DeleteCriticalSection(&_c->waiters_q_lock_);
++  _c->valid  = DEAD_COND;
++  HeapFree(GetProcessHeap(), 0, _c);
++  return 0;
++}
++
++static inline int
++pthread_cond_signal (pthread_cond_t *c)
++{
++  cond_t *_c;
++  int r;
++
++  if (!c || 0)
++    return EINVAL;
++  _c = (cond_t *)*c;
++  if (_c == (cond_t *)0)
++    return 0;
++  else if (_c->valid != (unsigned int)LIFE_COND)
++    return EINVAL;
++
++  EnterCriticalSection (&_c->waiters_count_lock_);
++  /* If there aren't any waiters, then this is a no-op.   */
++  if (_c->waiters_count_unblock_ != 0)
++    {
++      if (_c->waiters_count_ == 0)
++      {
++        LeaveCriticalSection (&_c->waiters_count_lock_);
++        /* pthread_testcancel(); */
++        return 0;
++      }
++      _c->waiters_count_ -= 1;
++      _c->waiters_count_unblock_ += 1;
++    }
++  else if (_c->waiters_count_ > _c->waiters_count_gone_)
++    {
++      r = do_sema_b_wait (_c->sema_b, 1, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++      if (r != 0)
++      {
++        LeaveCriticalSection (&_c->waiters_count_lock_);
++        /* pthread_testcancel(); */
++        return r;
++      }
++      if (_c->waiters_count_gone_ != 0)
++      {
++        _c->waiters_count_ -= _c->waiters_count_gone_;
++        _c->waiters_count_gone_ = 0;
++      }
++      _c->waiters_count_ -= 1;
++      _c->waiters_count_unblock_ = 1;
++    }
++  else
++    {
++      LeaveCriticalSection (&_c->waiters_count_lock_);
++      /* pthread_testcancel(); */
++      return 0;
++    }
++  LeaveCriticalSection (&_c->waiters_count_lock_);
++  r = do_sema_b_release(_c->sema_q, 1,&_c->waiters_q_lock_,&_c->value_q);
++  /* pthread_testcancel(); */
++  return r;
++}
++
++static inline int
++pthread_cond_broadcast (pthread_cond_t *c)
++{
++  cond_t *_c;
++  int r;
++  int relCnt = 0;    
++
++  if (!c || 0)
++    return EINVAL;
++  _c = (cond_t *)*c;
++  if (_c == (cond_t*)0)
++    return 0;
++  else if (_c->valid != (unsigned int)LIFE_COND)
++    return EINVAL;
++
++  EnterCriticalSection (&_c->waiters_count_lock_);
++  /* If there aren't any waiters, then this is a no-op.   */
++  if (_c->waiters_count_unblock_ != 0)
++    {
++      if (_c->waiters_count_ == 0)
++      {
++        LeaveCriticalSection (&_c->waiters_count_lock_);
++        /* pthread_testcancel(); */
++        return 0;
++      }
++      relCnt = _c->waiters_count_;
++      _c->waiters_count_ = 0;
++      _c->waiters_count_unblock_ += relCnt;
++    }
++  else if (_c->waiters_count_ > _c->waiters_count_gone_)
++    {
++      r = do_sema_b_wait (_c->sema_b, 1, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++      if (r != 0)
++      {
++        LeaveCriticalSection (&_c->waiters_count_lock_);
++        /* pthread_testcancel(); */
++        return r;
++      }
++      if (_c->waiters_count_gone_ != 0)
++      {
++        _c->waiters_count_ -= _c->waiters_count_gone_;
++        _c->waiters_count_gone_ = 0;
++      }
++      relCnt = _c->waiters_count_;
++      _c->waiters_count_ = 0;
++      _c->waiters_count_unblock_ = relCnt;
++    }
++  else
++    {
++      LeaveCriticalSection (&_c->waiters_count_lock_);
++      /* pthread_testcancel(); */
++      return 0;
++    }
++  LeaveCriticalSection (&_c->waiters_count_lock_);
++  r = do_sema_b_release(_c->sema_q, relCnt,&_c->waiters_q_lock_,&_c->value_q);
++  /* pthread_testcancel(); */
++  return r;
++}
++
++static inline int
++pthread_cond_wait (pthread_cond_t *c, pthread_mutex_t *external_mutex)
++{
++  sCondWaitHelper ch;
++  cond_t *_c;
++  int r;
++
++  /* pthread_testcancel(); */
++
++  if (!c || 0)
++    return EINVAL;
++  _c = (cond_t *)*c;
++  if (*c == 0)
++  {
++    r = cond_static_init(c);
++    if (r != 0 && r != EBUSY)
++      return r;
++    _c = (cond_t *) *c;
++  } else if (_c->valid != (unsigned int)LIFE_COND)
++    return EINVAL;
++
++tryagain:
++  r = do_sema_b_wait (_c->sema_b, 0, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++  if (r != 0)
++    return r;
++
++  if (!TryEnterCriticalSection (&_c->waiters_count_lock_))
++  {
++    r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++      return r;
++    Sleep(0);
++    goto tryagain;
++  }
++
++  _c->waiters_count_++;
++  LeaveCriticalSection(&_c->waiters_count_lock_);
++  r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++  if (r != 0)
++    return r;
++
++  ch.c = _c;
++  ch.r = &r;
++  ch.external_mutex = external_mutex;
++
++#if 0
++  pthread_cleanup_push(cleanup_wait, (void *) &ch);
++#endif
++  r = pthread_mutex_unlock(external_mutex);
++  if (!r)
++    r = do_sema_b_wait (_c->sema_q, 0, INFINITE,&_c->waiters_q_lock_,&_c->value_q);
++
++#if 0
++  pthread_cleanup_pop(1);
++#endif
++  cleanup_wait( (void *) &ch);
++  return r;
++}
++
++static void
++cleanup_wait (void *arg)
++{
++  int n, r;
++  sCondWaitHelper *ch = (sCondWaitHelper *) arg;
++  cond_t *_c;
++
++  _c = ch->c;
++  EnterCriticalSection (&_c->waiters_count_lock_);
++  n = _c->waiters_count_unblock_;
++  if (n != 0)
++    _c->waiters_count_unblock_ -= 1;
++  else if ((INT_MAX/2) - 1 == _c->waiters_count_gone_)
++  {
++    _c->waiters_count_gone_ += 1;
++    r = do_sema_b_wait (_c->sema_b, 1, INFINITE,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++    {
++      LeaveCriticalSection(&_c->waiters_count_lock_);
++      ch->r[0] = r;
++      return;
++    }
++    _c->waiters_count_ -= _c->waiters_count_gone_;
++    r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++    {
++      LeaveCriticalSection(&_c->waiters_count_lock_);
++      ch->r[0] = r;
++      return;
++    }
++    _c->waiters_count_gone_ = 0;
++  }
++  else
++    _c->waiters_count_gone_ += 1;
++  LeaveCriticalSection (&_c->waiters_count_lock_);
++
++  if (n == 1)
++  {
++    r = do_sema_b_release (_c->sema_b, 1,&_c->waiters_b_lock_,&_c->value_b);
++    if (r != 0)
++    {
++      ch->r[0] = r;
++      return;
++    }
++  }
++  r = pthread_mutex_lock(ch->external_mutex);
++  if (r != 0)
++    ch->r[0] = r;
++}
++
++static int
++do_sema_b_wait (HANDLE sema, int nointerrupt, DWORD timeout,CRITICAL_SECTION *cs, LONG *val)
++{
++  int r;
++  LONG v;
++  EnterCriticalSection(cs);
++  InterlockedDecrement(val);
++  v = val[0];
++  LeaveCriticalSection(cs);
++  if (v >= 0)
++    return 0;
++  r = do_sema_b_wait_intern (sema, nointerrupt, timeout);
++  EnterCriticalSection(cs);
++  if (r != 0)
++    InterlockedIncrement(val);
++  LeaveCriticalSection(cs);
++  return r;
++}
++
++static inline int
++do_sema_b_wait_intern (HANDLE sema, int nointerrupt, DWORD timeout)
++{
++  HANDLE arr[2];
++  DWORD maxH = 1;
++  int r = 0;
++  DWORD res, dt;
++  if (nointerrupt == 1)
++  {
++    res = WaitForSingleObject(sema, timeout);
++    switch (res) {
++    case WAIT_TIMEOUT:
++        r = ETIMEDOUT;
++        break;
++    case WAIT_ABANDONED:
++        r = EPERM;
++        break;
++    case WAIT_OBJECT_0:
++        break;
++    default:
++        /*We can only return EINVAL though it might not be posix compliant  */
++        r = EINVAL;
++    }
++    if (r != 0 && r != EINVAL && WaitForSingleObject(sema, 0) == WAIT_OBJECT_0)
++      r = 0;
++    return r;
++  }
++  arr[0] = sema;
++  arr[1] = (HANDLE) NULL;
++  if (arr[1] != NULL) maxH += 1;
++  if (maxH == 2)
++  {
++redo:
++      res = WaitForMultipleObjects(maxH, arr, 0, timeout);
++      switch (res) {
++      case WAIT_TIMEOUT:
++          r = ETIMEDOUT;
++          break;
++      case (WAIT_OBJECT_0 + 1):
++          ResetEvent(arr[1]);
++          if (nointerrupt != 2)
++            {
++            pthread_testcancel();
++            return EINVAL;
++            }
++          pthread_testcancel ();
++          goto redo;
++      case WAIT_ABANDONED:
++          r = EPERM;
++          break;
++      case WAIT_OBJECT_0:
++          r = 0;
++          break;
++      default:
++          /*We can only return EINVAL though it might not be posix compliant  */
++          r = EINVAL;
++      }
++      if (r != 0 && r != EINVAL && WaitForSingleObject(arr[0], 0) == WAIT_OBJECT_0)
++        r = 0;
++      if (r != 0 && nointerrupt != 2 && __pthread_shallcancel ())
++        return EINVAL;
++      return r;
++  }
++  if (timeout == INFINITE)
++  {
++    do {
++      res = WaitForSingleObject(sema, 40);
++      switch (res) {
++      case WAIT_TIMEOUT:
++          r = ETIMEDOUT;
++          break;
++      case WAIT_ABANDONED:
++          r = EPERM;
++          break;
++      case WAIT_OBJECT_0:
++          r = 0;
++          break;
++      default:
++          /*We can only return EINVAL though it might not be posix compliant  */
++          r = EINVAL;
++      }
++      if (r != 0 && __pthread_shallcancel ())
++      {
++        if (nointerrupt != 2)
++          pthread_testcancel();
++        return EINVAL;
++      }
++    } while (r == ETIMEDOUT);
++    if (r != 0 && r != EINVAL && WaitForSingleObject(sema, 0) == WAIT_OBJECT_0)
++      r = 0;
++    return r;
++  }
++  dt = 20;
++  do {
++    if (dt > timeout) dt = timeout;
++    res = WaitForSingleObject(sema, dt);
++    switch (res) {
++    case WAIT_TIMEOUT:
++        r = ETIMEDOUT;
++        break;
++    case WAIT_ABANDONED:
++        r = EPERM;
++        break;
++    case WAIT_OBJECT_0:
++        r = 0;
++        break;
++    default:
++        /*We can only return EINVAL though it might not be posix compliant  */
++        r = EINVAL;
++    }
++    timeout -= dt;
++    if (timeout != 0 && r != 0 && __pthread_shallcancel ())
++      return EINVAL;
++  } while (r == ETIMEDOUT && timeout != 0);
++  if (r != 0 && r == ETIMEDOUT && WaitForSingleObject(sema, 0) == WAIT_OBJECT_0)
++    r = 0;
++  if (r != 0 && nointerrupt != 2)
++    pthread_testcancel();
++  return r;
++}
++
++static int
++do_sema_b_release(HANDLE sema, LONG count,CRITICAL_SECTION *cs, LONG *val)
++{
++  int wc;
++  EnterCriticalSection(cs);
++  if (((long long) val[0] + (long long) count) > (long long) 0x7fffffffLL)
++  {
++    LeaveCriticalSection(cs);
++    return ERANGE;
++  }
++  wc = -val[0];
++  InterlockedExchangeAdd(val, count);
++  if (wc <= 0 || ReleaseSemaphore(sema, (wc < count ? wc : count), NULL))
++  {
++    LeaveCriticalSection(cs);
++    return 0;
++  }
++  InterlockedExchangeAdd(val, -count);
++  LeaveCriticalSection(cs);
++  return EINVAL;  
++}
++#if 0
+ static inline int pthread_cond_init(pthread_cond_t *const cond,
+                                     const void *const attr)
+ {
+@@ -127,6 +1090,7 @@ static inline int pthread_cond_broadcast(pthread_cond_t *const cond) {
+     WakeAllConditionVariable(cond);
+     return 0;
+ }
++#endif
+ 
+ #else
+ 
+diff --git a/third_party/dav1d/libdav1d/src/win32/thread.c b/third_party/dav1d/libdav1d/src/win32/thread.c
+index 2c2a578..6ec3026 100644
+--- a/third_party/dav1d/libdav1d/src/win32/thread.c
++++ b/third_party/dav1d/libdav1d/src/win32/thread.c
+@@ -66,15 +66,39 @@ int dav1d_pthread_join(pthread_t *const thread, void **const res) {
+ COLD int dav1d_pthread_once(pthread_once_t *const once_control,
+                        void (*const init_routine)(void))
+ {
+-    BOOL pending = FALSE;
++  LONG state;
+ 
+-    if (InitOnceBeginInitialize(once_control, 0, &pending, NULL) != TRUE)
+-        return 1;
++  /*
++    Do "dirty" read to find out if initialization is already done, to
++    save an interlocked operation in common case. Memory barriers are ensured by
++    Visual C++ volatile implementation.
++  */
++  if (*once_control == MY_PTHREAD_ONCE_DONE)
++    return 0;
+ 
+-    if (pending == TRUE)
+-        init_routine();
++  state= InterlockedCompareExchange(once_control, MY_PTHREAD_ONCE_INPROGRESS,
++                                        MY_PTHREAD_ONCE_INIT);
+ 
+-    return !InitOnceComplete(once_control, 0, NULL);
++  switch(state)
++  {
++  case MY_PTHREAD_ONCE_INIT:
++    /* This is initializer thread */
++    (*init_routine)();
++    *once_control= MY_PTHREAD_ONCE_DONE;
++    break;
++
++  case MY_PTHREAD_ONCE_INPROGRESS:
++    /* init_routine in progress. Wait for its completion */
++    while(*once_control == MY_PTHREAD_ONCE_INPROGRESS)
++    {
++      Sleep(1);
++    }
++    break;
++  case MY_PTHREAD_ONCE_DONE:
++    /* Nothing to do */
++    break;
++  }
++  return 0;
+ }
+ 
+ #endif

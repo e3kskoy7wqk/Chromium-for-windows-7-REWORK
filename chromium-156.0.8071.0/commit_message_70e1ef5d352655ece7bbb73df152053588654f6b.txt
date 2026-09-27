@@ -1,0 +1,1 @@
+[mini_installer] Retry file deletion until success (don't stop deletin').    2020/11/3 5:35:42    70e1ef5d352655ece7bbb73df152053588654f6b

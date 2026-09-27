@@ -1,0 +1,74 @@
+diff --git a/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc b/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
+index a48308ac47576..e05b26b1a26ef 100644
+--- a/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
++++ b/chrome/browser/webshare/win/show_share_ui_for_window_operation.cc
+@@ -9,12 +9,10 @@
+ #include <windows.applicationmodel.datatransfer.h>
+ #include <wrl/event.h>
+ 
+-#include <utility>
+-
+ #include "base/functional/callback.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/win/core_winrt_util.h"
+-#include "base/win/scoped_hstring.h"
++#include "base/win/windows_version.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+ 
+@@ -40,8 +37,12 @@ HRESULT GetDataTransferManagerHandles(
+     HWND hwnd,
+     IDataTransferManagerInterop** data_transfer_manager_interop,
+     IDataTransferManager** data_transfer_manager) {
+-  // If the required WinRT functionality is not available, fail the operation.
+-  if (!base::win::ResolveCoreWinRTDelayload() ||
++  // If the required WinRT functionality is not available, fail the operation
++  // Note: Though the Share APIs are present starting in Windows 8, they are
++  // only fulfilled when invoked from within a UWP app container. Starting in
++  // Windows 10 they are fulfilled for all callers.
++  if ((base::win::GetVersion() < base::win::Version::WIN10) ||
++      !base::win::ResolveCoreWinRTDelayload() ||
+       !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
+     return E_FAIL;
+   }
+diff --git a/chrome/installer/util/taskbar_util.cc b/chrome/installer/util/taskbar_util.cc
+index c1464a4901f76..da12e179db40f 100644
+--- a/chrome/installer/util/taskbar_util.cc
++++ b/chrome/installer/util/taskbar_util.cc
+@@ -110,9 +110,11 @@ bool UnpinShortcutWithIPinnedList3(const base::FilePath& shortcut) {
+ }  // namespace
+ 
+ bool CanPinShortcutToTaskbar() {
+-  // "Pin to taskbar" isn't directly supported in Windows 10, but WIN10_RS5 has
++  // "Pin to taskbar" stopped being supported in Windows 10, but WIN10_RS5 has
+   // some undocumented interfaces to do pinning.
+-  return base::win::GetVersion() >= base::win::Version::WIN10_RS5;
++  const auto version = base::win::GetVersion();
++  return version < base::win::Version::WIN10 ||
++         version >= base::win::Version::WIN10_RS5;
+ }
+ 
+ bool PinShortcutToTaskbar(const base::FilePath& shortcut) {
+diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
+index eab276d6ebe23..6c9d906d290ff 100644
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -180,6 +180,7 @@
+ #endif  // BUILDFLAG(ENABLE_SPEECH_SERVICE)
+ 
+ #if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
+ #include "chrome/renderer/render_frame_font_family_accessor.h"
+ #endif
+ 
+@@ -327,6 +328,10 @@ std::unique_ptr<base::Unwinder> CreateV8Unwinder(v8::Isolate* isolate) {
+ // being made available in WebView or Linux.
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || \
+     BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_WIN)
++  if (base::win::GetVersion() >= base::win::Version::WIN10)
++    // Web Share API is not functional for non-UWP apps prior to Windows 10.
++#endif
+   blink::WebRuntimeFeatures::EnableWebShare(true);
+ #endif
+ 

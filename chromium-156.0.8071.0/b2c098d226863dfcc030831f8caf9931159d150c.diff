@@ -1,0 +1,47 @@
+diff --git a/content/browser/renderer_host/dwrite_font_proxy_impl_win_unittest.cc b/content/browser/renderer_host/dwrite_font_proxy_impl_win_unittest.cc
+index f56509ecf29bd..af5936be7c9b7 100644
+--- a/content/browser/renderer_host/dwrite_font_proxy_impl_win_unittest.cc
++++ b/content/browser/renderer_host/dwrite_font_proxy_impl_win_unittest.cc
+@@ -22,6 +22,7 @@
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "services/service_manager/public/cpp/bind_source_info.h"
+ #include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/public/common/font_unique_name_lookup/font_table_matcher.h"
+ #include "third_party/icu/source/common/unicode/umachine.h"
+ 
+ namespace content {
+diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
+index f56621d3f7602..4a8b8a1202bda 100644
+--- a/third_party/blink/common/BUILD.gn
++++ b/third_party/blink/common/BUILD.gn
+@@ -332,7 +332,7 @@ source_set("common") {
+     deps += [ "//media" ]
+   }
+ 
+-  if (is_android) {
++  if (is_android || is_win) {
+     sources += [
+       "font_unique_name_lookup/font_table_matcher.cc",
+       "font_unique_name_lookup/font_table_persistence.cc",
+@@ -489,7 +489,7 @@ source_set("common_unittests_sources") {
+     ]
+   }
+ 
+-  if (is_android) {
++  if (is_android || is_win) {
+     sources += [
+       "font_unique_name_lookup/font_table_matcher_unittest.cc",
+       "font_unique_name_lookup/icu_fold_case_util_unittest.cc",
+diff --git a/third_party/blink/public/common/BUILD.gn b/third_party/blink/public/common/BUILD.gn
+index 5c9ec078225e7..b99ad29cdafac 100644
+--- a/third_party/blink/public/common/BUILD.gn
++++ b/third_party/blink/public/common/BUILD.gn
+@@ -374,7 +374,7 @@ source_set("headers") {
+     public_deps += [ "//media/mojo/mojom" ]
+   }
+ 
+-  if (is_android) {
++  if (is_android || is_win) {
+     sources += [
+       "font_unique_name_lookup/font_table_matcher.h",
+       "font_unique_name_lookup/font_table_persistence.h",

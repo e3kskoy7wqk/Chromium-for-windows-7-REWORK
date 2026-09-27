@@ -1,0 +1,46 @@
+diff --git a/third_party/webrtc/modules/desktop_capture/win/wgc_capture_session.cc b/third_party/webrtc/modules/desktop_capture/win/wgc_capture_session.cc
+index 7d02d41ce1..c7eaf549b7 100644
+--- a/third_party/webrtc/modules/desktop_capture/win/wgc_capture_session.cc
++++ b/third_party/webrtc/modules/desktop_capture/win/wgc_capture_session.cc
+@@ -813,8 +833,39 @@ HRESULT WgcCaptureSession::ProcessTexture(ComPtr<ID3D11Texture2D> texture,
+ 
+   if (monitor_.has_value()) {
+     DEVICE_SCALE_FACTOR device_scale_factor = DEVICE_SCALE_FACTOR_INVALID;
+-    HRESULT hr =
+-        GetScaleFactorForMonitor(monitor_.value(), &device_scale_factor);
++    HRESULT           hr           = S_OK;
++#define GETPERCENT(dpi) ((dpi * 100 + 50) / 96)
++typedef HRESULT (* LPFNDLLFUNC1)(HMONITOR,DEVICE_SCALE_FACTOR *);
++HINSTANCE hDLL;               // Handle to DLL
++LPFNDLLFUNC1 lpfnDllFunc1;    // Function pointer
++hDLL = LoadLibrary(TEXT("Shcore.dll"));
++if (hDLL != NULL)
++{
++   lpfnDllFunc1 = (LPFNDLLFUNC1)GetProcAddress(hDLL,
++                                           "GetScaleFactorForMonitor");
++   if (!lpfnDllFunc1)
++   {
++      // handle the error
++      FreeLibrary(hDLL);
++        //---- set screen dpi (per session) ----
++        HDC hdc = GetWindowDC(NULL);
++        if (! hdc)
++        {
++        }
++        else
++        {
++            int iDpi = GetDeviceCaps(hdc, LOGPIXELSX);
++            ReleaseDC(NULL, hdc);
++            device_scale_factor = (DEVICE_SCALE_FACTOR) GETPERCENT(iDpi);
++        }
++   }
++   else
++   {
++      // call the function
++    hr =
++        lpfnDllFunc1(monitor_.value(), &device_scale_factor);
++   }
++}
+     if (SUCCEEDED(hr) && device_scale_factor != DEVICE_SCALE_FACTOR_INVALID) {
+       texture_frame->set_device_scale_factor(
+           static_cast<float>(device_scale_factor) / 100.0f);

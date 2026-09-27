@@ -1,0 +1,12 @@
+diff --git a/components/crash/core/app/fallback_crash_handling_win.cc b/components/crash/core/app/fallback_crash_handling_win.cc
+index fad310cd6bf7c..194af822969fc 100644
+--- a/components/crash/core/app/fallback_crash_handling_win.cc
++++ b/components/crash/core/app/fallback_crash_handling_win.cc
+@@ -65,7 +65,6 @@ bool SetupFallbackCrashHandling(const base::CommandLine& command_line) {
+       new FallbackCrashHandlerLauncher());
+ 
+   if (!fallback_launcher->Initialize(base_command_line, database_path)) {
+-    NOTREACHED();
+   }
+ 
+   // This is necessary because chrome_elf stubs out the

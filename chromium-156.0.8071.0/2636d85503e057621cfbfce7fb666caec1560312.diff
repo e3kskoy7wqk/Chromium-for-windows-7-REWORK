@@ -1,0 +1,18 @@
+diff --git a/content/common/features.cc b/content/common/features.cc
+index 1dda5be8bccbc..2b09e01ca87e9 100644
+--- a/content/common/features.cc
++++ b/content/common/features.cc
+@@ -148,7 +148,13 @@ const base::Feature kFeaturePolicyForSandbox{"FeaturePolicyForSandbox",
+ // Enables fixes for matching src: local() for web fonts correctly against full
+ // font name or postscript name. Rolling out behind a flag, as enabling this
+ // enables a font indexer on Android which we need to test in the field first.
++// TODO(https://crbug.com/996027): Re-enable this on Windows once Windows 7
++// DWRiteFontLookupTableBuilder stability is fixed.
++#if !BUILDFLAG(IS_WIN)
+ BASE_FEATURE(kFontSrcLocalMatching, base::FEATURE_ENABLED_BY_DEFAULT);
++#else
++BASE_FEATURE(kFontSrcLocalMatching, base::FEATURE_DISABLED_BY_DEFAULT);
++#endif
+ 
+ // Whether to use the Frame Routing Cache to avoid synchronous IPCs from the
+ // renderer side for iframe creation.

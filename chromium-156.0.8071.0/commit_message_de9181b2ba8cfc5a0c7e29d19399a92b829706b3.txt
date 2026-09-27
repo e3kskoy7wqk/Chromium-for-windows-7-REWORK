@@ -1,0 +1,1 @@
+Added configuration macro VMA_USE_STL_SHARED_MUTEX.    2018/10/10 22:26:26    de9181b2ba8cfc5a0c7e29d19399a92b829706b3

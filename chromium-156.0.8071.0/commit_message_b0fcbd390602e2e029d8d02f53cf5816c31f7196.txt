@@ -1,0 +1,3 @@
+Remove PointerEventsForTouch feature    2024/11/12 8:43:42    b0fcbd390602e2e029d8d02f53cf5816c31f7196
+Remove some unused views::HWNDMessageHandler member variables    2025/3/19 0:30:21    0095cb7bf8065beea7e6331411476cb231866d48
+Remove obsolete GenerateTouchEvent    2025/10/18 2:52:12    e20e2dc08f53bd03dbedc7dc2318d6f7ad442a70

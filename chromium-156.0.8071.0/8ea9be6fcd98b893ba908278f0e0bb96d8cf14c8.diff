@@ -1,0 +1,40 @@
+diff --git a/base/time/time_win.cc b/base/time/time_win.cc
+index c6540592a5c18..c7c51e91c2f7d 100644
+--- a/base/time/time_win.cc
++++ b/base/time/time_win.cc
+@@ -646,11 +646,30 @@ TimeTicks::Clock TimeTicks::GetClock() {
+ 
+ namespace subtle {
+ LiveTicks LiveTicksNowIgnoringOverride() {
+-  ULONGLONG unbiased_interrupt_time;
+-  QueryUnbiasedInterruptTimePrecise(&unbiased_interrupt_time);
+-  // QueryUnbiasedInterruptTimePrecise gets the interrupt time in system time
+-  // units of 100 nanoseconds.
+-  return LiveTicks() + Nanoseconds(unbiased_interrupt_time * 100);
++  // Ensure that the assignment to |g_qpc_ticks_per_second|, made in
++  // InitializeNowFunctionPointer(), has happened by this point.
++  LARGE_INTEGER perf_counter_now = {};
++  // According to the MSDN documentation for QueryPerformanceCounter(), this
++  // will never fail on systems that run XP or later.
++  // https://msdn.microsoft.com/library/windows/desktop/ms644904.aspx
++  ::QueryPerformanceCounter(&perf_counter_now);
++  std::atomic_thread_fence(std::memory_order_acquire);
++
++  DCHECK_GT(g_qpc_ticks_per_second, 0);
++
++  // If the QPC Value is below the overflow threshold, we proceed with
++  // simple multiply and divide.
++  if (perf_counter_now.QuadPart < Time::kQPCOverflowThreshold) {
++    return LiveTicks() + Microseconds(perf_counter_now.QuadPart * Time::kMicrosecondsPerSecond /
++                        g_qpc_ticks_per_second);
++  }
++  // Otherwise, calculate microseconds in a round about manner to avoid
++  // overflow and precision issues.
++  int64_t whole_seconds = perf_counter_now.QuadPart / g_qpc_ticks_per_second;
++  int64_t leftover_ticks = perf_counter_now.QuadPart - (whole_seconds * g_qpc_ticks_per_second);
++  return LiveTicks() + Microseconds((whole_seconds * Time::kMicrosecondsPerSecond) +
++                      ((leftover_ticks * Time::kMicrosecondsPerSecond) /
++                       g_qpc_ticks_per_second));
+ }
+ }  // namespace subtle
+ 
