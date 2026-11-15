@@ -1,0 +1,278 @@
+diff --git a/base/files/file_util_win.cc b/base/files/file_util_win.cc
+index 4b3b7ee07ba65..165da10d5c29f 100644
+--- a/base/files/file_util_win.cc
++++ b/base/files/file_util_win.cc
+@@ -999,6 +1082,264 @@ bool CreateDirectoryAndGetError(const FilePath& full_path, File::Error* error) {
+   return false;
+ }
+ 
++namespace {
++
++// Keep the Vista+ implementation and its errors unchanged. The XP fallback is
++// intentionally limited to FILE_NAME_NORMALIZED | VOLUME_NAME_DOS, the only
++// combination used by NormalizeFilePath. This is not a public API replacement.
++DWORD GetFinalPathNameByHandleWA(HANDLE file,
++                                 wchar_t* file_path,
++                                 DWORD file_path_size,
++                                 DWORD flags) {
++  static const auto get_final_path =
++      reinterpret_cast<decltype(&::GetFinalPathNameByHandleW)>(::GetProcAddress(
++          ::GetModuleHandleW(L"kernel32.dll"), "GetFinalPathNameByHandleW"));
++  if (get_final_path) {
++    return get_final_path(file, file_path, file_path_size, flags);
++  }
++
++  if (flags != (FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) ||
++      (!file_path && file_path_size != 0)) {
++    ::SetLastError(ERROR_INVALID_PARAMETER);
++    return 0;
++  }
++  // Avoid querying names of pipes or other non-filesystem objects.
++  if (::GetFileType(file) != FILE_TYPE_DISK) {
++    ::SetLastError(ERROR_INVALID_HANDLE);
++    return 0;
++  }
++
++  using NtQueryObjectFunction =
++      NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
++  using RtlNtStatusToDosErrorFunction = ULONG(NTAPI*)(NTSTATUS);
++  static const auto query_object = reinterpret_cast<NtQueryObjectFunction>(
++      ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtQueryObject"));
++  static const auto status_to_error =
++      reinterpret_cast<RtlNtStatusToDosErrorFunction>(::GetProcAddress(
++          ::GetModuleHandleW(L"ntdll.dll"), "RtlNtStatusToDosError"));
++  if (!query_object) {
++    ::SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
++    return 0;
++  }
++
++  // ObjectNameInformation starts with a UNICODE_STRING. Query the existing
++  // handle: do not reopen the caller's input path or map any file contents.
++  // The handle already refers to the target of any traversed junction.
++  struct ObjectNameInformation {
++    USHORT length;
++    USHORT maximum_length;
++    PWSTR buffer;
++  };
++  constexpr ULONG kObjectNameInformation = 1;
++  constexpr ULONG kMaximumBufferSize = sizeof(ObjectNameInformation) + 65536;
++  std::vector<uintptr_t> storage(1024 / sizeof(uintptr_t));
++  for (;;) {
++    const ULONG size = static_cast<ULONG>(storage.size() * sizeof(uintptr_t));
++    ULONG required_size = 0;
++    const NTSTATUS status = query_object(file, kObjectNameInformation,
++                                         storage.data(), size, &required_size);
++    if (NT_SUCCESS(status)) {
++      break;
++    }
++    if (required_size <= size || required_size > kMaximumBufferSize) {
++      ::SetLastError(status_to_error ? status_to_error(status)
++                                     : ERROR_GEN_FAILURE);
++      return 0;
++    }
++    storage.resize((required_size + sizeof(uintptr_t) - 1) / sizeof(uintptr_t));
++  }
++
++  const auto* name =
++      reinterpret_cast<const ObjectNameInformation*>(storage.data());
++  const uintptr_t begin = reinterpret_cast<uintptr_t>(storage.data());
++  const uintptr_t end = begin + storage.size() * sizeof(uintptr_t);
++  const uintptr_t text = reinterpret_cast<uintptr_t>(name->buffer);
++  if (name->length == 0 || name->length > name->maximum_length ||
++      name->length % sizeof(wchar_t) != 0 || text % alignof(wchar_t) != 0 ||
++      text < begin + sizeof(ObjectNameInformation) || text > end ||
++      name->length > end - text) {
++    ::SetLastError(ERROR_INVALID_DATA);
++    return 0;
++  }
++
++  const std::wstring_view queried_name(name->buffer,
++                                       name->length / sizeof(wchar_t));
++  // FilePath truncates at NUL, so validate the original counted name first.
++  if (queried_name.find(L'\0') != std::wstring_view::npos) {
++    ::SetLastError(ERROR_INVALID_DATA);
++    return 0;
++  }
++  const FilePath native_path(queried_name);
++  std::wstring_view native_name = native_path.value();
++  // These redirectors return a UNC server/share suffix. Match the trailing
++  // separator too, so RdpDrPort and other similarly named devices do not match.
++  constexpr std::wstring_view kUncRedirectorPrefixes[] = {
++      L"\\Device\\Mup\\", L"\\Device\\LanmanRedirector\\",
++      L"\\Device\\WebDavRedirector\\", L"\\Device\\RdpDr\\"};
++  constexpr std::wstring_view kNetWarePrefix = L"\\Device\\NwRdr\\";
++  constexpr std::wstring_view kDfsRootPrefix = L"\\Device\\WinDfs\\Root\\";
++  bool network_path = false;
++  bool has_connection_component = false;
++  for (std::wstring_view prefix : kUncRedirectorPrefixes) {
++    if (StartsWith(native_name, prefix, CompareCase::INSENSITIVE_ASCII)) {
++      native_name.remove_prefix(prefix.size());
++      network_path = true;
++      has_connection_component = true;
++      break;
++    }
++  }
++
++  if (!network_path &&
++      StartsWith(native_name, kNetWarePrefix, CompareCase::INSENSITIVE_ASCII)) {
++    native_name.remove_prefix(kNetWarePrefix.size());
++    network_path = true;
++    // NetWare's optional drive component is Z:, not ;Z:<connection-id>.
++    // The NT 5.x provider disables the alternative LUID-bearing form.
++    if (native_name.size() >= 3 &&
++        ((native_name[0] >= L'A' && native_name[0] <= L'Z') ||
++         (native_name[0] >= L'a' && native_name[0] <= L'z')) &&
++        native_name[1] == L':' && native_name[2] == L'\\') {
++      native_name.remove_prefix(3);
++    }
++  } else if (!network_path && StartsWith(native_name, kDfsRootPrefix,
++                                         CompareCase::INSENSITIVE_ASCII)) {
++    // Only the canonical DFS Root form has a directly usable UNC suffix.
++    // Do not turn arbitrary logical roots or session IDs into server names.
++    native_name.remove_prefix(kDfsRootPrefix.size());
++    network_path = true;
++  }
++
++  FilePath dos_path;
++  if (network_path) {
++    if (has_connection_component && !native_name.empty() &&
++        native_name.front() == L';') {
++      const size_t separator = native_name.find(L'\\');
++      // Accept ;Z: or ;Z:<connection-id>, but not an unknown provider marker.
++      if (separator == std::wstring_view::npos || separator < 3 ||
++          !((native_name[1] >= L'A' && native_name[1] <= L'Z') ||
++            (native_name[1] >= L'a' && native_name[1] <= L'z')) ||
++          native_name[2] != L':') {
++        ::SetLastError(ERROR_BAD_PATHNAME);
++        return 0;
++      }
++      native_name.remove_prefix(separator + 1);
++    }
++
++    const size_t separator = native_name.find(L'\\');
++    if (separator == std::wstring_view::npos || separator == 0 ||
++        separator + 1 == native_name.size()) {
++      ::SetLastError(ERROR_BAD_PATHNAME);
++      return 0;
++    }
++    const std::wstring_view server = native_name.substr(0, separator);
++    const std::wstring_view remainder = native_name.substr(separator + 1);
++    const std::wstring_view share = remainder.substr(0, remainder.find(L'\\'));
++    const auto valid_component = [](std::wstring_view component) {
++      return !component.empty() && component != L"." && component != L".." &&
++             component.front() != L';' &&
++             component.find_first_of(L"\\/:*?\"<>|") == std::wstring_view::npos;
++    };
++    if (!valid_component(server) || !valid_component(share) ||
++        native_name.find(L'\0') != std::wstring_view::npos) {
++      ::SetLastError(ERROR_BAD_PATHNAME);
++      return 0;
++    }
++    dos_path = FilePath(StrCat({L"\\\\", native_name}));
++  } else if (!DevicePathToDriveLetterPath(native_path, &dos_path)) {
++    // A root handle has a trailing separator, unlike QueryDosDevice's target.
++    // The shared helper treats IsParent strictly, so retry the exact device
++    // name only for this root case and turn the drive back into an absolute
++    // root.
++    if (!native_name.ends_with(L"\\") ||
++        !DevicePathToDriveLetterPath(native_path.StripTrailingSeparators(),
++                                     &dos_path) ||
++        dos_path.value().size() != 2 || dos_path.value()[1] != L':') {
++      ::SetLastError(ERROR_PATH_NOT_FOUND);
++      return 0;
++    }
++    dos_path = FilePath(StrCat({dos_path.value(), L"\\"}));
++  }
++
++  // FindFirstFileW queries the file, not an alternate data stream. Preserve
++  // the handle's stream suffix separately while normalizing the file name.
++  std::wstring stream_suffix;
++  const size_t last_separator = dos_path.value().find_last_of(L'\\');
++  if (last_separator != std::wstring::npos) {
++    const size_t stream_separator =
++        dos_path.value().find(L':', last_separator + 1);
++    if (stream_separator != std::wstring::npos) {
++      stream_suffix = dos_path.value().substr(stream_separator);
++      dos_path = FilePath(dos_path.value().substr(0, stream_separator));
++    }
++  }
++
++  const auto extended_path = [](const FilePath& path) {
++    return path.IsNetwork()
++               ? StrCat({L"\\\\?\\UNC\\",
++                         std::wstring_view(path.value()).substr(2)})
++               : StrCat({L"\\\\?\\", path.value()});
++  };
++  // Preserve NT filename semantics during lookup, not only in the result.
++  // Ordinary Win32 paths can alias names with trailing dots/spaces and reject
++  // long paths before the caller has a chance to apply its own length limit.
++  const std::wstring lookup_path = extended_path(dos_path);
++  const DWORD long_size = ::GetLongPathNameW(lookup_path.c_str(), nullptr, 0);
++  if (!long_size) {
++    return 0;
++  }
++  std::wstring long_path(long_size, L'\0');
++  const DWORD long_length =
++      ::GetLongPathNameW(lookup_path.c_str(), long_path.data(), long_size);
++  if (!long_length) {
++    return 0;
++  }
++  if (long_length >= long_size) {
++    ::SetLastError(ERROR_INSUFFICIENT_BUFFER);
++    return 0;
++  }
++  long_path.resize(long_length);
++  FilePath normalized_path =
++      RemoveWindowsExtendedPathPrefix(long_path).StripTrailingSeparators();
++  if (normalized_path.empty()) {
++    ::SetLastError(ERROR_BAD_PATHNAME);
++    return 0;
++  }
++
++  // GetLongPathNameW need not correct the case of every long-name component.
++  // Restore the on-disk spelling, preserving the drive or UNC share root.
++  const size_t root_components = normalized_path.IsNetwork() ? 3 : 2;
++  std::vector<FilePath> components;
++  for (size_t count = normalized_path.GetComponents().size();
++       count > root_components; --count) {
++    WIN32_FIND_DATAW data = {};
++    const std::wstring component_path = extended_path(normalized_path);
++    HANDLE find = ::FindFirstFileW(component_path.c_str(), &data);
++    if (find == INVALID_HANDLE_VALUE) {
++      return 0;
++    }
++    ::FindClose(find);
++    components.emplace_back(data.cFileName);
++    normalized_path = normalized_path.DirName();
++  }
++  for (auto it = components.rbegin(); it != components.rend(); ++it) {
++    normalized_path = normalized_path.Append(*it);
++  }
++
++  // Match the native DOS-path prefix and buffer-length convention. The caller
++  // retains responsibility for stripping the prefix and enforcing MAX_PATH.
++  const std::wstring result = extended_path(normalized_path) + stream_suffix;
++  const DWORD length = checked_cast<DWORD>(result.size());
++  if (file_path_size <= length) {
++    ::SetLastError(ERROR_INSUFFICIENT_BUFFER);
++    return length + 1;
++  }
++  std::copy(result.begin(), result.end(), file_path);
++  file_path[length] = L'\0';
++  return length;
++}
++
++}  // namespace
++
+ bool NormalizeFilePath(const FilePath& path, FilePath* real_path) {
+   ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
+ 
+@@ -1015,7 +1356,7 @@ bool NormalizeFilePath(const FilePath& path, FilePath* real_path) {
+   // On success, `used_wchars` returns the number of written characters, not
+   // including the trailing '\0'. Thus, failure is indicated by returning 0 or
+   // >= kMaxPathLength.
+-  DWORD used_wchars = ::GetFinalPathNameByHandle(
++  DWORD used_wchars = GetFinalPathNameByHandleWA(
+       file.GetPlatformFile(), prefixed_file_path_buffer, kMaxPathLength,
+       FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+   if (used_wchars >= kMaxPathLength || used_wchars == 0) {

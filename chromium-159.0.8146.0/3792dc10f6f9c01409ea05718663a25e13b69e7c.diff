@@ -1,0 +1,331 @@
+diff --git a/ui/color/win/accent_color_observer.cc b/ui/color/win/accent_color_observer.cc
+index 7de55ad8dfff4..6845d90149e60 100644
+--- a/ui/color/win/accent_color_observer.cc
++++ b/ui/color/win/accent_color_observer.cc
+@@ -7,6 +7,7 @@
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/win/core_winrt_util.h"
+ #include "base/win/scoped_hstring.h"
++#include "base/win/windows_version.h"
+ #include "skia/ext/skia_utils_win.h"
+ #include "ui/gfx/color_utils.h"
+ 
+@@ -19,12 +20,13 @@ AccentColorObserver* AccentColorObserver::Get() {
+ }
+ 
+ AccentColorObserver::AccentColorObserver() {
+-  dwm_key_ = std::make_unique<base::win::RegKey>(
+-      HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\DWM", KEY_READ);
+-  if (dwm_key_->Valid()) {
+-    OnDwmKeyUpdated();
+-  } else {
+-    dwm_key_.reset();
++  if (base::win::GetVersion() >= base::win::Version::WIN8) {
++    dwm_key_ = std::make_unique<base::win::RegKey>(
++        HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\DWM", KEY_READ);
++    if (dwm_key_->Valid())
++      OnDwmKeyUpdated();
++    else
++      dwm_key_.reset();
+   }
+ }
+ 
+@@ -65,22 +67,24 @@ void AccentColorObserver::OnDwmKeyUpdated() {
+   // are getting the coerced color to match.
+   accent_color_ = TryGetAccentColorFromUISettings();
+ 
++  if (base::win::GetVersion() >= base::win::Version::WIN10) {
+   // Fall back to reading from registry if UISettings API failed.
+   if (!accent_color_.has_value()) {
+     if (DWORD accent_color = 0;
+         dwm_key_->ReadValueDW(L"AccentColor", &accent_color) == ERROR_SUCCESS) {
+       accent_color_ = skia::COLORREFToSkColor(accent_color);
+     } else {
+       // When there is no accent color, ignore inactive/border colors.
+       return;
+     }
+   }
+ 
+   if (DWORD accent_color_inactive = 0;
+       dwm_key_->ReadValueDW(L"AccentColorInactive", &accent_color_inactive) ==
+       ERROR_SUCCESS) {
+     accent_color_inactive_ = skia::COLORREFToSkColor(accent_color_inactive);
+   }
++  }
+ 
+   if (DWORD colorization_color, colorization_color_balance;
+       dwm_key_->ReadValueDW(L"ColorizationColor", &colorization_color) ==
+diff --git a/ui/display/win/uwp_text_scale_factor.cc b/ui/display/win/uwp_text_scale_factor.cc
+index 2d2d18c212bca..02b20a1b172db 100644
+--- a/ui/display/win/uwp_text_scale_factor.cc
++++ b/ui/display/win/uwp_text_scale_factor.cc
+@@ -19,8 +17,10 @@
+ #include "base/win/core_winrt_util.h"
+ #include "base/win/scoped_com_initializer.h"
+ #include "base/win/scoped_hstring.h"
++#include "base/win/windows_version.h"
+ 
+-namespace display::win {
++namespace display {
++namespace win {
+ 
+ namespace {
+ 
+@@ -89,6 +89,11 @@ class UwpTextScaleFactorImpl : public UwpTextScaleFactor {
+  public:
+   UwpTextScaleFactorImpl()
+       : text_scale_factor_changed_token_(kInvalidEventRegistrationToken) {
++    // There's no point in doing this initialization if we're earlier than
++    // Windows 10, since UWP is a Win10 feature.
++    if (base::win::GetVersion() < base::win::Version::WIN10)
++      return;
++
+     // We want to bracket all use of our COM object with COM initialization
+     // in order to be sure we don't leak COM listeners into the OS. This may
+     // extend the lifetime of COM on this thread but we do not expect it to be
+@@ -228,4 +233,5 @@ void UwpTextScaleFactor::Observer::OnUwpTextScaleFactorCleanup(
+   source->RemoveObserver(this);
+ }
+ 
+-}  // namespace display::win
++}  // namespace win
++}  // namespace display
+diff --git a/ui/gfx/font_fallback_unittest.cc b/ui/gfx/font_fallback_unittest.cc
+index d662ab15c867e..62558cc547478 100644
+--- a/ui/gfx/font_fallback_unittest.cc
++++ b/ui/gfx/font_fallback_unittest.cc
+@@ -19,6 +19,10 @@
+ #include "ui/gfx/platform_font.h"
+ #include "ui/gfx/test/font_fallback_test_data.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ namespace gfx {
+ 
+ namespace {
+@@ -166,6 +170,15 @@ TEST_P(GetFallbackFontTest, GetFallbackFont) {
+                          base_font_option_.weight);
+   }
+ 
++#if BUILDFLAG(IS_WIN)
++  // Skip testing this call to GetFallbackFont on older windows versions. Some
++  // fonts only got introduced on windows 10 and the test will fail on previous
++  // versions.
++  const bool is_win10 = base::win::GetVersion() >= base::win::Version::WIN10;
++  if (test_case_.is_win10 && !is_win10)
++    return;
++#endif
++
+   // Retrieve the name of the current script.
+   script_name_ = uscript_getName(test_case_.script);
+ 
+diff --git a/ui/gfx/render_text.cc b/ui/gfx/render_text.cc
+index 68a3c1f68f6c1..67fbf128ea158 100644
+--- a/ui/gfx/render_text.cc
++++ b/ui/gfx/render_text.cc
+@@ -42,6 +42,10 @@
+ #include "ui/gfx/text_utils.h"
+ #include "ui/gfx/utf16_indexing.h"
+ 
++#if BUILDFLAG(IS_WIN)
++#include "base/win/windows_version.h"
++#endif
++
+ namespace gfx {
+ 
+ namespace {
+@@ -253,23 +257,25 @@ UChar32 ReplaceControlCharacter(UChar32 codepoint) {
+     // Support Microsoft defined PUA on Windows.
+     // see:
+     // https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
+-    switch (codepoint) {
+-      case 0xF093:  // ButtonA
+-      case 0xF094:  // ButtonB
+-      case 0xF095:  // ButtonY
+-      case 0xF096:  // ButtonX
+-      case 0xF108:  // LeftStick
+-      case 0xF109:  // RightStick
+-      case 0xF10A:  // TriggerLeft
+-      case 0xF10B:  // TriggerRight
+-      case 0xF10C:  // BumperLeft
+-      case 0xF10D:  // BumperRight
+-      case 0xF10E:  // Dpad
+-      case 0xEECA:  // ButtonView2
+-      case 0xEDE3:  // ButtonMenu
+-        return codepoint;
+-      default:
+-        break;
++    if (base::win::GetVersion() >= base::win::Version::WIN10) {
++      switch (codepoint) {
++        case 0xF093:  // ButtonA
++        case 0xF094:  // ButtonB
++        case 0xF095:  // ButtonY
++        case 0xF096:  // ButtonX
++        case 0xF108:  // LeftStick
++        case 0xF109:  // RightStick
++        case 0xF10A:  // TriggerLeft
++        case 0xF10B:  // TriggerRight
++        case 0xF10C:  // BumperLeft
++        case 0xF10D:  // BumperRight
++        case 0xF10E:  // Dpad
++        case 0xEECA:  // ButtonView2
++        case 0xEDE3:  // ButtonMenu
++          return codepoint;
++        default:
++          break;
++      }
+     }
+ #endif
+     const int8_t codepoint_category = u_charType(codepoint);
+diff --git a/ui/gfx/win/direct_write.cc b/ui/gfx/win/direct_write.cc
+index bc17d6e4ccd4b..089a6bc5c35b5 100644
+--- a/ui/gfx/win/direct_write.cc
++++ b/ui/gfx/win/direct_write.cc
+@@ -9,9 +9,11 @@
+ #include <string_view>
+ 
+ #include "base/debug/alias.h"
++#include "base/metrics/histogram_functions.h"
+ #include "base/notreached.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/trace_event/trace_event.h"
++#include "base/win/windows_version.h"
+ #include "skia/ext/font_utils.h"
+ #include "third_party/skia/include/core/SkFontMgr.h"
+ #include "third_party/skia/include/ports/SkTypeface_win.h"
+@@ -60,11 +62,37 @@ void InitializeDirectWrite() {
+   CHECK(!!factory);
+   SetDirectWriteFactory(factory.Get());
+ 
++  // The skia call to create a new DirectWrite font manager instance can fail
++  // if we are unable to get the system font collection from the DirectWrite
++  // factory. The GetSystemFontCollection method in the IDWriteFactory
++  // interface fails with E_INVALIDARG on certain Windows 7 gold versions
++  // (6.1.7600.*).
+   sk_sp<SkFontMgr> direct_write_font_mgr =
+       SkFontMgr_New_DirectWrite(factory.Get());
+-  if (!direct_write_font_mgr) {
+-    direct_write_font_mgr = SkFontMgr_New_GDI();
++  int iteration = 0;
++  if (!direct_write_font_mgr &&
++      base::win::GetVersion() == base::win::Version::WIN7) {
++    // Windows (win7_rtm) may fail to map the service sections
++    // (crbug.com/956064).
++    constexpr int kMaxRetries = 5;
++    constexpr base::TimeDelta kRetrySleepTime = base::Microseconds(500);
++    while (iteration < kMaxRetries) {
++      base::PlatformThread::Sleep(kRetrySleepTime);
++      direct_write_font_mgr = SkFontMgr_New_DirectWrite(factory.Get());
++      if (direct_write_font_mgr)
++        break;
++      ++iteration;
++    }
+   }
++  if (!direct_write_font_mgr)
++    iteration = -1;
++  base::UmaHistogramSparse("DirectWrite.Fonts.Gfx.InitializeLoopCount",
++                           iteration);
++  // TODO(crbug.com/956064): Move to a CHECK when the cause of the crash is
++  // fixed and remove the if statement that fallback to GDI font manager.
++  DCHECK(!!direct_write_font_mgr);
++  if (!direct_write_font_mgr)
++    direct_write_font_mgr = SkFontMgr_New_GDI();
+ 
+   // Override the default skia font manager. This must be called before any
+   // use of the skia font manager is done (e.g. before any call to
+diff --git a/ui/gl/direct_composition_support.cc b/ui/gl/direct_composition_support.cc
+index 72a07a75be17d..b2094da1f5fb2 100644
+--- a/ui/gl/direct_composition_support.cc
++++ b/ui/gl/direct_composition_support.cc
+@@ -52,7 +53,9 @@ bool IsVerifyDrawOffsetEnabled() {
+ }
+ 
+ bool DXGIWaitableSwapChainEnabled() {
+-  return base::FeatureList::IsEnabled(features::kDXGIWaitableSwapChain);
++  // Waitable swap chains were first enabled in Win 8.1/DXGI 1.3
++  return (base::win::GetVersion() >= base::win::Version::WIN8_1) &&
++         base::FeatureList::IsEnabled(features::kDXGIWaitableSwapChain);
+ }
+ 
+ UINT GetDXGIWaitableSwapChainMaxQueuedFrames() {
+diff --git a/ui/native_theme/caption_style_win.cc b/ui/native_theme/caption_style_win.cc
+index 31fda250339d7..a8b745c946aea 100644
+--- a/ui/native_theme/caption_style_win.cc
++++ b/ui/native_theme/caption_style_win.cc
+@@ -14,6 +14,7 @@
+ #include "base/thread_annotations.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/win/core_winrt_util.h"
++#include "base/win/windows_version.h"
+ #include "base/win/registry.h"
+ #include "skia/ext/skia_utils_win.h"
+ #include "ui/base/ui_base_features.h"
+@@ -280,7 +280,9 @@ absl::optional<CaptionStyle> InitializeFromSystemSettings() {
+ }
+ 
+ std::optional<CaptionStyle> CaptionStyle::FromSystemSettings() {
++  if (base::win::GetVersion() >= base::win::Version::WIN10)
+   return SystemCaptionStyleCache::GetInstance().GetStyle();
++  return std::nullopt;
+ }
+ 
+ }  // namespace ui
+diff --git a/ui/snapshot/snapshot_win.cc b/ui/snapshot/snapshot_win.cc
+index 74d600db1ea5e..c7afae3de99f7 100644
+--- a/ui/snapshot/snapshot_win.cc
++++ b/ui/snapshot/snapshot_win.cc
+@@ -21,6 +20,18 @@
+ #include "ui/gfx/geometry/transform.h"
+ #include "ui/gfx/image/image.h"
+ 
++#include "ui/snapshot/snapshot_aura.h"
++namespace {
++
++// Windows 8.1 is the first version that supports PW_RENDERFULLCONTENT.
++// Without that flag PrintWindow may not correctly capture what's actually
++// onscreen.
++bool UseAuraSnapshot() {
++  return (base::win::GetVersion() < base::win::Version::WIN8_1);
++}
++
++}  // namespace
++
+ namespace ui {
+ 
+ namespace {
+@@ -85,6 +95,11 @@ bool GrabViewSnapshot(gfx::NativeView view_handle,
+ void GrabNativeWindowSnapshot(gfx::NativeWindow native_window,
+                               const gfx::Rect& snapshot_bounds,
+                               gfx::Image* image) {
++  if (UseAuraSnapshot()) {
++    // Not supported in Aura.  Callers should fall back to the async version.
++    return;
++  }
++
+   CHECK(native_window, base::NotFatalUntil::M163);
+   gfx::Rect window_bounds = native_window->GetBoundsInRootWindow();
+   aura::WindowTreeHost* host = native_window->GetHost();
+@@ -109,6 +124,10 @@ bool GrabWindowSnapshot(gfx::NativeWindow window_handle,
+ void GrabWindowSnapshot(gfx::NativeWindow window,
+                              const gfx::Rect& source_rect,
+                              GrabSnapshotImageCallback callback) {
++  if (UseAuraSnapshot()) {
++    GrabWindowSnapshotAura(window, source_rect, std::move(callback));
++    return;
++  }
+   gfx::Image image;
+   GrabNativeWindowSnapshot(window, source_rect, &image);
+   std::move(callback).Run(image);
+@@ -117,6 +136,10 @@ void GrabWindowSnapshotAsync(gfx::NativeWindow window,
+ void GrabViewSnapshot(gfx::NativeView view,
+                            const gfx::Rect& source_rect,
+                            GrabSnapshotImageCallback callback) {
++  if (UseAuraSnapshot()) {
++    GrabWindowSnapshotAura(view, source_rect, std::move(callback));
++    return;
++  }
+   gfx::Image image;
+   GrabNativeWindowSnapshot(view, source_rect, &image);
+   std::move(callback).Run(image);

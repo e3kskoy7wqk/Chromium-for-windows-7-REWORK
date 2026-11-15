@@ -1,0 +1,1 @@
+win: remove ScopedProtocolEntry    2023/3/4 5:10:11    323beab16b865c075a48b3fcd981444923fa26a9

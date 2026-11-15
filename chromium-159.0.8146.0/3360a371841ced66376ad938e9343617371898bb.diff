@@ -1,0 +1,49 @@
+diff --git a/base/win/win_util.cc b/base/win/win_util.cc
+index 5fd08d6658ddf..164fd78cdcc6c 100644
+--- a/base/win/win_util.cc
++++ b/base/win/win_util.cc
+@@ -367,7 +367,14 @@ ProcessPowerState GetProcessPowerThrottlingState(HANDLE process, ULONG flag) {
+   PROCESS_POWER_THROTTLING_STATE power_throttling{
+       .Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION};
+ 
+-  if (!::GetProcessInformation(process, ProcessPowerThrottling,
++  typedef BOOL (WINAPI * tGetProcessInformation)(
++      _In_ HANDLE hProcess,
++      _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
++      _Out_writes_bytes_(ProcessInformationSize) LPVOID ProcessInformation,
++      _In_ DWORD ProcessInformationSize);
++  auto const fnGetProcessInformation = reinterpret_cast<tGetProcessInformation>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
++  if ((fnGetProcessInformation == nullptr) ||
++      !fnGetProcessInformation(process, ProcessPowerThrottling,
+                                &power_throttling, sizeof(power_throttling))) {
+     return ProcessPowerState::kUnset;
+   }
+@@ -399,7 +406,14 @@ bool SetProcessPowerThrottlingState(HANDLE process,
+ 
+   // Get the current state of the process power throttling so we do not clobber
+   // other previously set flags.
+-  if (!::GetProcessInformation(process, ProcessPowerThrottling,
++  typedef BOOL (WINAPI * tGetProcessInformation)(
++      _In_ HANDLE hProcess,
++      _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
++      _Out_writes_bytes_(ProcessInformationSize) LPVOID ProcessInformation,
++      _In_ DWORD ProcessInformationSize);
++  auto const fnGetProcessInformation = reinterpret_cast<tGetProcessInformation>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
++  if ((fnGetProcessInformation == nullptr) ||
++      !fnGetProcessInformation(process, ProcessPowerThrottling,
+                                &power_throttling, sizeof(power_throttling))) {
+     return false;
+   }
+@@ -425,7 +439,11 @@ bool SetProcessPowerThrottlingState(HANDLE process,
+       break;
+   }
+ 
+-  return ::SetProcessInformation(process, ProcessPowerThrottling,
++  static const auto set_process_information_fn =
++      reinterpret_cast<decltype(&::SetProcessInformation)>(::GetProcAddress(
++          ::GetModuleHandle(L"Kernel32.dll"), "SetProcessInformation"));
++  return set_process_information_fn &&
++         set_process_information_fn(process, ProcessPowerThrottling,
+                                  &power_throttling, sizeof(power_throttling));
+ }
+ 

@@ -1,0 +1,51 @@
+diff --git a/third_party/icu/source/common/wintz.cpp b/third_party/icu/source/common/wintz.cpp
+index 580cedad..d420d2e7 100644
+--- a/third_party/icu/source/common/wintz.cpp
++++ b/third_party/icu/source/common/wintz.cpp
+@@ -93,7 +93,45 @@ uprv_detectWindowsTimeZone()
+     SYSTEMTIME systemTimeAllZero;
+     uprv_memset(&systemTimeAllZero, 0, sizeof(systemTimeAllZero));
+ 
+-    if (GetDynamicTimeZoneInformation(&dynamicTZI) == TIME_ZONE_ID_INVALID) {
++/*********************************************************************************************************************************
++*   Structures and Typedefs                                                                                                      *
++*********************************************************************************************************************************/
++typedef DWORD (WINAPI *PFNGETDYNAMICTIMEZONEINFORMATION)(PDYNAMIC_TIME_ZONE_INFORMATION);
++
++
++/*********************************************************************************************************************************
++*   Global Variables                                                                                                             *
++*********************************************************************************************************************************/
++/** Pointer to the GetDynamicTimeZoneInformation API if present. */
++static PFNGETDYNAMICTIMEZONEINFORMATION g_pfnGetDynamicTimeZoneInformation = NULL;
++/** Flipped after we've tried to resolve g_pfnGetDynamicTimeZoneInformation.  */
++static bool volatile                    g_fResolvedApi = false;
++
++
++    /*
++     * Resolve API.
++     */
++    PFNGETDYNAMICTIMEZONEINFORMATION pfnApi;
++    if (g_fResolvedApi)
++        pfnApi = g_pfnGetDynamicTimeZoneInformation;
++    else
++    {
++        pfnApi = (PFNGETDYNAMICTIMEZONEINFORMATION)GetProcAddress(GetModuleHandleW(L"kernel32"), "GetDynamicTimeZoneInformation");
++        g_pfnGetDynamicTimeZoneInformation = pfnApi;
++        g_fResolvedApi = true;
++    }
++
++    DWORD     dwRc;
++    if (pfnApi)
++    {
++        dwRc = pfnApi(&dynamicTZI);
++    }
++    else
++    {
++        /* Not sure how helpful this fallback really is... */
++        dwRc = GetTimeZoneInformation((PTIME_ZONE_INFORMATION)&dynamicTZI);
++    }
++    if (dwRc == TIME_ZONE_ID_INVALID) {
+         return nullptr;
+     }
+ 

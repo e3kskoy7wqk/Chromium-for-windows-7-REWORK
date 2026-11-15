@@ -1,0 +1,145 @@
+diff --git a/chrome/installer/mini_installer/delete_with_retry.cc b/chrome/installer/mini_installer/delete_with_retry.cc
+index 42c3967abe9de..59c58f0350d97 100644
+--- a/chrome/installer/mini_installer/delete_with_retry.cc
++++ b/chrome/installer/mini_installer/delete_with_retry.cc
+@@ -33,6 +33,101 @@ bool IsTransientFailure(DWORD error) {
+       error == ERROR_DIR_NOT_EMPTY;
+ }
+ 
++#pragma comment(lib, "ntdll.lib")
++
++#ifdef __cplusplus
++extern "C" {
++#endif // __cplusplus
++typedef LONG NTSTATUS;
++
++typedef struct _IO_STATUS_BLOCK {
++    union {
++        NTSTATUS Status;
++        PVOID Pointer;
++    };
++
++    ULONG_PTR Information;
++} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
++
++typedef enum _FILE_INFORMATION_CLASS {
++// end_wdm
++    FileDirectoryInformation         = 1,
++    FileFullDirectoryInformation,   // 2
++    FileBothDirectoryInformation,   // 3
++    FileBasicInformation,           // 4  wdm
++    FileStandardInformation,        // 5  wdm
++    FileInternalInformation,        // 6
++    FileEaInformation,              // 7
++    FileAccessInformation,          // 8
++    FileNameInformation,            // 9
++    FileRenameInformation,          // 10
++    FileLinkInformation,            // 11
++    FileNamesInformation,           // 12
++    FileDispositionInformation,     // 13
++    FilePositionInformation,        // 14 wdm
++    FileFullEaInformation,          // 15
++    FileModeInformation,            // 16
++    FileAlignmentInformation,       // 17
++    FileAllInformation,             // 18
++    FileAllocationInformation,      // 19
++    FileEndOfFileInformation,       // 20 wdm
++    FileAlternateNameInformation,   // 21
++    FileStreamInformation,          // 22
++    FilePipeInformation,            // 23
++    FilePipeLocalInformation,       // 24
++    FilePipeRemoteInformation,      // 25
++    FileMailslotQueryInformation,   // 26
++    FileMailslotSetInformation,     // 27
++    FileCompressionInformation,     // 28
++    FileObjectIdInformation,        // 29
++    FileCompletionInformation,      // 30
++    FileMoveClusterInformation,     // 31
++    FileQuotaInformation,           // 32
++    FileReparsePointInformation,    // 33
++    FileNetworkOpenInformation,     // 34
++    FileAttributeTagInformation,    // 35
++    FileTrackingInformation,        // 36
++    FileIdBothDirectoryInformation, // 37
++    FileIdFullDirectoryInformation, // 38
++    FileValidDataLengthInformation, // 39
++    FileShortNameInformation,       // 40
++    FileMaximumInformation
++// begin_wdm
++} FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
++
++#define NT_SUCCESS(Status)      ((NTSTATUS)(Status) >= 0)
++#define STATUS_SUCCESS          ((NTSTATUS)0x00000000L)
++
++NTSYSAPI
++ULONG
++NTAPI
++RtlNtStatusToDosError(
++  IN NTSTATUS Status);
++
++NTSYSCALLAPI
++NTSTATUS
++NTAPI
++NtQueryInformationFile(
++  IN HANDLE FileHandle,
++  OUT PIO_STATUS_BLOCK IoStatusBlock,
++  OUT PVOID FileInformation,
++  IN ULONG Length,
++  IN FILE_INFORMATION_CLASS FileInformationClass);
++
++NTSYSCALLAPI
++NTSTATUS
++NTAPI
++NtSetInformationFile(
++    IN HANDLE FileHandle,
++    OUT PIO_STATUS_BLOCK IoStatusBlock,
++    IN PVOID FileInformation,
++    IN ULONG Length,
++    IN FILE_INFORMATION_CLASS FileInformationClass
++    );
++
++#ifdef __cplusplus
++} // extern "C"
++#endif // __cplusplus
+ // Marks the file or directory at |path| for deletion. Returns true if the file
+ // was present and was successfully marked, or false (populating |error| with a
+ // Windows error code) otherwise.
+@@ -53,12 +142,15 @@ bool MarkForDeletion(const wchar_t* path, DWORD& error) {
+   // Mark the file for deletion. On success, the file will be deleted when all
+   // open handles are closed. This could fail if another process has the file
+   // mapped into its address space, among other reasons.
++    IO_STATUS_BLOCK         IoStatusBlock;
++
+   FILE_DISPOSITION_INFO disposition = {/*DeleteFile=*/TRUE};
++  const NTSTATUS delete_result = NtSetInformationFile(handle, &IoStatusBlock, &disposition,
++                                   sizeof(disposition),FileDispositionInformation);
+   const bool succeeded =
+-      ::SetFileInformationByHandle(handle, FileDispositionInfo, &disposition,
+-                                   sizeof(disposition)) != 0;
++      NT_SUCCESS(delete_result);
+   if (!succeeded)
+-    error = ::GetLastError();
++    error = RtlNtStatusToDosError(delete_result);
+ 
+   ::CloseHandle(handle);
+   return succeeded;
+@@ -81,13 +172,15 @@ bool ClearReadOnly(const wchar_t* path) {
+   bool modified = false;
+   FILE_BASIC_INFO info = {};
+ 
++    IO_STATUS_BLOCK         IoStatusBlock;
++
+   // Clear the read-only attribute if |path| names a file with it set.
+-  if (::GetFileInformationByHandleEx(handle, FileBasicInfo, &info,
+-                                     sizeof(info)) != 0 &&
++  if (NT_SUCCESS(NtQueryInformationFile(handle, &IoStatusBlock, &info,
++                                     sizeof(info), FileBasicInformation)) &&
+       (info.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0) {
+     info.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
+-    modified = ::SetFileInformationByHandle(handle, FileBasicInfo, &info,
+-                                            sizeof(info)) != 0;
++    modified = NT_SUCCESS(NtSetInformationFile(handle, &IoStatusBlock, &info,
++                                            sizeof(info), FileBasicInformation));
+   }
+ 
+   ::CloseHandle(handle);

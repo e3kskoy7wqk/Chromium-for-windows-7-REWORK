@@ -1,0 +1,1 @@
+[ClipboardChange event] - Extend ClipboardMonitor, adds Windows listener    2025/3/27 13:46:15    04aebf0ae47f89d92ecf8fb7021d6479c19497d4

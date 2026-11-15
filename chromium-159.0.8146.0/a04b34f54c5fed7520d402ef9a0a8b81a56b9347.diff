@@ -1,0 +1,13 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
+index 3a402d099a202..d58909e2396f5 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_config.h
+@@ -51,7 +51,7 @@ extern BASE_EXPORT PartitionTlsKey g_thread_cache_key;
+ // On Android, we have to go through emutls, since this is always a shared
+ // library, so don't bother.
+ #if PA_CONFIG(THREAD_LOCAL_TLS) && !PA_BUILDFLAG(IS_ANDROID)
+-#define PA_CONFIG_THREAD_CACHE_FAST_TLS() 1
++#define PA_CONFIG_THREAD_CACHE_FAST_TLS() 0
+ #else
+ #define PA_CONFIG_THREAD_CACHE_FAST_TLS() 0
+ #endif

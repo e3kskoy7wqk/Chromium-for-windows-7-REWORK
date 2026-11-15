@@ -1,0 +1,26 @@
+diff --git a/v8/src/base/platform/platform-win32.cc b/v8/src/base/platform/platform-win32.cc
+index 152fbbf3c26..b7a9bb2d62f 100644
+--- a/v8/src/base/platform/platform-win32.cc
++++ b/v8/src/base/platform/platform-win32.cc
+@@ -1160,8 +1160,20 @@ void PreciseSleepTimer::TryInit() {
+   // The TIMER_MODIFY_STATE permission allows setting the timer, and SYNCHRONIZE
+   // allows waiting for it.
+   DWORD desired_access = TIMER_MODIFY_STATE | SYNCHRONIZE;
++typedef HANDLE (WINAPI * CreateWaitableTimerExProc) (
++    LPSECURITY_ATTRIBUTES lpTimerAttributes,
++    LPCTSTR lpTimerName,
++    DWORD dwFlags,
++    DWORD dwDesiredAccess);
++CreateWaitableTimerExProc g_pufnCreateWaitableTimerEx = NULL;
++
++  HINSTANCE  hCoreSynch;
++  hCoreSynch = LoadLibraryW(L"kernel32.dll");
++  // These APIs are only supported on newer Windows versions
++  g_pufnCreateWaitableTimerEx = (CreateWaitableTimerExProc)GetProcAddress(hCoreSynch, "CreateWaitableTimerExW");
++  if (g_pufnCreateWaitableTimerEx)
+   timer_ =
+-      CreateWaitableTimerExW(NULL,  // Cannot be inherited by child processes
++      g_pufnCreateWaitableTimerEx(NULL,  // Cannot be inherited by child processes
+                              NULL,  // Cannot be looked up by name
+                              flags, desired_access);
+ }

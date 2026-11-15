@@ -1,0 +1,41 @@
+diff --git a/base/time/time_win.cc b/base/time/time_win.cc
+index 908bda5a9af08..2236d4db5b6c1 100644
+--- a/base/time/time_win.cc
++++ b/base/time/time_win.cc
+@@ -802,6 +802,27 @@ LiveTicks LiveTicksNowIgnoringOverride() {
+ 
+ // RealTicks ------------------------------------------------------------------
+ 
++typedef struct _KUSER_SHARED_DATA {
++
++    volatile ULONG TickCountLow;
++    ULONG TickCountMultiplier;
++
++    volatile ULONG ITimeLow;
++    volatile ULONG ITime1High;
++    volatile ULONG ITime2High;
++} KUSER_SHARED_DATA;
++
++#define MM_SHARED_USER_DATA_VA      0x7FFE0000
++#define SharedUserData ((KUSER_SHARED_DATA * const) MM_SHARED_USER_DATA_VA)
++
++#define KiQueryInterruptTime(CurrentTime) \
++    while (TRUE) {                                                                      \
++        (CurrentTime)->HighPart = SharedUserData->ITime1High;              \
++        (CurrentTime)->LowPart = SharedUserData->ITimeLow;                 \
++        if ((CurrentTime)->HighPart == SharedUserData->ITime2High) break;  \
++        YieldProcessor();                                                                \
++    }
++
+ namespace subtle {
+ // On Windows, `QueryInterruptTimePrecise()` and
+ // `QueryUnbiasedInterruptTimePrecise()` (which backs `LiveTicks`) read the same
+@@ -814,7 +835,7 @@ namespace subtle {
+ // https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryunbiasedinterrupttimeprecise
+ time_internal::RealTicks RealTicksNowIgnoringOverride() {
+   ULONGLONG interrupt_time;
+-  QueryInterruptTimePrecise(&interrupt_time);
++  KiQueryInterruptTime((PULARGE_INTEGER)&interrupt_time);
+   // QueryInterruptTimePrecise gets the interrupt time in system time units of
+   // 100 nanoseconds.
+   return time_internal::RealTicks() + Nanoseconds(interrupt_time * 100);

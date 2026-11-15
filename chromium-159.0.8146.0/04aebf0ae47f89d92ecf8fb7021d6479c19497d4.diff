@@ -1,0 +1,35 @@
+diff --git a/ui/base/clipboard/clipboard_win.cc b/ui/base/clipboard/clipboard_win.cc
+index e91a67ded9796..f378e92159308 100644
+--- a/ui/base/clipboard/clipboard_win.cc
++++ b/ui/base/clipboard/clipboard_win.cc
+@@ -45,6 +45,7 @@
+ #include "base/win/scoped_gdi_object.h"
+ #include "base/win/scoped_hdc.h"
+ #include "base/win/scoped_hglobal.h"
++#include "base/win/win_util.h"
+ #include "clipboard_util.h"
+ #include "net/base/filename_util.h"
+ #include "skia/ext/skia_utils_base.h"
+@@ -1412,12 +1413,20 @@ void ClipboardWin::WriteToClipboard(ClipboardFormatType format, HANDLE handle) {
+ }
+ 
+ void ClipboardWin::StartNotifying() {
+-  ::AddClipboardFormatListener(GetClipboardWindow());
++  static const auto pfnAddClipboardFormatListener =
++      reinterpret_cast<decltype(&::AddClipboardFormatListener)>(
++          base::win::GetUser32FunctionPointer("AddClipboardFormatListener"));
++  if (pfnAddClipboardFormatListener)
++  pfnAddClipboardFormatListener(GetClipboardWindow());
+   monitoring_clipboard_changes_ = true;
+ }
+ 
+ void ClipboardWin::StopNotifying() {
+-  ::RemoveClipboardFormatListener(GetClipboardWindow());
++  static const auto pfnRemoveClipboardFormatListener =
++      reinterpret_cast<decltype(&::RemoveClipboardFormatListener)>(
++          base::win::GetUser32FunctionPointer("RemoveClipboardFormatListener"));
++  if (pfnRemoveClipboardFormatListener)
++  pfnRemoveClipboardFormatListener(GetClipboardWindow());
+   monitoring_clipboard_changes_ = false;
+ }
+ 

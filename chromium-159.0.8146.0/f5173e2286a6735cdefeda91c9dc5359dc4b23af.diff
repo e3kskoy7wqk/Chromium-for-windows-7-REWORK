@@ -1,0 +1,39 @@
+diff --git a/base/time/time_win.cc b/base/time/time_win.cc
+index ac3197a..ad3c991 100644
+--- a/base/time/time_win.cc
++++ b/base/time/time_win.cc
+@@ -99,6 +98,16 @@ uint32_t g_high_res_timer_count = 0;
+   }
+ }
+ 
++// Returns a pointer to the QueryThreadCycleTime() function from Windows.
++// Can't statically link to it because it is not available on XP.
++using QueryThreadCycleTimePtr = decltype(::QueryThreadCycleTime)*;
++QueryThreadCycleTimePtr GetQueryThreadCycleTimeFunction() {
++  static const QueryThreadCycleTimePtr query_thread_cycle_time_fn =
++      reinterpret_cast<QueryThreadCycleTimePtr>(::GetProcAddress(
++          ::GetModuleHandle(L"kernel32.dll"), "QueryThreadCycleTime"));
++  return query_thread_cycle_time_fn;
++}
++
+ // Returns the current value of the performance counter.
+ int64_t QPCNowRaw() {
+   LARGE_INTEGER perf_counter_now = {};
+@@ -509,7 +518,7 @@ TimeTicks::Clock TimeTicks::GetClock() {
+ #else
+   // Get the number of TSC ticks used by the current thread.
+   ULONG64 thread_cycle_time = 0;
+-  ::QueryThreadCycleTime(thread_handle.platform_handle(), &thread_cycle_time);
++  GetQueryThreadCycleTimeFunction()(::GetCurrentThread(), &thread_cycle_time);
+ 
+   // Get the frequency of the TSC.
+   const double tsc_ticks_per_second = time_internal::TSCTicksPerSecond();
+@@ -534,7 +537,7 @@ ThreadTicks ThreadTicks::GetForThread(
+   // not care about the time stamp counter.
+   return true;
+ #else
+-  return time_internal::HasConstantRateTSC();
++  return GetQueryThreadCycleTimeFunction() && time_internal::HasConstantRateTSC();
+ #endif
+ }
+ 

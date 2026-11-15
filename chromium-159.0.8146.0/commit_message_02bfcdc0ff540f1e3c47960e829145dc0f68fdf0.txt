@@ -1,0 +1,1 @@
+[Video capture] Rotate frames according to camera orientation on Windows.    2018/1/13 5:41:43    02bfcdc0ff540f1e3c47960e829145dc0f68fdf0

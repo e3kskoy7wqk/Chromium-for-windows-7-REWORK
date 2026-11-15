@@ -1,0 +1,130 @@
+diff --git a/content/app/BUILD.gn b/content/app/BUILD.gn
+index aaac8741f2f43..f138058efbd50 100644
+--- a/content/app/BUILD.gn
++++ b/content/app/BUILD.gn
+@@ -101,7 +101,7 @@ source_set("app") {
+   ]
+ 
+   configs += extra_configs
+-  deps = content_app_deps
++  deps = content_app_deps + [ "//ipc" ]
+ 
+   public_deps = [ ":content_main_runner_app" ]
+ 
+diff --git a/content/app/initialize_mojo_core.cc b/content/app/initialize_mojo_core.cc
+index 4421c65d9ed72..f1a2c78d4204d 100644
+--- a/content/app/initialize_mojo_core.cc
++++ b/content/app/initialize_mojo_core.cc
+@@ -28,6 +28,7 @@ void InitializeMojoCore() {
+   }
+ 
+   mojo::core::Configuration config;
++  config.max_message_num_bytes = 128 * 1024 * 1024;
+ 
+   // If this is the browser process and there's no Mojo invitation pipe on the
+   // command line, we will serve as the global Mojo broker.
+diff --git a/content/app/mojo/mojo_init.cc b/content/app/mojo/mojo_init.cc
+index c776af65810c9..6c00d24153def 100644
+--- a/content/app/mojo/mojo_init.cc
++++ b/content/app/mojo/mojo_init.cc
+@@ -4,6 +4,12 @@
+ 
+ #include "content/app/mojo/mojo_init.h"
+ 
++#include <memory>
++
++#include "base/command_line.h"
++#include "content/public/common/content_switches.h"
++#include "ipc/constants.mojom.h"
++#include "mojo/core/embedder/configuration.h"
+ #include "mojo/core/embedder/embedder.h"
+ 
+ namespace content {
+@@ -12,7 +18,11 @@ namespace {
+ 
+ class MojoInitializer {
+  public:
+-  MojoInitializer() { mojo::core::Init(); }
++  MojoInitializer() {
++    mojo::core::Configuration config;
++    config.max_message_num_bytes = IPC::mojom::kChannelMaximumMessageSize;
++    mojo::core::Init(config);
++  }
+ };
+ 
+ }  // namespace
+diff --git a/mojo/core/embedder/configuration.h b/mojo/core/embedder/configuration.h
+index 4ab0f22b0244b..038b408d340f9 100644
+--- a/mojo/core/embedder/configuration.h
++++ b/mojo/core/embedder/configuration.h
+@@ -5,6 +5,9 @@
+ #ifndef MOJO_CORE_EMBEDDER_CONFIGURATION_H_
+ #define MOJO_CORE_EMBEDDER_CONFIGURATION_H_
+ 
++#include <stddef.h>
++#include <stdint.h>
++
+ #include "build/build_config.h"
+ 
+ namespace mojo {
+@@ -39,6 +42,15 @@ struct Configuration {
+   bool direct_unsafe_shared_memory_allocation = false;
+ #endif
+ 
++  // Maximum number of active memory mappings.
++  size_t max_mapping_table_size = 1000000;
++
++  // Maximum data size of messages sent over message pipes, in bytes.
++  size_t max_message_num_bytes = 256 * 1024 * 1024;
++
++  // Maximum size of a single shared memory segment, in bytes.
++  size_t max_shared_memory_num_bytes = 1024 * 1024 * 1024;
++
+   // If true we will not advertise our capabilities to our peer.
+   bool dont_advertise_capabilities = false;
+ };
+diff --git a/mojo/core/test/mojo_test_base.h b/mojo/core/test/mojo_test_base.h
+index f14826d9f6ed0..742a6d4e891ab 100644
+--- a/mojo/core/test/mojo_test_base.h
++++ b/mojo/core/test/mojo_test_base.h
+@@ -26,9 +26,8 @@ namespace test {
+ 
+ class MojoTestBase : public testing::Test {
+  public:
+-  // Legacy message size threshold. Neither Mojo Core nor the bindings enforce
+-  // a message size limit any more; the only remaining user of this constant is
+-  // the disabled RemoteTest.SendVeryLargeMessages test.
++  // Mojo Core is configured with this message size limit in tests so that we
++  // can reliably exercise code paths for oversized messages.
+   static constexpr size_t kMaxMessageSizeInTests = 32 * 1024 * 1024;
+ 
+   MojoTestBase();
+diff --git a/mojo/core/test/scoped_mojo_support.cc b/mojo/core/test/scoped_mojo_support.cc
+index e9c9f9668e752..befc6e75c5884 100644
+--- a/mojo/core/test/scoped_mojo_support.cc
++++ b/mojo/core/test/scoped_mojo_support.cc
+@@ -6,12 +6,14 @@
+ 
+ #include "base/base_switches.h"
+ #include "base/command_line.h"
++#include "base/feature_list.h"
+ #include "base/synchronization/waitable_event.h"
+ #include "base/test/bind.h"
+ #include "base/test/test_io_thread.h"
+ #include "mojo/core/embedder/configuration.h"
+ #include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/embedder/scoped_ipc_support.h"
++#include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/core/test/test_support_impl.h"
+ #include "mojo/core/test/test_switches.h"
+ #include "mojo/public/tests/test_support_private.h"
+@@ -38,6 +40,9 @@ class ScopedMojoSupport::CoreInstance {
+   CoreInstance() {
+     mojo::core::Configuration mojo_config;
+ 
++    // A relatively low limit to make it easier to test behavior at the limit.
++    mojo_config.max_message_num_bytes =
++        mojo::core::test::MojoTestBase::kMaxMessageSizeInTests;
+     if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
+             switches::kTestChildProcess) ||
+         base::CommandLine::ForCurrentProcess()->HasSwitch(

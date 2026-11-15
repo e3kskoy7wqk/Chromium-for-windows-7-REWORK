@@ -1,0 +1,1 @@
+Remove the use of d3dcompiler_43.dll.    2014-08-26 12:26:47    247f9ff7d967f161ff96afc68b82aeb78a6fa4b3

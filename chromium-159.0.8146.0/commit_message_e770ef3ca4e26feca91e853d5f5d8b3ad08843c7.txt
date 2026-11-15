@@ -1,0 +1,1 @@
+[Updater][Mojo] Harden Windows pipe IPC against disconnects and rejections    2026/10/13 10:46:20    e770ef3ca4e26feca91e853d5f5d8b3ad08843c7

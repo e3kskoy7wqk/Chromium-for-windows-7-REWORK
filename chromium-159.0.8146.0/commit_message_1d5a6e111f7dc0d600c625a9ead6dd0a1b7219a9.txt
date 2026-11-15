@@ -1,0 +1,1 @@
+Use GPU texture in desktop capture    2026/3/25 17:24:09    1d5a6e111f7dc0d600c625a9ead6dd0a1b7219a9

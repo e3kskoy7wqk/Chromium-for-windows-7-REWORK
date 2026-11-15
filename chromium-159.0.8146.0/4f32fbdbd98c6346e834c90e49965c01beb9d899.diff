@@ -1,0 +1,195 @@
+diff --git a/chrome/browser/importer/external_process_importer_client.cc b/chrome/browser/importer/external_process_importer_client.cc
+index 7320911bb2c1e..c0970768d65ee 100644
+--- a/chrome/browser/importer/external_process_importer_client.cc
++++ b/chrome/browser/importer/external_process_importer_client.cc
+@@ -252,6 +252,17 @@ void ExternalProcessImporterClient::OnAutofillFormDataImportGroup(
+     bridge_->SetAutofillFormData(autofill_form_data_);
+ }
+ 
++void ExternalProcessImporterClient::OnIE7PasswordReceived(
++    const user_data_importer::ImporterIE7PasswordInfo& importer_password_info) {
++#if BUILDFLAG(IS_WIN)
++  if (cancelled_)
++    return;
++  bridge_->AddIE7PasswordInfo(importer_password_info);
++#else
++  NOTREACHED();
++#endif
++}
++
+ ExternalProcessImporterClient::~ExternalProcessImporterClient() = default;
+ 
+ void ExternalProcessImporterClient::Cleanup() {
+diff --git a/chrome/browser/importer/external_process_importer_client.h b/chrome/browser/importer/external_process_importer_client.h
+index 9451b0917536e..864a6951115dd 100644
+--- a/chrome/browser/importer/external_process_importer_client.h
++++ b/chrome/browser/importer/external_process_importer_client.h
+@@ -34,6 +34,11 @@ struct PasswordForm;
+ class ExternalProcessImporterHost;
+ class InProcessImporterBridge;
+ 
++namespace user_data_importer {
++#if BUILDFLAG(IS_WIN)
++struct ImporterIE7PasswordInfo;
++#endif
++}
+ namespace user_data_importer {
+ struct ImportedBookmarkEntry;
+ }  // namespace user_data_importer
+@@ -85,6 +88,8 @@ class ExternalProcessImporterClient
+   void OnAutofillFormDataImportGroup(
+       const std::vector<ImporterAutofillFormDataEntry>&
+           autofill_form_data_entry_group) override;
++  void OnIE7PasswordReceived(
++      const user_data_importer::ImporterIE7PasswordInfo& importer_password_info) override;
+ 
+  protected:
+   ~ExternalProcessImporterClient() override;
+diff --git a/chrome/browser/importer/in_process_importer_bridge.cc b/chrome/browser/importer/in_process_importer_bridge.cc
+index 85394c73ea134..b6e2661071af5 100644
+--- a/chrome/browser/importer/in_process_importer_bridge.cc
++++ b/chrome/browser/importer/in_process_importer_bridge.cc
+@@ -172,6 +172,13 @@ void InProcessImporterBridge::AddHomePage(const GURL& home_page) {
+   writer_->AddHomepage(home_page);
+ }
+ 
++#if BUILDFLAG(IS_WIN)
++void InProcessImporterBridge::AddIE7PasswordInfo(
++    const user_data_importer::ImporterIE7PasswordInfo&) {
++  // TODO(crbug.com/456119): delete AddIE7PasswordInfo
++}
++#endif  // OS_WIN
++
+ void InProcessImporterBridge::SetFavicons(
+     const favicon_base::FaviconUsageDataList& favicons) {
+   writer_->AddFavicons(favicons);
+diff --git a/chrome/browser/importer/in_process_importer_bridge.h b/chrome/browser/importer/in_process_importer_bridge.h
+index b77d9ea73508f..247d24220beb7 100644
+--- a/chrome/browser/importer/in_process_importer_bridge.h
++++ b/chrome/browser/importer/in_process_importer_bridge.h
+@@ -20,6 +20,11 @@ struct ImportedBookmarkEntry;
+ class GURL;
+ class ExternalProcessImporterHost;
+ 
++namespace user_data_importer {
++#if BUILDFLAG(IS_WIN)
++struct ImporterIE7PasswordInfo;
++#endif
++}
+ namespace user_data_importer {
+ struct ImportedBookmarkEntry;
+ }  // namespace user_data_importer
+@@ -34,6 +37,11 @@ class InProcessImporterBridge : public ImporterBridge {
+ 
+   void AddHomePage(const GURL& home_page) override;
+ 
++#if BUILDFLAG(IS_WIN)
++  void AddIE7PasswordInfo(
++      const user_data_importer::ImporterIE7PasswordInfo& password_info) override;
++#endif
++
+   void SetFavicons(const favicon_base::FaviconUsageDataList& favicons) override;
+ 
+   void SetHistoryItems(
+diff --git a/chrome/common/importer/importer_bridge.h b/chrome/common/importer/importer_bridge.h
+index b4250c91d1b83..56d4259aba433 100644
+--- a/chrome/common/importer/importer_bridge.h
++++ b/chrome/common/importer/importer_bridge.h
+@@ -25,6 +25,11 @@ struct PasswordForm;
+ struct ImportedBookmarkEntry;
+ }  // namespace user_data_importer
+ 
++namespace user_data_importer {
++#if BUILDFLAG(IS_WIN)
++struct ImporterIE7PasswordInfo;
++#endif
++}
+ class ImporterBridge : public base::RefCountedThreadSafe<ImporterBridge> {
+  public:
+   ImporterBridge();
+@@ -38,6 +41,11 @@ class ImporterBridge : public base::RefCountedThreadSafe<ImporterBridge> {
+ 
+   virtual void AddHomePage(const GURL& home_page) = 0;
+ 
++#if BUILDFLAG(IS_WIN)
++  virtual void AddIE7PasswordInfo(
++      const user_data_importer::ImporterIE7PasswordInfo& password_info) = 0;
++#endif
++
+   virtual void SetFavicons(
+       const favicon_base::FaviconUsageDataList& favicons) = 0;
+ 
+diff --git a/chrome/common/importer/mock_importer_bridge.h b/chrome/common/importer/mock_importer_bridge.h
+index 104c44b4847d8..fbb6cbf1c32a5 100644
+--- a/chrome/common/importer/mock_importer_bridge.h
++++ b/chrome/common/importer/mock_importer_bridge.h
+@@ -22,6 +22,10 @@ class MockImporterBridge : public ImporterBridge {
+       void(const std::vector<user_data_importer::ImportedBookmarkEntry>&,
+            const std::u16string&));
+   MOCK_METHOD1(AddHomePage, void(const GURL&));
++#if BUILDFLAG(IS_WIN)
++  MOCK_METHOD1(AddIE7PasswordInfo,
++               void(const importer::ImporterIE7PasswordInfo&));
++#endif
+   MOCK_METHOD1(SetFavicons, void(const favicon_base::FaviconUsageDataList&));
+   MOCK_METHOD2(SetHistoryItems,
+                void(const std::vector<user_data_importer::ImporterURLRow>&,
+diff --git a/chrome/common/importer/profile_import.mojom b/chrome/common/importer/profile_import.mojom
+index 081955be7142f..625b5ddec2682 100644
+--- a/chrome/common/importer/profile_import.mojom
++++ b/chrome/common/importer/profile_import.mojom
+@@ -64,6 +64,8 @@ interface ProfileImportObserver {
+   OnAutofillFormDataImportStart(uint32 total_autofill_form_data_entry_count);
+   OnAutofillFormDataImportGroup(
+       array<ImporterAutofillFormDataEntry> autofill_form_data_entry_group);
++  // Windows only:
++  OnIE7PasswordReceived(ImporterIE7PasswordInfo importer_password_info);
+ };
+ 
+ // This interface is used to control the import process.
+diff --git a/chrome/utility/importer/external_process_importer_bridge.cc b/chrome/utility/importer/external_process_importer_bridge.cc
+index 2119346e21e13..9e45a282b8bcf 100644
+--- a/chrome/utility/importer/external_process_importer_bridge.cc
++++ b/chrome/utility/importer/external_process_importer_bridge.cc
+@@ -63,6 +63,13 @@ void ExternalProcessImporterBridge::AddHomePage(const GURL& home_page) {
+   observer_->OnHomePageImportReady(home_page);
+ }
+ 
++#if BUILDFLAG(IS_WIN)
++void ExternalProcessImporterBridge::AddIE7PasswordInfo(
++    const user_data_importer::ImporterIE7PasswordInfo& password_info) {
++  (*observer_).OnIE7PasswordReceived(password_info);
++}
++#endif
++
+ void ExternalProcessImporterBridge::SetFavicons(
+     const favicon_base::FaviconUsageDataList& favicons) {
+   observer_->OnFaviconsImportStart(favicons.size());
+diff --git a/chrome/utility/importer/external_process_importer_bridge.h b/chrome/utility/importer/external_process_importer_bridge.h
+index 5fd2913749e11..47109f604cf98 100644
+--- a/chrome/utility/importer/external_process_importer_bridge.h
++++ b/chrome/utility/importer/external_process_importer_bridge.h
+@@ -20,6 +20,11 @@ class GURL;
+ struct SearchEngineInfo;
+ }  // namespace user_data_importer
+ 
++namespace user_data_importer {
++#if BUILDFLAG(IS_WIN)
++struct ImporterIE7PasswordInfo;
++#endif
++}
+ // TODO(tibell): Now that profile import is a Mojo service perhaps ImportBridge,
+ // ProfileWriter or something in between should be the actual Mojo interface,
+ // instead of having the current split.
+@@ -47,6 +50,11 @@ class ExternalProcessImporterBridge : public ImporterBridge {
+ 
+   void AddHomePage(const GURL& home_page) override;
+ 
++#if BUILDFLAG(IS_WIN)
++  void AddIE7PasswordInfo(
++      const user_data_importer::ImporterIE7PasswordInfo& password_info) override;
++#endif
++
+   void SetFavicons(const favicon_base::FaviconUsageDataList& favicons) override;
+ 
+   void SetHistoryItems(

@@ -1,0 +1,154 @@
+diff --git a/chrome/installer/mini_installer/chrome.release b/chrome/installer/mini_installer/chrome.release
+index 02693af..78f082d 100644
+--- a/chrome/installer/mini_installer/chrome.release
++++ b/chrome/installer/mini_installer/chrome.release
+@@ -26,6 +26,7 @@ chrome_elf.dll: %(VersionDir)s\
+ chrome_pwa_launcher.exe: %(VersionDir)s\
+ chrome_renderer.dll: %(VersionDir)s\
+ chrome_wer.dll: %(VersionDir)s\
++d3dcompiler_43.dll: %(VersionDir)s\
+ d3dcompiler_47.dll: %(VersionDir)s\
+ eventlog_provider.dll: %(VersionDir)s\
+ icudtl.dat: %(VersionDir)s\
+diff --git a/infra/archive_config/win-archive-rel.json b/infra/archive_config/win-archive-rel.json
+index fa40d18..886b076 100644
+--- a/infra/archive_config/win-archive-rel.json
++++ b/infra/archive_config/win-archive-rel.json
+@@ -10,6 +10,7 @@
+                 "chrome_proxy.exe",
+                 "chrome_pwa_launcher.exe",
+                 "chrome_wer.dll",
++                "D3DCompiler_43.dll",
+                 "D3DCompiler_47.dll",
+                 "dxcompiler.dll",
+                 "elevated_tracing_service.exe",
+diff --git a/infra/archive_config/win32-archive-rel.json b/infra/archive_config/win32-archive-rel.json
+index fd4e1ad..65448ee 100644
+--- a/infra/archive_config/win32-archive-rel.json
++++ b/infra/archive_config/win32-archive-rel.json
+@@ -10,6 +10,7 @@
+                 "chrome_proxy.exe",
+                 "chrome_pwa_launcher.exe",
+                 "chrome_wer.dll",
++                "D3DCompiler_43.dll",
+                 "D3DCompiler_47.dll",
+                 "dxcompiler.dll",
+                 "elevated_tracing_service.exe",
+diff --git a/third_party/angle/BUILD.gn b/third_party/angle/BUILD.gn
+index a2a092d..9b69ae3 100644
+--- a/third_party/angle/BUILD.gn
++++ b/third_party/angle/BUILD.gn
+@@ -432,6 +432,9 @@ _use_copy_compiler_dll = angle_has_build && is_win
+ if (_use_copy_compiler_dll) {
+   copy("copy_compiler_dll") {
+     sources = [ "$windows_sdk_path/Redist/D3D/$target_cpu/d3dcompiler_47.dll" ]
++    if (target_cpu == "x86" || target_cpu == "x64") {
++      sources += [ "$windows_sdk_path/Redist/D3D/$target_cpu/D3DCompiler_43.dll" ]
++    }
+     outputs = [ "$root_out_dir/{{source_file_part}}" ]
+   }
+ }
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp b/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp
+index faae416..3d9b93a 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp
+@@ -142,6 +142,11 @@ angle::Result HLSLCompiler::ensureInitialized(d3d::Context *context)
+         // built with.
+         mD3DCompilerModule = LoadLibraryA(D3DCOMPILER_DLL_A);
+ 
++        if (!mD3DCompilerModule)
++        {
++            mD3DCompilerModule = LoadLibraryA("d3dcompiler_43.dll");
++        }
++
+         if (mD3DCompilerModule)
+         {
+             ANGLE_HISTOGRAM_ENUMERATION("GPU.ANGLE.D3DCompilerLoadLibraryResult",
+diff --git a/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp b/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp
+index 534a443..07aa3e4 100644
+--- a/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp
++++ b/third_party/dawn/src/dawn/native/d3d/PlatformFunctions.cpp
+@@ -111,9 +111,15 @@ MaybeError PlatformFunctions::EnsureFXC(std::span<const std::string> searchPaths
+     // that comes with the OS. The OS compiler contains functionality and heap corruption bugs
+     // on older Windows versions so care must be taken to always ship with the latest SDK
+     // compiler.
+-    const bool loadSuccess = mFXCompilerLib.OpenSystemLibrary(L"d3dcompiler_47.dll", &error);
++    bool loadSuccess = mFXCompilerLib.OpenSystemLibrary(L"d3dcompiler_47.dll", &error);
++    if (!loadSuccess) {
++        loadSuccess = mFXCompilerLib.OpenSystemLibrary(L"d3dcompiler_43.dll", &error);
++    }
+ #else
+-    const bool loadSuccess = mFXCompilerLib.Open("d3dcompiler_47.dll", searchPaths, &error);
++    bool loadSuccess = mFXCompilerLib.Open("d3dcompiler_47.dll", searchPaths, &error);
++    if (!loadSuccess) {
++        loadSuccess = mFXCompilerLib.Open("d3dcompiler_43.dll", searchPaths, &error);
++    }
+ #endif
+     if (!loadSuccess || !mFXCompilerLib.GetProc(&d3dCompile, "D3DCompile", &error) ||
+         !mFXCompilerLib.GetProc(&d3dDisassemble, "D3DDisassemble", &error)) {
+diff --git a/third_party/dawn/src/tint/cmd/tint/main.cc b/third_party/dawn/src/tint/cmd/tint/main.cc
+index ae59b67..a1ffe18 100644
+--- a/third_party/dawn/src/tint/cmd/tint/main.cc
++++ b/third_party/dawn/src/tint/cmd/tint/main.cc
+@@ -83,6 +83,10 @@
+ #if TINT_BUILD_HLSL_WRITER
+ #include "src/tint/lang/hlsl/validate/validate.h"
+ #include "src/tint/lang/hlsl/writer/writer.h"
++
++#if defined(_WIN32)
++#include <windows.h>
++#endif
+ #endif  // TINT_BUILD_HLSL_WRITER
+ 
+ #if TINT_BUILD_GLSL_WRITER
+@@ -1497,8 +1501,18 @@ tint::msl::writer::ArrayLengthOptions GenerateArrayLengthFromConstants(tint::cor
+         return false;
+ #else
+         tint::hlsl::validate::Result fxc_res;
+-        auto fxc = tint::Command::LookPath(
+-            options.fxc_path.empty() ? tint::hlsl::validate::kFxcDLLName : options.fxc_path);
++        std::string target_fxc_dll = options.fxc_path;
++        if (target_fxc_dll.empty()) {
++            HMODULE h47 = LoadLibraryA(tint::hlsl::validate::kFxcDLLName);
++            if (h47) {
++                FreeLibrary(h47);
++                target_fxc_dll = tint::hlsl::validate::kFxcDLLName;
++            } else {
++                target_fxc_dll = tint::hlsl::validate::kFxcFallbackDLLName;
++            }
++        }
++
++        auto fxc = tint::Command::LookPath(target_fxc_dll);
+         if (fxc.Found()) {
+             if (options.verbose) {
+                 std::cout << "Validating with FXC: " << fxc.Path() << "\n";
+diff --git a/third_party/dawn/src/tint/lang/hlsl/validate/validate.h b/third_party/dawn/src/tint/lang/hlsl/validate/validate.h
+index 65094a5..bc9fe6d 100644
+--- a/third_party/dawn/src/tint/lang/hlsl/validate/validate.h
++++ b/third_party/dawn/src/tint/lang/hlsl/validate/validate.h
+@@ -37,6 +37,9 @@ namespace tint::hlsl::validate {
+ /// Name of the FXC compiler DLL
+ inline constexpr const char kFxcDLLName[] = "d3dcompiler_47.dll";
+ 
++/// Name of the fallback FXC compiler DLL for legacy Windows
++inline constexpr const char kFxcFallbackDLLName[] = "d3dcompiler_43.dll";
++
+ #if TINT_BUILD_IS_WIN
+ inline constexpr const char* kDxcDLLName = "dxcompiler.dll";
+ #elif TINT_BUILD_IS_LINUX
+diff --git a/ui/gl/init/gl_initializer_win.cc b/ui/gl/init/gl_initializer_win.cc
+index 88a17c9..f0beafa 100644
+--- a/ui/gl/init/gl_initializer_win.cc
++++ b/ui/gl/init/gl_initializer_win.cc
+@@ -57,7 +57,10 @@ bool LoadD3DCompiler() {
+   // Attempt to load the D3DX shader compiler using an absolute path. This is to
+   // ensure that we load the versions of these DLLs that we ship. If that fails,
+   // load the OS version.
+-  return LoadD3DXLibrary(module_path, kD3DCompiler);
++  if (LoadD3DXLibrary(module_path, kD3DCompiler))
++    return true;
++
++  return LoadD3DXLibrary(module_path, L"d3dcompiler_43.dll");
+ }
+ 
+ bool InitializeStaticEGLInternalFromLibrary(GLImplementationParts implementation) {

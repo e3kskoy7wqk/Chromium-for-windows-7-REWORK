@@ -1,0 +1,20 @@
+diff --git a/chrome/browser/ui/views/tabs/tab/tab_title.cc b/chrome/browser/ui/views/tabs/tab/tab_title.cc
+index a57971e19a065..0e51b1f884e84 100644
+--- a/chrome/browser/ui/views/tabs/tab/tab_title.cc
++++ b/chrome/browser/ui/views/tabs/tab/tab_title.cc
+@@ -54,6 +54,7 @@
+ 
+ #include "chrome/browser/ui/views/tabs/tab/tab_title.h"
+ 
++#include "chrome/browser/win/mica_titlebar.h"
+ #include "chrome/browser/ui/tab_contents/core_tab_helper.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ 
+@@ -238,6 +239,7 @@ Tab::Tab(tabs::TabHandle handle, TabSlotController* controller)
+   SetHandlesTooltips(false);
+   SetAutoColorReadabilityEnabled(false);
+   SetText(CoreTabHelper::GetDefaultTitle());
++  if (SystemTitlebarCanUseMicaMaterial())
+   SetBackgroundColor(SK_ColorTRANSPARENT);
+   // Title paints on top of an opaque region (the tab background) of a
+   // non-opaque layer (the tabstrip's layer), which cannot currently be detected

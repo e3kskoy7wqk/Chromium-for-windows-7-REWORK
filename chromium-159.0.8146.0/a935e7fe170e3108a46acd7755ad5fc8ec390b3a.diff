@@ -1,0 +1,134 @@
+diff --git a/mojo/core/embedder/configuration.h b/mojo/core/embedder/configuration.h
+index 0056739ff24ef..4ab0f22b0244b 100644
+--- a/mojo/core/embedder/configuration.h
++++ b/mojo/core/embedder/configuration.h
+@@ -38,6 +38,9 @@ struct Configuration {
+   // policy; only set this for process types where that is known to hold.
+   bool direct_unsafe_shared_memory_allocation = false;
+ #endif
++
++  // If true we will not advertise our capabilities to our peer.
++  bool dont_advertise_capabilities = false;
+ };
+ 
+ }  // namespace core
+diff --git a/mojo/core/multiprocess_message_pipe_unittest.cc b/mojo/core/multiprocess_message_pipe_unittest.cc
+index e3117932da8bc..6739d6fc07b20 100644
+--- a/mojo/core/multiprocess_message_pipe_unittest.cc
++++ b/mojo/core/multiprocess_message_pipe_unittest.cc
+@@ -1420,6 +1420,7 @@ INSTANTIATE_TEST_SUITE_P(
+     All,
+     MultiprocessMessagePipeTestWithPeerSupport,
+     testing::Values(test::MojoTestBase::LaunchType::CHILD,
++                    test::MojoTestBase::LaunchType::CHILD_WITHOUT_CAPABILITIES,
+                     test::MojoTestBase::LaunchType::PEER,
+                     test::MojoTestBase::LaunchType::ASYNC
+ #if !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_IOS)
+@@ -1427,7 +1428,7 @@ INSTANTIATE_TEST_SUITE_P(
+                     ,
+                     test::MojoTestBase::LaunchType::NAMED_CHILD,
+                     test::MojoTestBase::LaunchType::NAMED_PEER
+-#endif  // !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_IOS)
++#endif  // !BUILDFLAG(IS_FUCHSIA)
+                     ));
+ }  // namespace
+ }  // namespace core
+diff --git a/mojo/core/test/multiprocess_test_helper.h b/mojo/core/test/multiprocess_test_helper.h
+index 9eb12a2729090..caf17ce4130a2 100644
+--- a/mojo/core/test/multiprocess_test_helper.h
++++ b/mojo/core/test/multiprocess_test_helper.h
+@@ -44,6 +44,9 @@ class MultiprocessTestHelper {
+     // system, using a named pipe.
+     NAMED_PEER,
+ #endif  //  !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_IOS)
++    // This is the same as child; however, it will never advertise any
++    // capabilities.
++    CHILD_WITHOUT_CAPABILITIES
+   };
+ 
+   MultiprocessTestHelper();
+diff --git a/mojo/core/test/scoped_mojo_support.cc b/mojo/core/test/scoped_mojo_support.cc
+index f52722c8d6cdd..e9c9f9668e752 100644
+--- a/mojo/core/test/scoped_mojo_support.cc
++++ b/mojo/core/test/scoped_mojo_support.cc
+@@ -20,6 +20,10 @@ namespace mojo::core::test {
+ 
+ namespace {
+ 
++// Command-line switch to disable internal Mojo Channel capability
++// advertisement, used to test skew between client versions.
++const char kDisableAllCapabilities[] = "disable-all-capabilities";
++
+ class TestSupportInitializer {
+  public:
+   TestSupportInitializer() {
+@@ -41,6 +45,11 @@ class ScopedMojoSupport::CoreInstance {
+       mojo_config.is_broker_process = true;
+     }
+ 
++    if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++            kDisableAllCapabilities)) {
++      mojo_config.dont_advertise_capabilities = true;
++    }
++
+     mojo::core::InitFeatures();
+     mojo::core::Init(mojo_config);
+ 
+diff --git a/testing/buildbot/filters/ios.mojo_unittests.filter b/testing/buildbot/filters/ios.mojo_unittests.filter
+index fa6fb5318b0df..15ca241bfc510 100644
+--- a/testing/buildbot/filters/ios.mojo_unittests.filter
++++ b/testing/buildbot/filters/ios.mojo_unittests.filter
+@@ -9,29 +9,41 @@
+ -All/MojoIpczTransportSecurityTest.TransmitFile/2
+ -All/MojoIpczTransportSecurityTest.TransmitFile/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.Basic/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.Basic/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.Basic/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.Basic/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.ChannelPipesWithMultipleChildren/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.ChannelPipesWithMultipleChildren/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.ChannelPipesWithMultipleChildren/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.ChannelPipesWithMultipleChildren/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipePassing/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipePassing/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipePassing/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipePassing/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipeTwoPassing/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipeTwoPassing/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipeTwoPassing/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.MessagePipeTwoPassing/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.MultiprocessChannelPipe/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.MultiprocessChannelPipe/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.MultiprocessChannelPipe/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.MultiprocessChannelPipe/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.PassMessagePipeCrossProcess/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.PassMessagePipeCrossProcess/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.PassMessagePipeCrossProcess/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.PassMessagePipeCrossProcess/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.PassMoarMessagePipesCrossProcess/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.PassMoarMessagePipesCrossProcess/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.PassMoarMessagePipesCrossProcess/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.PassMoarMessagePipesCrossProcess/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.PingPongPipe/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.PingPongPipe/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.PingPongPipe/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.PingPongPipe/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.QueueMessages/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.QueueMessages/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.QueueMessages/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.QueueMessages/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.ReceiveMessagesSentJustBeforeProcessDeath/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.ReceiveMessagesSentJustBeforeProcessDeath/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.ReceiveMessagesSentJustBeforeProcessDeath/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.ReceiveMessagesSentJustBeforeProcessDeath/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.SendPipeThenClosePeer/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.SendPipeThenClosePeer/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.SendPipeThenClosePeer/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.SendPipeThenClosePeer/3
+ -All/MultiprocessMessagePipeTestWithPeerSupport.WriteCloseSendPeer/0
+--All/MultiprocessMessagePipeTestWithPeerSupport.WriteCloseSendPeer/2
++-All/MultiprocessMessagePipeTestWithPeerSupport.WriteCloseSendPeer/1
++-All/MultiprocessMessagePipeTestWithPeerSupport.WriteCloseSendPeer/3
+ -DataPipeTest.CreateInChild
+ -DataPipeTest.Multiprocess
+ -DataPipeTest.NoSpuriousEvents
