@@ -1,0 +1,90 @@
+diff --git a/mojo/core/channel_win.cc b/mojo/core/channel_win.cc
+index f9988da307c09..96a54f845748f 100644
+--- a/mojo/core/channel_win.cc
++++ b/mojo/core/channel_win.cc
+@@ -227,6 +227,31 @@ class ChannelWin : public Channel,
+     ReadMore(0);
+   }
+ 
++// This cancels ASYNCHRONOUS calls
++int apiCancelIoEx(HANDLE hFile, LPOVERLAPPED lpOverlapped)
++{
++    int iRc = -1;
++    BOOL bRc = FALSE;
++
++    typedef BOOL (WINAPI* CancelIoEx_t)(HANDLE hFile, LPOVERLAPPED lpOverlapped);
++    static CancelIoEx_t fnCancelIoEx = NULL;
++    static bool fnChecked = false;
++
++    if (!fnChecked)
++    {
++        HMODULE hKernel = GetModuleHandle(L"Kernel32.dll");
++        fnCancelIoEx = hKernel ? (CancelIoEx_t)GetProcAddress(hKernel, "CancelIoEx") : NULL;
++        fnChecked = true;
++    }
++
++    if (fnCancelIoEx)
++    {
++        bRc = fnCancelIoEx(hFile, lpOverlapped);
++        iRc = bRc ? 1 : 0;
++    }
++
++    return iRc;
++}
+   void ShutDownOnIOThread() {
+     DCHECK(io_task_runner_->RunsTasksInCurrentSequence());
+     is_shutting_down_ = true;
+@@ -244,7 +269,7 @@ class ChannelWin : public Channel,
+     // cancels I/O issued by the calling thread; use CancelIoEx() with a null
+     // OVERLAPPED to cancel all pending I/O on the handle regardless of which
+     // thread issued it.
+-    CancelIoEx(handle_.get(), nullptr);
++    apiCancelIoEx(handle_.get(), nullptr);
+     if (leak_handle_) {
+       std::ignore = handle_.release();
+     } else {
+diff --git a/mojo/public/cpp/platform/platform_channel_server_win.cc b/mojo/public/cpp/platform/platform_channel_server_win.cc
+index d8a4fb632defb..56a8fea7e5de6 100644
+--- a/mojo/public/cpp/platform/platform_channel_server_win.cc
++++ b/mojo/public/cpp/platform/platform_channel_server_win.cc
+@@ -34,7 +34,7 @@ class ListenerImpl : public PlatformChannelServer::Listener,
+ 
+   ~ListenerImpl() override {
+     if (server_.is_valid()) {
+-      ::CancelIoEx(server_.get(), &connect_overlapped_);
++      apiCancelIoEx(server_.get(), &connect_overlapped_);
+       // CancelIoEx is asynchronous; block the destruction on the kernel writing
+       // status into connect_overlapped_ to avoid a use-after-free.
+       DWORD bytes = 0;
+@@ -118,6 +118,31 @@ class ListenerImpl : public PlatformChannelServer::Listener,
+   }
+ 
+  private:
++// This cancels ASYNCHRONOUS calls
++int apiCancelIoEx(HANDLE hFile, LPOVERLAPPED lpOverlapped)
++{
++    int iRc = -1;
++    BOOL bRc = FALSE;
++
++    typedef BOOL (WINAPI* CancelIoEx_t)(HANDLE hFile, LPOVERLAPPED lpOverlapped);
++    static CancelIoEx_t fnCancelIoEx = NULL;
++    static bool fnChecked = false;
++
++    if (!fnChecked)
++    {
++        HMODULE hKernel = GetModuleHandle(L"Kernel32.dll");
++        fnCancelIoEx = hKernel ? (CancelIoEx_t)GetProcAddress(hKernel, "CancelIoEx") : NULL;
++        fnChecked = true;
++    }
++
++    if (fnCancelIoEx)
++    {
++        bRc = fnCancelIoEx(hFile, lpOverlapped);
++        iRc = bRc ? 1 : 0;
++    }
++
++    return iRc;
++}
+   void RunCallback(PlatformChannelServer::ConnectionCallback callback,
+                    base::win::ScopedHandle server) {
+     std::move(callback).Run(

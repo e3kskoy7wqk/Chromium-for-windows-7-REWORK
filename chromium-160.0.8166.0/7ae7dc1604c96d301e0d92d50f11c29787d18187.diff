@@ -1,0 +1,434 @@
+diff --git a/sandbox/policy/win/sandbox_win.cc b/sandbox/policy/win/sandbox_win.cc
+index f77be3c4edcca..f42acfc558d5b 100644
+--- a/sandbox/policy/win/sandbox_win.cc
++++ b/sandbox/policy/win/sandbox_win.cc
+@@ -276,6 +276,50 @@ std::wstring PrependWindowsSessionPath(const wchar_t* object) {
+   return false;
+ }
+ 
++// Checks if the sandbox can be let to run without a job object assigned.
++// Returns true if the job object has to be applied to the sandbox and false
++// otherwise.
++bool ShouldSetJobLevel(bool allow_no_sandbox_job) {
++  // Windows 8 allows nested jobs so we don't need to check if we are in other
++  // job.
++  if (base::win::GetVersion() >= base::win::Version::WIN8)
++    return true;
++
++  BOOL in_job = true;
++  // Either there is no job yet associated so we must add our job,
++  if (!::IsProcessInJob(::GetCurrentProcess(), NULL, &in_job))
++    NOTREACHED() << "IsProcessInJob failed. " << GetLastError();
++  if (!in_job)
++    return true;
++
++  // ...or there is a job but the JOB_OBJECT_LIMIT_BREAKAWAY_OK limit is set.
++  JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_info = {};
++  if (!::QueryInformationJobObject(NULL, JobObjectExtendedLimitInformation,
++                                   &job_info, sizeof(job_info), NULL)) {
++    NOTREACHED() << "QueryInformationJobObject failed. " << GetLastError();
++    return true;
++  }
++  if (job_info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK)
++    return true;
++
++  // Lastly in place of the flag which was supposed to be used only for running
++  // Chrome in remote sessions we do this check explicitly here.
++  // According to MS this flag can be false for a remote session only on Windows
++  // Server 2012 and newer so if we do the check last we should be on the safe
++  // side. See: https://msdn.microsoft.com/en-us/library/aa380798.aspx.
++  if (!::GetSystemMetrics(SM_REMOTESESSION)) {
++    // TODO(pastarmovj): Even though the number are low, this flag is still
++    // necessary in some limited set of cases. Remove it once Windows 7 is no
++    // longer supported together with the rest of the checks in this function.
++    return !allow_no_sandbox_job;
++  }
++
++  // Allow running without the sandbox in this case. This slightly reduces the
++  // ability of the sandbox to protect its children from spawning new processes
++  // or preventing them from shutting down Windows or accessing the clipboard.
++  return false;
++}
++
+ // Adds the generic config rules to a sandbox TargetConfig.
+ ResultCode AddGenericConfig(sandbox::TargetConfig* config) {
+   DCHECK(!config->IsConfigured());
+@@ -819,12 +863,18 @@ ResultCode LaunchWithoutSandbox(
+   // on process shutdown, in which case TerminateProcess can fail. See
+   // https://crbug.com/820996.
+   if (delegate->ShouldUnsandboxedRunInJob()) {
+-    static base::NoDestructor<base::win::ScopedHandle> job_object(
+-        CreateUnsandboxedJob());
+-    if (!job_object->is_valid()) {
+-      return SBOX_ERROR_CANNOT_INIT_JOB;
+-    }
+-    options.job_handle = job_object->get();
++    BOOL in_job = true;
++    // Prior to Windows 8 nested jobs aren't possible.
++    if (base::win::GetVersion() >= base::win::Version::WIN8 ||
++        (::IsProcessInJob(::GetCurrentProcess(), nullptr, &in_job) &&
++         !in_job)) {
++      static base::NoDestructor<base::win::ScopedHandle> job_object(
++          CreateUnsandboxedJob());
++      if (!job_object->is_valid()) {
++        return SBOX_ERROR_CANNOT_INIT_JOB;
++      }
++      options.job_handle = job_object->get();
++    }
+   }
+ 
+   // Chromium binaries are marked as CET Compatible but some processes
+@@ -866,6 +919,8 @@ ResultCode SandboxWin::SetJobLevel(Sandbox sandbox_type,
+                                    uint32_t ui_exceptions,
+                                    TargetConfig* config) {
+   DCHECK(!config->IsConfigured());
++  if (!ShouldSetJobLevel(false))
++    return config->SetJobLevel(JobLevel::kNone, 0);
+ 
+   ResultCode ret = config->SetJobLevel(job_level, ui_exceptions);
+   if (ret != SBOX_ALL_OK)
+diff --git a/sandbox/win/src/broker_services.cc b/sandbox/win/src/broker_services.cc
+index 58c24c12f24b1..16a7c3dbac024 100644
+--- a/sandbox/win/src/broker_services.cc
++++ b/sandbox/win/src/broker_services.cc
+@@ -546,8 +546,11 @@ ResultCode BrokerServicesBase::SpawnTarget(const wchar_t* exe_path,
+     startup_info->SetAppContainer(container);
+   }
+ 
+-  if (policy_base->HasJob())
++  // On Win10, jobs are associated via startup_info.
++  if (base::win::GetVersion() >= base::win::Version::WIN10 &&
++      policy_base->HasJob()) {
+     startup_info->AddJobToAssociate(policy_base->GetJobHandle());
++  }
+ 
+   if (!startup_info->BuildStartupInformation()) {
+     return base::unexpected(SBOX_ERROR_PROC_THREAD_ATTRIBUTES);
+diff --git a/sandbox/win/src/broker_services.h b/sandbox/win/src/broker_services.h
+index d12355f32d070..88c4e3ba1d48b 100644
+--- a/sandbox/win/src/broker_services.h
++++ b/sandbox/win/src/broker_services.h
+@@ -18,6 +18,7 @@
+ #include "base/win/scoped_process_information.h"
+ #include "sandbox/win/src/alternate_desktop.h"
+ #include "sandbox/win/src/crosscall_server.h"
++#include "sandbox/win/src/job.h"
+ #include "sandbox/win/src/sandbox.h"
+ #include "sandbox/win/src/sandbox_policy_base.h"
+ #include "sandbox/win/src/sharedmem_ipc_server.h"
+diff --git a/sandbox/win/src/job.cc b/sandbox/win/src/job.cc
+index d5e230719a210..36c28b20205ac 100644
+--- a/sandbox/win/src/job.cc
++++ b/sandbox/win/src/job.cc
+@@ -14,17 +14,20 @@
+ 
+ namespace sandbox {
+ 
+-Job::Job() = default;
+-Job::~Job() = default;
++Job::Job() : job_handle_(nullptr) {}
++
++Job::~Job() {}
+ 
+ DWORD Job::Init(JobLevel security_level,
++                const wchar_t* job_name,
+                 DWORD ui_exceptions,
+                 size_t memory_limit) {
+-  if (job_handle_.is_valid())
++  if (job_handle_.is_valid())
+     return ERROR_ALREADY_INITIALIZED;
+ 
+-  job_handle_.Set(::CreateJobObject(nullptr, nullptr));
+-  if (!job_handle_.is_valid())
++  job_handle_.Set(::CreateJobObject(nullptr,  // No security attribute
++                                    job_name));
++  if (!job_handle_.is_valid())
+     return ::GetLastError();
+ 
+   JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
+@@ -87,20 +90,42 @@ DWORD Job::Init(JobLevel security_level,
+ }
+ 
+ bool Job::IsValid() {
+-  return job_handle_.is_valid();
++  return job_handle_.is_valid();
+ }
+ 
+ HANDLE Job::GetHandle() {
+-  return job_handle_.get();
++  return job_handle_.Get();
++}
++
++DWORD Job::UserHandleGrantAccess(HANDLE handle) {
++  if (!job_handle_.is_valid())
++    return ERROR_NO_DATA;
++
++  if (!::UserHandleGrantAccess(handle, job_handle_.Get(),
++                               true)) {  // Access allowed.
++    return ::GetLastError();
++  }
++
++  return ERROR_SUCCESS;
++}
++
++DWORD Job::AssignProcessToJob(HANDLE process_handle) {
++  if (!job_handle_.is_valid())
++    return ERROR_NO_DATA;
++
++  if (!::AssignProcessToJobObject(job_handle_.Get(), process_handle))
++    return ::GetLastError();
++
++  return ERROR_SUCCESS;
+ }
+ 
+ DWORD Job::SetActiveProcessLimit(DWORD processes) {
+   JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
+ 
+-  if (!job_handle_.is_valid())
++  if (!job_handle_.is_valid())
+     return ERROR_NO_DATA;
+ 
+-  if (!::QueryInformationJobObject(job_handle_.get(),
++  if (!::QueryInformationJobObject(job_handle_.Get(),
+                                    JobObjectExtendedLimitInformation, &jeli,
+                                    sizeof(jeli), nullptr)) {
+     return ::GetLastError();
+@@ -108,7 +133,7 @@ DWORD Job::SetActiveProcessLimit(DWORD processes) {
+   jeli.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+   jeli.BasicLimitInformation.ActiveProcessLimit = processes;
+ 
+-  if (!::SetInformationJobObject(job_handle_.get(),
++  if (!::SetInformationJobObject(job_handle_.Get(),
+                                  JobObjectExtendedLimitInformation, &jeli,
+                                  sizeof(jeli))) {
+     return ::GetLastError();
+diff --git a/sandbox/win/src/job.h b/sandbox/win/src/job.h
+index 31037e1b7aff7..e4739cf83f4b1 100644
+--- a/sandbox/win/src/job.h
++++ b/sandbox/win/src/job.h
+@@ -15,7 +15,8 @@ enum class JobLevel;
+ // Handles the creation of job objects based on a security profile.
+ // Sample usage:
+ //   Job job;
+-//   job.Init(JobLevel::kLockdown, 0, 0);
++//   job.Init(JobLevel::kLockdown, nullptr);  //no job name
++//   job.AssignProcessToJob(process_handle);
+ class Job {
+  public:
+   Job();
+@@ -27,12 +28,29 @@ class Job {
+ 
+   // Initializes and creates the job object. The security of the job is based
+   // on the security_level parameter.
++  // job_name can be nullptr if the job is unnamed.
+   // If the chosen profile has too many ui restrictions, you can disable some
+   // by specifying them in the ui_exceptions parameters.
+   // If the function succeeds, the return value is ERROR_SUCCESS. If the
+   // function fails, the return value is the win32 error code corresponding to
+   // the error.
+-  DWORD Init(JobLevel security_level, DWORD ui_exceptions, size_t memory_limit);
++  DWORD Init(JobLevel security_level,
++             const wchar_t* job_name,
++             DWORD ui_exceptions,
++             size_t memory_limit);
++
++  // Assigns the process referenced by process_handle to the job.
++  // If the function succeeds, the return value is ERROR_SUCCESS. If the
++  // function fails, the return value is the win32 error code corresponding to
++  // the error.
++  DWORD AssignProcessToJob(HANDLE process_handle);
++
++  // Grants access to "handle" to the job. All processes in the job can
++  // subsequently recognize and use the handle.
++  // If the function succeeds, the return value is ERROR_SUCCESS. If the
++  // function fails, the return value is the win32 error code corresponding to
++  // the error.
++  DWORD UserHandleGrantAccess(HANDLE handle);
+ 
+   // True if the job has been initialized and has a valid handle.
+   bool IsValid();
+diff --git a/sandbox/win/src/job_unittest.cc b/sandbox/win/src/job_unittest.cc
+index 62142702240c8..78a42dff35551 100644
+--- a/sandbox/win/src/job_unittest.cc
++++ b/sandbox/win/src/job_unittest.cc
+@@ -14,14 +14,26 @@ namespace sandbox {
+ 
+ // Tests the creation and destruction of the job.
+ TEST(JobTest, TestCreation) {
+-  // Create the job.
+-  Job job;
+-  ASSERT_FALSE(job.IsValid());
+-  ASSERT_EQ(nullptr, job.GetHandle());
+-  ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+-            job.Init(JobLevel::kLockdown, 0, 0));
+-  EXPECT_TRUE(job.IsValid());
+-  EXPECT_NE(nullptr, job.GetHandle());
++  // Scope the creation of Job.
++  {
++    // Create the job.
++    Job job;
++    ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
++              job.Init(JobLevel::kLockdown, L"my_test_job_name", 0, 0));
++
++    // check if the job exists.
++    HANDLE job_handle =
++        ::OpenJobObjectW(GENERIC_ALL, false, L"my_test_job_name");
++    ASSERT_TRUE(job_handle);
++
++    if (job_handle)
++      CloseHandle(job_handle);
++  }
++
++  // Check if the job is destroyed when the object goes out of scope.
++  HANDLE job_handle = ::OpenJobObjectW(GENERIC_ALL, false, L"my_test_job_name");
++  ASSERT_TRUE(!job_handle);
++  ASSERT_EQ(static_cast<DWORD>(ERROR_FILE_NOT_FOUND), ::GetLastError());
+ }
+ 
+ // Tests the ui exceptions
+@@ -31,12 +43,12 @@ TEST(JobTest, TestExceptions) {
+   {
+     // Create the job.
+     Job job;
+-    ASSERT_EQ(
+-        static_cast<DWORD>(ERROR_SUCCESS),
+-        job.Init(JobLevel::kLockdown, JOB_OBJECT_UILIMIT_READCLIPBOARD, 0));
++    ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
++              job.Init(JobLevel::kLockdown, L"my_test_job_name",
++                       JOB_OBJECT_UILIMIT_READCLIPBOARD, 0));
+ 
+     job_handle = job.GetHandle();
+-    ASSERT_NE(nullptr, job_handle);
++    ASSERT_TRUE(job_handle != INVALID_HANDLE_VALUE);
+ 
+     JOBOBJECT_BASIC_UI_RESTRICTIONS jbur = {0};
+     DWORD size = sizeof(jbur);
+@@ -51,10 +63,10 @@ TEST(JobTest, TestExceptions) {
+     // Create the job.
+     Job job;
+     ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+-              job.Init(JobLevel::kLockdown, 0, 0));
++              job.Init(JobLevel::kLockdown, L"my_test_job_name", 0, 0));
+ 
+     job_handle = job.GetHandle();
+-    ASSERT_NE(nullptr, job_handle);
++    ASSERT_TRUE(job_handle != INVALID_HANDLE_VALUE);
+ 
+     JOBOBJECT_BASIC_UI_RESTRICTIONS jbur = {0};
+     DWORD size = sizeof(jbur);
+@@ -71,33 +83,78 @@ TEST(JobTest, DoubleInit) {
+   // Create the job.
+   Job job;
+   ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+-            job.Init(JobLevel::kLockdown, 0, 0));
++            job.Init(JobLevel::kLockdown, L"my_test_job_name", 0, 0));
+   ASSERT_EQ(static_cast<DWORD>(ERROR_ALREADY_INITIALIZED),
+-            job.Init(JobLevel::kLockdown, 0, 0));
++            job.Init(JobLevel::kLockdown, L"test", 0, 0));
++}
++
++// Tests the error case when we use a method and the object is not yet
++// initialized.
++TEST(JobTest, NoInit) {
++  Job job;
++  ASSERT_EQ(static_cast<DWORD>(ERROR_NO_DATA),
++            job.UserHandleGrantAccess(nullptr));
++  ASSERT_EQ(static_cast<DWORD>(ERROR_NO_DATA), job.AssignProcessToJob(nullptr));
++  ASSERT_FALSE(job.GetHandle() == INVALID_HANDLE_VALUE);
+ }
+ 
+ // Tests the initialization of the job with different security levels.
+ TEST(JobTest, SecurityLevel) {
+   Job job_lockdown;
+   ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+-            job_lockdown.Init(JobLevel::kLockdown, 0, 0));
++            job_lockdown.Init(JobLevel::kLockdown, L"job_lockdown", 0, 0));
+ 
+   Job job_limited_user;
+-  ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+-            job_limited_user.Init(JobLevel::kLimitedUser, 0, 0));
++  ASSERT_EQ(
++      static_cast<DWORD>(ERROR_SUCCESS),
++      job_limited_user.Init(JobLevel::kLimitedUser, L"job_limited_user", 0, 0));
+ 
+   Job job_interactive;
+-  ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+-            job_interactive.Init(JobLevel::kInteractive, 0, 0));
++  ASSERT_EQ(
++      static_cast<DWORD>(ERROR_SUCCESS),
++      job_interactive.Init(JobLevel::kInteractive, L"job_interactive", 0, 0));
+ 
+   Job job_unprotected;
+-  ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
+-            job_unprotected.Init(JobLevel::kUnprotected, 0, 0));
++  ASSERT_EQ(
++      static_cast<DWORD>(ERROR_SUCCESS),
++      job_unprotected.Init(JobLevel::kUnprotected, L"job_unprotected", 0, 0));
+ 
+   // JobLevel::kNone means we run without a job object so Init should fail.
+   Job job_none;
+   ASSERT_EQ(static_cast<DWORD>(ERROR_BAD_ARGUMENTS),
+-            job_none.Init(JobLevel::kNone, 0, 0));
++            job_none.Init(JobLevel::kNone, L"job_none", 0, 0));
++}
++
++// Tests the method "AssignProcessToJob".
++TEST(JobTest, ProcessInJob) {
++  // Create the job.
++  Job job;
++  ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
++            job.Init(JobLevel::kUnprotected, L"job_test_process", 0, 0));
++
++  wchar_t notepad[] = L"notepad";
++  STARTUPINFO si = {sizeof(si)};
++  PROCESS_INFORMATION temp_process_info = {};
++  ASSERT_TRUE(::CreateProcess(nullptr, notepad, nullptr, nullptr, false, 0,
++                              nullptr, nullptr, &si, &temp_process_info));
++  base::win::ScopedProcessInformation pi(temp_process_info);
++  ASSERT_EQ(static_cast<DWORD>(ERROR_SUCCESS),
++            job.AssignProcessToJob(pi.process_handle()));
++
++  // Get the job handle.
++  HANDLE job_handle = job.GetHandle();
++
++  // Check if the process is in the job.
++  JOBOBJECT_BASIC_PROCESS_ID_LIST jbpidl = {0};
++  DWORD size = sizeof(jbpidl);
++  EXPECT_TRUE(::QueryInformationJobObject(
++      job_handle, JobObjectBasicProcessIdList, &jbpidl, size, &size));
++
++  EXPECT_EQ(1u, jbpidl.NumberOfAssignedProcesses);
++  EXPECT_EQ(1u, jbpidl.NumberOfProcessIdsInList);
++  EXPECT_EQ(pi.process_id(), jbpidl.ProcessIdList[0]);
++
++  EXPECT_TRUE(::TerminateProcess(pi.process_handle(), 0));
+ }
+ 
+ }  // namespace sandbox
+diff --git a/sandbox/win/src/restricted_token_utils.cc b/sandbox/win/src/restricted_token_utils.cc
+index c02c0931b68d7..8bd608cb96b48 100644
+--- a/sandbox/win/src/restricted_token_utils.cc
++++ b/sandbox/win/src/restricted_token_utils.cc
+@@ -14,6 +14,7 @@
+ #include "base/win/access_token.h"
+ #include "base/win/security_descriptor.h"
+ #include "base/win/windows_version.h"
++#include "sandbox/win/src/job.h"
+ #include "sandbox/win/src/acl.h"
+ #include "sandbox/win/src/restricted_token.h"
+ #include "sandbox/win/src/sandbox_nt_util.h"
+diff --git a/sandbox/win/src/sandbox_policy_base.cc b/sandbox/win/src/sandbox_policy_base.cc
+index c93d4212a126c..58c69fde95cc9 100644
+--- a/sandbox/win/src/sandbox_policy_base.cc
++++ b/sandbox/win/src/sandbox_policy_base.cc
+@@ -493,8 +493,8 @@ ResultCode PolicyBase::InitJob() {
+     return SBOX_ALL_OK;
+ 
+   // Create the Windows job object.
+-  DWORD result = job_.Init(config()->GetJobLevel(), config()->ui_exceptions(),
+-                           config()->memory_limit());
++  DWORD result = job_.Init(config()->GetJobLevel(), nullptr,
++                           config()->ui_exceptions(), config()->memory_limit());
+   if (ERROR_SUCCESS != result)
+     return SBOX_ERROR_CANNOT_INIT_JOB;
+ 

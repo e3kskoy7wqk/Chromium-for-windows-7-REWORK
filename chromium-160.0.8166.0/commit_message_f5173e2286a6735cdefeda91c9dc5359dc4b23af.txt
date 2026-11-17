@@ -1,0 +1,1 @@
+More accurate implementation of watched thread time for Gpu Watchdog.    2016/4/23 3:37:23    f5173e2286a6735cdefeda91c9dc5359dc4b23af

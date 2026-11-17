@@ -1,0 +1,413 @@
+diff --git a/base/memory/shared_memory_hooks.h b/base/memory/shared_memory_hooks.h
+index 8ec9a0e..0e72076 100644
+--- a/base/memory/shared_memory_hooks.h
++++ b/base/memory/shared_memory_hooks.h
+@@ -9,9 +9,12 @@
+ #include "base/memory/unsafe_shared_memory_region.h"
+ #include "base/memory/writable_shared_memory_region.h"
+ 
+-namespace mojo::core::ipcz_driver {
++namespace mojo {
++class SharedMemoryUtils;
++namespace core::ipcz_driver {
+ class BaseSharedMemoryService;
+-}  // namespace mojo::core::ipcz_driver
++}
++}  // namespace mojo
+ 
+ namespace base {
+ 
+@@ -21,6 +24,7 @@ class SharedMemoryHooks {
+ 
+  private:
+   friend class SharedMemoryHooksTest;
++  friend mojo::SharedMemoryUtils;
+   friend class mojo::core::ipcz_driver::BaseSharedMemoryService;
+ 
+   // Allows shared memory region creation to be hooked. Useful for sandboxed
+diff --git a/chrome/services/sharing/nearby/platform/input_stream_impl_unittest.cc b/chrome/services/sharing/nearby/platform/input_stream_impl_unittest.cc
+index 849e1d7..93c50cc 100644
+--- a/chrome/services/sharing/nearby/platform/input_stream_impl_unittest.cc
++++ b/chrome/services/sharing/nearby/platform/input_stream_impl_unittest.cc
+@@ -116,7 +116,7 @@ TEST_F(InputStreamImplTest, Read) {
+ TEST_F(InputStreamImplTest, MultipleChunks) {
+   // Expect a total message size of 1MB delivered in chunks because a mojo pipe
+   // has a maximum buffer size and only accepts a certain amount of data per
+-  // call. The default is 64KB defined in //mojo/core/core_ipcz.cc
++  // call. The default is 64KB defined in //mojo/core/core.cc
+   uint32_t message_size = 1024 * 1024;
+   std::string message(message_size, 'A');
+ 
+diff --git a/chrome/services/sharing/nearby/platform/output_stream_impl_unittest.cc b/chrome/services/sharing/nearby/platform/output_stream_impl_unittest.cc
+index bf15498..999196a 100644
+--- a/chrome/services/sharing/nearby/platform/output_stream_impl_unittest.cc
++++ b/chrome/services/sharing/nearby/platform/output_stream_impl_unittest.cc
+@@ -122,7 +122,7 @@ TEST_F(OutputStreamImplTest, Write) {
+ TEST_F(OutputStreamImplTest, MultipleChunks) {
+   // Expect a total message size of 1MB delivered in chunks because a mojo pipe
+   // has a maximum buffer size and only accepts a certain amount of data per
+-  // call. The default is 64KB defined in //mojo/core/core_ipcz.cc
++  // call. The default is 64KB defined in //mojo/core/core.cc
+   uint32_t message_size = 1024 * 1024;
+   std::string message(message_size, 'A');
+ 
+@@ -159,9 +159,8 @@ TEST_F(OutputStreamImplTest, CloseWhileWriting) {
+         base::ScopedAllowBaseSyncPrimitivesForTesting allow;
+         // Expect a total message size of 1MB delivered in chunks because a mojo
+         // pipe has a maximum buffer size and only accepts a certain amount of
+-        // data per call. The default is 64KB defined in
+-        // //mojo/core/core_ipcz.cc. We want a large message so the Write() will
+-        // be forced to wait.
++        // data per call. The default is 64KB defined in //mojo/core/core.cc. We
++        // want a large message so the Write() will be forced to wait.
+         uint32_t message_size = 1024 * 1024;
+         std::string message(message_size, 'A');
+         write_exception = output_stream_->Write(ByteArray(message));
+diff --git a/components/paint_preview/renderer/paint_preview_recorder_utils.cc b/components/paint_preview/renderer/paint_preview_recorder_utils.cc
+index 7069c8d..bf32c22 100644
+--- a/components/paint_preview/renderer/paint_preview_recorder_utils.cc
++++ b/components/paint_preview/renderer/paint_preview_recorder_utils.cc
+@@ -17,6 +17,7 @@
+ #include "cc/paint/paint_op_buffer_iterator.h"
+ #include "components/paint_preview/common/file_stream.h"
+ #include "components/paint_preview/common/paint_preview_tracker.h"
++#include "mojo/public/cpp/base/shared_memory_utils.h"
+ #include "skia/ext/skia_utils_base.h"
+ #include "third_party/skia/include/core/SkBitmap.h"
+ #include "third_party/skia/include/core/SkData.h"
+diff --git a/components/viz/common/DEPS b/components/viz/common/DEPS
+index 8edbde9..a5d5e92 100644
+--- a/components/viz/common/DEPS
++++ b/components/viz/common/DEPS
+@@ -41,6 +41,10 @@ specific_include_rules = {
+     "+media/media_buildflags.h",
+     "+ui/gl/gl_switches.h",
+   ],
++  "bitmap_allocation.cc" : [
++    # Only used to pass Mojo handles, not to communicate with the viz service.
++    "+mojo/public/cpp/base/shared_memory_utils.h",
++  ],
+   "renderer_settings.h" : [
+     "+ui/display/types/display_constants.h",
+   ]
+diff --git a/content/app/content_main_runner_impl.cc b/content/app/content_main_runner_impl.cc
+index ea24446..727e55b 100644
+--- a/content/app/content_main_runner_impl.cc
++++ b/content/app/content_main_runner_impl.cc
+@@ -110,6 +110,7 @@
+ #include "media/base/media.h"
+ #include "media/media_buildflags.h"
+ #include "mojo/core/embedder/embedder.h"
++#include "mojo/public/cpp/base/shared_memory_utils.h"
+ #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+ #include "mojo/public/cpp/bindings/sync_call_restrictions.h"
+ #include "mojo/public/cpp/platform/platform_channel.h"
+diff --git a/content/app/initialize_mojo_core.cc b/content/app/initialize_mojo_core.cc
+index f1a2c78..c3f111f 100644
+--- a/content/app/initialize_mojo_core.cc
++++ b/content/app/initialize_mojo_core.cc
+@@ -14,6 +14,7 @@
+ #include "mojo/core/embedder/embedder.h"
+ #include "mojo/public/c/system/functions.h"
+ #include "mojo/public/c/system/types.h"
++#include "mojo/public/cpp/base/shared_memory_utils.h"
+ #include "mojo/public/cpp/platform/platform_channel.h"
+ #include "sandbox/policy/sandbox_type.h"
+ 
+@@ -74,8 +75,8 @@ void InitializeMojoCore() {
+   // will simply fail.
+   //
+   // Note #2: some platforms can directly allocated shared memory in a
+-  // sandboxed process. The defines below must be in sync with
+-  // mojo::core::ipcz_driver::BaseSharedMemoryService::CreateWritableRegion().
++  // sandboxed process. The defines below must be in sync with the
++  // implementation of mojo::NodeController::CreateSharedBuffer().
+ #if !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_ANDROID)
+   if (sandbox::policy::IsUnsandboxedSandboxType(
+           sandbox::policy::SandboxTypeFromCommandLine(
+@@ -91,7 +92,7 @@ void InitializeMojoCore() {
+     DCHECK(!config.is_broker_process);
+     // Otherwise, this is a sandboxed process that will need brokering to
+     // allocate shared memory.
+-    mojo::core::InstallMojoIpczBaseSharedMemoryHooks();
++    mojo::SharedMemoryUtils::InstallBaseHooks();
+   }
+ #endif  // !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_FUCHSIA)
+ }
+diff --git a/mojo/core/BUILD.gn b/mojo/core/BUILD.gn
+index 782c1d3..886399f 100644
+--- a/mojo/core/BUILD.gn
++++ b/mojo/core/BUILD.gn
+@@ -39,6 +39,7 @@ source_set("impl_for_embedder") {
+     "embedder/configuration.h",
+     "embedder/process_error_callback.h",
+     "fuzzing_utils.h",
++    "handle_signals_state.h",
+     "ipcz_api.h",
+     "ipcz_driver/base_shared_memory_service.h",
+     "ipcz_driver/driver.h",
+diff --git a/mojo/core/handle_signals_state.h b/mojo/core/handle_signals_state.h
+new file mode 100644
+index 0000000..46842ca
+--- /dev/null
++++ b/mojo/core/handle_signals_state.h
+@@ -0,0 +1,111 @@
++// Copyright 2014 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef MOJO_CORE_HANDLE_SIGNALS_STATE_H_
++#define MOJO_CORE_HANDLE_SIGNALS_STATE_H_
++
++#include "mojo/core/system_impl_export.h"
++#include "mojo/public/c/system/types.h"
++
++namespace mojo {
++namespace core {
++
++// A convenience wrapper around the MojoHandleSignalsState struct.
++//
++// NOTE: This is duplicated in the public C++ SDK to avoid circular
++// dependencies between the EDK and the public SDK.
++struct MOJO_SYSTEM_IMPL_EXPORT HandleSignalsState final
++    : public MojoHandleSignalsState {
++  HandleSignalsState() {
++    satisfied_signals = MOJO_HANDLE_SIGNAL_NONE;
++    satisfiable_signals = MOJO_HANDLE_SIGNAL_NONE;
++  }
++
++  HandleSignalsState(MojoHandleSignals satisfied,
++                     MojoHandleSignals satisfiable) {
++    satisfied_signals = satisfied;
++    satisfiable_signals = satisfiable;
++  }
++
++  bool operator==(const HandleSignalsState& other) const {
++    return satisfied_signals == other.satisfied_signals &&
++           satisfiable_signals == other.satisfiable_signals;
++  }
++
++  // TODO(rockot): Remove this in favor of operator==.
++  bool equals(const HandleSignalsState& other) const {
++    return satisfied_signals == other.satisfied_signals &&
++           satisfiable_signals == other.satisfiable_signals;
++  }
++
++  bool satisfies_any(MojoHandleSignals signals) const {
++    return !!(satisfied_signals & signals);
++  }
++
++  bool satisfies_all(MojoHandleSignals signals) const {
++    return (satisfied_signals & signals) == signals;
++  }
++
++  bool can_satisfy_any(MojoHandleSignals signals) const {
++    return !!(satisfiable_signals & signals);
++  }
++
++  // The handle is currently readable. May apply to a message pipe handle or
++  // data pipe consumer handle.
++  bool readable() const { return satisfies_any(MOJO_HANDLE_SIGNAL_READABLE); }
++
++  // The handle is currently writable. May apply to a message pipe handle or
++  // data pipe producer handle.
++  bool writable() const { return satisfies_any(MOJO_HANDLE_SIGNAL_WRITABLE); }
++
++  // The handle's peer is closed. May apply to any message pipe or data pipe
++  // handle.
++  bool peer_closed() const {
++    return satisfies_any(MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++  }
++
++  // The handle's peer exists in a remote execution context (e.g. in another
++  // process.)
++  bool peer_remote() const {
++    return satisfies_any(MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++  }
++
++  // Indicates whether the handle has exceeded some quota limit.
++  bool quota_exceeded() const {
++    return satisfies_any(MOJO_HANDLE_SIGNAL_QUOTA_EXCEEDED);
++  }
++
++  // The handle will never be |readable()| again.
++  bool never_readable() const {
++    return !can_satisfy_any(MOJO_HANDLE_SIGNAL_READABLE);
++  }
++
++  // The handle will never be |writable()| again.
++  bool never_writable() const {
++    return !can_satisfy_any(MOJO_HANDLE_SIGNAL_WRITABLE);
++  }
++
++  // The handle can never indicate |peer_closed()|. Never true for message pipe
++  // or data pipe handles (they can always signal peer closure), but always true
++  // for other types of handles (they have no peer.)
++  bool never_peer_closed() const {
++    return !can_satisfy_any(MOJO_HANDLE_SIGNAL_PEER_CLOSED);
++  }
++
++  // The handle will never indicate |peer_remote()| again. True iff the peer is
++  // known to be closed.
++  bool never_peer_remote() const {
++    return !can_satisfy_any(MOJO_HANDLE_SIGNAL_PEER_REMOTE);
++  }
++
++  // (Copy and assignment allowed.)
++};
++
++static_assert(sizeof(HandleSignalsState) == sizeof(MojoHandleSignalsState),
++              "HandleSignalsState should add no overhead");
++
++}  // namespace core
++}  // namespace mojo
++
++#endif  // MOJO_CORE_HANDLE_SIGNALS_STATE_H_
+diff --git a/mojo/core/message_pipe_perftest.cc b/mojo/core/message_pipe_perftest.cc
+index 83cca23..c4f934a 100644
+--- a/mojo/core/message_pipe_perftest.cc
++++ b/mojo/core/message_pipe_perftest.cc
+@@ -18,10 +18,10 @@
+ #include "base/test/perf_time_logger.h"
+ #include "base/threading/thread.h"
+ #include "mojo/core/embedder/embedder.h"
++#include "mojo/core/handle_signals_state.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/core/test/test_utils.h"
+ #include "mojo/public/c/system/functions.h"
+-#include "mojo/public/cpp/system/handle_signals_state.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace mojo {
+diff --git a/mojo/core/mojo_core_unittest.h b/mojo/core/mojo_core_unittest.h
+new file mode 100644
+index 0000000..04ee41b
+--- /dev/null
++++ b/mojo/core/mojo_core_unittest.h
+@@ -0,0 +1,21 @@
++// Copyright 2020 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef MOJO_CORE_MOJO_CORE_UNITTEST_H_
++#define MOJO_CORE_MOJO_CORE_UNITTEST_H_
++
++namespace switches {
++
++// Instructs the test runner to initialize the Mojo Core library in separate
++// phases. Used by a unit test when launching a subprocess, to verify the
++// correctness of phased initialization.
++extern const char kMojoLoadBeforeInit[];
++
++// Instructs the test runner to provide an explicit path to the Mojo Core shared
++// library, rather than assuming it's present in the current working directory.
++extern const char kMojoUseExplicitLibraryPath[];
++
++}  // namespace switches
++
++#endif  // MOJO_CORE_MOJO_CORE_UNITTEST_H_
+diff --git a/mojo/core/multiprocess_message_pipe_unittest.cc b/mojo/core/multiprocess_message_pipe_unittest.cc
+index 486cc6b..3699075 100644
+--- a/mojo/core/multiprocess_message_pipe_unittest.cc
++++ b/mojo/core/multiprocess_message_pipe_unittest.cc
+@@ -26,12 +26,12 @@
+ #include "base/test/task_environment.h"
+ #include "build/build_config.h"
+ #include "mojo/buildflags.h"
++#include "mojo/core/handle_signals_state.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/core/test/test_utils.h"
+ #include "mojo/public/c/system/buffer.h"
+ #include "mojo/public/c/system/functions.h"
+ #include "mojo/public/c/system/types.h"
+-#include "mojo/public/cpp/system/handle_signals_state.h"
+ #include "mojo/public/cpp/system/message_pipe.h"
+ #include "mojo/public/cpp/system/platform_handle.h"
+ #include "mojo/public/cpp/system/simple_watcher.h"
+diff --git a/mojo/public/cpp/base/BUILD.gn b/mojo/public/cpp/base/BUILD.gn
+index 544a2b9..8ed7a97 100644
+--- a/mojo/public/cpp/base/BUILD.gn
++++ b/mojo/public/cpp/base/BUILD.gn
+@@ -11,6 +11,8 @@ component("base") {
+   sources = [
+     "big_buffer.cc",
+     "big_buffer.h",
++    "shared_memory_utils.cc",
++    "shared_memory_utils.h",
+     "shared_memory_version.cc",
+     "shared_memory_version.h",
+   ]
+@@ -21,6 +23,7 @@ component("base") {
+ 
+   public_deps = [
+     "//base",
++    "//mojo/core/embedder",
+     "//mojo/public/cpp/bindings",
+     "//mojo/public/cpp/system",
+   ]
+@@ -42,6 +45,7 @@ component("protobuf_support") {
+   public_deps = [
+     ":base",
+     "//base",
++    "//mojo/core/embedder",
+     "//mojo/public/cpp/bindings",
+     "//mojo/public/cpp/system",
+     "//third_party/protobuf:protobuf_lite",
+diff --git a/mojo/public/cpp/base/DEPS b/mojo/public/cpp/base/DEPS
+index 03182e4..da7a991 100644
+--- a/mojo/public/cpp/base/DEPS
++++ b/mojo/public/cpp/base/DEPS
+@@ -1,3 +1,7 @@
++include_rules = [
++  "+mojo/core/embedder",
++]
++
+ specific_include_rules = {
+   "proto_wrapper(_unittest)?.cc": [
+     "+third_party/protobuf/src/google/protobuf/message_lite.h",
+diff --git a/mojo/public/cpp/base/shared_memory_utils.cc b/mojo/public/cpp/base/shared_memory_utils.cc
+new file mode 100644
+index 0000000..835fe8a
+--- /dev/null
++++ b/mojo/public/cpp/base/shared_memory_utils.cc
+@@ -0,0 +1,15 @@
++// Copyright 2018 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "mojo/public/cpp/base/shared_memory_utils.h"
++
++#include "mojo/core/embedder/embedder.h"
++
++namespace mojo {
++
++void SharedMemoryUtils::InstallBaseHooks() {
++  mojo::core::InstallMojoIpczBaseSharedMemoryHooks();
++}
++
++}  // namespace mojo
+diff --git a/mojo/public/cpp/base/shared_memory_utils.h b/mojo/public/cpp/base/shared_memory_utils.h
+new file mode 100644
+index 0000000..1efc5b1
+--- /dev/null
++++ b/mojo/public/cpp/base/shared_memory_utils.h
+@@ -0,0 +1,19 @@
++// Copyright 2018 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef MOJO_PUBLIC_CPP_BASE_SHARED_MEMORY_UTILS_H_
++#define MOJO_PUBLIC_CPP_BASE_SHARED_MEMORY_UTILS_H_
++
++#include "base/component_export.h"
++
++namespace mojo {
++
++class SharedMemoryUtils {
++ public:
++  COMPONENT_EXPORT(MOJO_BASE) static void InstallBaseHooks();
++};
++
++}  // namespace mojo
++
++#endif  // MOJO_PUBLIC_CPP_BASE_SHARED_MEMORY_UTILS_H_

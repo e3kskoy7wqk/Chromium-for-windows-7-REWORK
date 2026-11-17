@@ -1,0 +1,928 @@
+diff --git a/build/check_gn_headers_allowlist.txt b/build/check_gn_headers_allowlist.txt
+index fe09d77aac218..319e33d67de81 100644
+--- a/build/check_gn_headers_allowlist.txt
++++ b/build/check_gn_headers_allowlist.txt
+@@ -118,6 +118,7 @@ media/formats/mpeg/adts_stream_parser.h
+ media/formats/mpeg/mpeg1_audio_stream_parser.h
+ media/formats/mpeg/mpeg_audio_stream_parser_base.h
+ media/gpu/media_gpu_export.h
++mojo/core/broker_messages.h
+ mojo/core/system_impl_export.h
+ mojo/public/cpp/bindings/strong_associated_binding_set.h
+ mojo/public/cpp/bindings/tests/mojo_test_blink_export.h
+diff --git a/mojo/core/BUILD.gn b/mojo/core/BUILD.gn
+index 782c1d30584d2..e0b4efec078c1 100644
+--- a/mojo/core/BUILD.gn
++++ b/mojo/core/BUILD.gn
+@@ -38,6 +38,7 @@ source_set("impl_for_embedder") {
+     "connection_params.h",
+     "core_ipcz.h",
+     "embedder/configuration.h",
++    "embedder/process_error_callback.h",
+     "fuzzing_utils.h",
+     "ipcz_api.h",
+     "ipcz_driver/base_shared_memory_service.h",
+@@ -57,6 +58,7 @@ source_set("impl_for_embedder") {
+   ]
+ 
+   sources = [
++    "broker.h",
+     "channel.cc",
+     "configuration.cc",
+     "connection_params.cc",
+@@ -105,6 +107,7 @@ source_set("impl_for_embedder") {
+ 
+   if (is_posix && !mojo_use_apple_channel) {
+     sources += [
++      "broker_posix.cc",
+       "channel_posix.cc",
+       "channel_posix.h",
+     ]
+@@ -123,23 +126,19 @@ source_set("impl_for_embedder") {
+     sources += [ "channel_mac.cc" ]
+   }
+ 
+-  # Keep in sync with SHARED_MEMORY_SERVICE_REQUIRED() in
+-  # ipcz_driver/base_shared_memory_service.cc.
+-  if (is_posix && !is_apple && !is_android) {
+-    sources += [
+-      "broker.h",
+-      "broker_host.cc",
+-      "broker_host.h",
+-      "broker_messages.h",
+-      "broker_posix.cc",
+-    ]
+-  }
++  sources += [
++    "broker_host.cc",
++    "broker_host.h",
++  ]
+ 
+   defines = [ "MOJO_SYSTEM_IMPL_IMPLEMENTATION" ]
+   deps = [ "//crypto" ]
+ 
+   if (is_win) {
+-    sources += [ "channel_win.cc" ]
++    sources += [
++      "broker_win.cc",
++      "channel_win.cc",
++    ]
+   }
+ 
+   if (!is_debug && !optimize_for_size) {
+diff --git a/mojo/core/broker.h b/mojo/core/broker.h
+index dd71e5a329bc8..654abbf509849 100644
+--- a/mojo/core/broker.h
++++ b/mojo/core/broker.h
+@@ -7,6 +7,7 @@
+ 
+ #include "base/memory/writable_shared_memory_region.h"
+ #include "base/synchronization/lock.h"
++#include "mojo/public/cpp/platform/platform_channel_endpoint.h"
+ #include "mojo/public/cpp/platform/platform_handle.h"
+ 
+ namespace mojo {
+@@ -16,13 +17,24 @@ namespace core {
+ // to fulfill shared memory allocation requests on some platforms.
+ class Broker {
+  public:
+-  explicit Broker(PlatformHandle handle);
++  // Note: If |wait_for_channel_handle| is |true|, this constructor blocks the
++  // calling thread until it reads first message from |handle|, which must
++  // contain another PlatformHandle for a NodeChannel.
++  //
++  // Otherwise, no initialization message is expected and this will not wait for
++  // one.
++  Broker(PlatformHandle handle, bool wait_for_channel_handle);
+ 
+   Broker(const Broker&) = delete;
+   Broker& operator=(const Broker&) = delete;
+ 
+   ~Broker();
+ 
++  // Returns the platform handle that should be used to establish a NodeChannel
++  // to the process which is inviting us to join its network. This is the first
++  // handle read off the Broker channel upon construction.
++  PlatformChannelEndpoint GetInviterEndpoint();
++
+   // Request a shared buffer from the broker process. Blocks the current thread.
+   base::WritableSharedMemoryRegion GetWritableSharedMemoryRegion(
+       size_t num_bytes);
+@@ -31,6 +43,10 @@ class Broker {
+   // Handle to the broker process, used for synchronous IPCs.
+   PlatformHandle sync_channel_;
+ 
++  // Channel endpoint connected to the inviter process. Received in the
++  // first message over |sync_channel_|.
++  PlatformChannelEndpoint inviter_endpoint_;
++
+   // Lock to only allow one sync message at a time. This avoids having to deal
+   // with message ordering since we can only have one request at a time
+   // in-flight.
+diff --git a/mojo/core/broker_host.cc b/mojo/core/broker_host.cc
+index 605868fefe733..c02af910fe7ad 100644
+--- a/mojo/core/broker_host.cc
++++ b/mojo/core/broker_host.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "mojo/core/broker_host.h"
+ 
++#include <algorithm>
++#include <array>
++#include <string_view>
+ #include <utility>
+ 
+ #include "base/compiler_specific.h"
+@@ -11,19 +14,39 @@
+ #include "base/memory/platform_shared_memory_region.h"
+ #include "base/memory/ref_counted.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "build/build_config.h"
++#include "mojo/buildflags.h"
+ #include "mojo/core/broker_messages.h"
+-#include "mojo/core/connection_params.h"
+ #include "mojo/core/ipcz_driver/envelope.h"
+-#include "mojo/core/platform_handle_in_transit.h"
++#include "mojo/core/platform_handle_utils.h"
++
++#if BUILDFLAG(IS_WIN)
++#include <windows.h>
++#endif
+ 
+ namespace mojo {
+ namespace core {
+ 
+-BrokerHost::BrokerHost(PlatformChannelEndpoint endpoint) {
++BrokerHost::BrokerHost(base::Process client_process,
++                       ConnectionParams connection_params,
++                       const ProcessErrorCallback& process_error_callback)
++    : process_error_callback_(process_error_callback)
++#if BUILDFLAG(IS_WIN)
++      ,
++      client_process_(std::move(client_process))
++#endif
++{
+   base::CurrentThread::Get()->AddDestructionObserver(this);
+-  CHECK(endpoint.is_valid());
+-  channel_ = Channel::Create(this, ConnectionParams(std::move(endpoint)),
+-                             Channel::HandlePolicy::kRejectHandles,
++  CHECK(connection_params.endpoint().is_valid());
++  channel_ = Channel::Create(this, std::move(connection_params),
++#if BUILDFLAG(IS_WIN)
++                             client_process_
++#else
++                             client_process
++#endif
++                                     .IsValid()
++                                 ? Channel::HandlePolicy::kAcceptHandles
++                                 : Channel::HandlePolicy::kRejectHandles,
+                              base::SingleThreadTaskRunner::GetCurrentDefault());
+   channel_->Start();
+ }
+@@ -37,6 +60,66 @@ BrokerHost::~BrokerHost() {
+   }
+ }
+ 
++bool BrokerHost::PrepareHandlesForClient(
++    std::vector<PlatformHandleInTransit>* handles) {
++#if BUILDFLAG(IS_WIN)
++  if (!client_process_.IsValid()) {
++    return false;
++  }
++  bool handles_ok = true;
++  for (auto& handle : *handles) {
++    if (!handle.TransferToProcess(client_process_.Duplicate())) {
++      handles_ok = false;
++    }
++  }
++  return handles_ok;
++#else
++  return true;
++#endif
++}
++
++bool BrokerHost::SendChannel(PlatformHandle handle) {
++  CHECK(handle.is_valid());
++  CHECK(channel_);
++
++#if BUILDFLAG(IS_WIN)
++  InitData* data;
++  Channel::MessagePtr message =
++      CreateBrokerMessage(BrokerMessageType::INIT, 1, 0, &data);
++  data->pipe_name_length = 0;
++#else
++  Channel::MessagePtr message =
++      CreateBrokerMessage(BrokerMessageType::INIT, 1, nullptr);
++#endif
++  std::vector<PlatformHandleInTransit> handles(1);
++  handles[0] = PlatformHandleInTransit(std::move(handle));
++
++  // This may legitimately fail on Windows if the client process is in another
++  // session, e.g., is an elevated process.
++  if (!PrepareHandlesForClient(&handles)) {
++    return false;
++  }
++
++  message->SetHandles(std::move(handles));
++  channel_->Write(std::move(message));
++  return true;
++}
++
++#if BUILDFLAG(IS_WIN)
++
++void BrokerHost::SendNamedChannel(std::wstring_view pipe_name) {
++  InitData* data;
++  wchar_t* name_data;
++  Channel::MessagePtr message = CreateBrokerMessage(
++      BrokerMessageType::INIT, 0, sizeof(*name_data) * pipe_name.length(),
++      &data, reinterpret_cast<void**>(&name_data));
++  data->pipe_name_length = static_cast<uint32_t>(pipe_name.length());
++  std::ranges::copy(pipe_name, name_data);
++  channel_->Write(std::move(message));
++}
++
++#endif  // BUILDFLAG(IS_WIN)
++
+ void BrokerHost::OnBufferRequest(uint32_t num_bytes) {
+   base::subtle::PlatformSharedMemoryRegion region =
+       base::subtle::PlatformSharedMemoryRegion::CreateWritable(num_bytes);
+@@ -44,15 +127,24 @@ void BrokerHost::OnBufferRequest(uint32_t num_bytes) {
+   std::vector<PlatformHandleInTransit> handles;
+   handles.reserve(2);
+   if (region.IsValid()) {
+-    base::subtle::ScopedFDPair fds = region.PassPlatformHandle();
+-    DCHECK(fds.readonly_fd.is_valid());
+-    handles.emplace_back(PlatformHandle(std::move(fds.fd)));
+-    handles.emplace_back(PlatformHandle(std::move(fds.readonly_fd)));
++    std::array<PlatformHandle, 2> h;
++    ExtractPlatformHandlesFromSharedMemoryRegionHandle(
++        region.PassPlatformHandle(), &h[0], &h[1]);
++    handles.emplace_back(std::move(h[0]));
++#if !BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_ANDROID) || \
++    BUILDFLAG(MOJO_USE_APPLE_CHANNEL)
++    // Non-POSIX systems, as well as Android and Mac, only use a single handle
++    // to represent a writable region.
++    DCHECK(!h[1].is_valid());
++#else
++    DCHECK(h[1].is_valid());
++    handles.emplace_back(std::move(h[1]));
++#endif
+   }
+ 
+   BufferResponseData* response;
+   Channel::MessagePtr message = CreateBrokerMessage(
+-      BrokerMessageType::BUFFER_RESPONSE, handles.size(), &response);
++      BrokerMessageType::BUFFER_RESPONSE, handles.size(), 0, &response);
+   if (handles.empty()) {
+     response->guid_high = 0;
+     response->guid_low = 0;
+@@ -60,6 +152,7 @@ void BrokerHost::OnBufferRequest(uint32_t num_bytes) {
+     const base::UnguessableToken& guid = region.GetGUID();
+     response->guid_high = guid.GetHighForSerialization();
+     response->guid_low = guid.GetLowForSerialization();
++    PrepareHandlesForClient(&handles);
+     message->SetHandles(std::move(handles));
+   }
+ 
+@@ -94,6 +187,11 @@ void BrokerHost::OnChannelMessage(
+ }
+ 
+ void BrokerHost::OnChannelError(Channel::Error error) {
++  if (process_error_callback_ &&
++      error == Channel::Error::kReceivedMalformedData) {
++    process_error_callback_.Run("Broker host received malformed message");
++  }
++
+   delete this;
+ }
+ 
+diff --git a/mojo/core/broker_host.h b/mojo/core/broker_host.h
+index a822c7f256131..33a1b52470f55 100644
+--- a/mojo/core/broker_host.h
++++ b/mojo/core/broker_host.h
+@@ -7,11 +7,17 @@
+ 
+ #include <stdint.h>
+ 
++#include <string_view>
+ #include <vector>
+ 
++#include "base/process/process.h"
++#include "base/process/process_handle.h"
+ #include "base/task/current_thread.h"
++#include "build/build_config.h"
+ #include "mojo/core/channel.h"
+-#include "mojo/public/cpp/platform/platform_channel_endpoint.h"
++#include "mojo/core/connection_params.h"
++#include "mojo/core/embedder/process_error_callback.h"
++#include "mojo/core/platform_handle_in_transit.h"
+ #include "mojo/public/cpp/platform/platform_handle.h"
+ 
+ namespace mojo {
+@@ -22,14 +28,26 @@ namespace core {
+ class BrokerHost : public Channel::Delegate,
+                    public base::CurrentThread::DestructionObserver {
+  public:
+-  explicit BrokerHost(PlatformChannelEndpoint endpoint);
++  BrokerHost(base::Process client_process,
++             ConnectionParams connection_params,
++             const ProcessErrorCallback& process_error_callback);
+ 
+   BrokerHost(const BrokerHost&) = delete;
+   BrokerHost& operator=(const BrokerHost&) = delete;
+ 
++  // Send |handle| to the client, to be used to establish a NodeChannel to us.
++  bool SendChannel(PlatformHandle handle);
++
++#if BUILDFLAG(IS_WIN)
++  // Sends a named channel to the client. Like above, but for named pipes.
++  void SendNamedChannel(std::wstring_view pipe_name);
++#endif
++
+  private:
+   ~BrokerHost() override;
+ 
++  bool PrepareHandlesForClient(std::vector<PlatformHandleInTransit>* handles);
++
+   // Channel::Delegate:
+   void OnChannelMessage(const void* payload,
+                         size_t payload_size,
+@@ -42,6 +60,12 @@ class BrokerHost : public Channel::Delegate,
+ 
+   void OnBufferRequest(uint32_t num_bytes);
+ 
++  const ProcessErrorCallback process_error_callback_;
++
++#if BUILDFLAG(IS_WIN)
++  base::Process client_process_;
++#endif
++
+   scoped_refptr<Channel> channel_;
+ };
+ 
+diff --git a/mojo/core/broker_messages.h b/mojo/core/broker_messages.h
+index 1bc234b821a09..451987c61ae39 100644
+--- a/mojo/core/broker_messages.h
++++ b/mojo/core/broker_messages.h
+@@ -6,6 +6,7 @@
+ #define MOJO_CORE_BROKER_MESSAGES_H_
+ 
+ #include "base/compiler_specific.h"
++#include "build/build_config.h"
+ #include "mojo/core/channel.h"
+ 
+ namespace mojo {
+@@ -14,8 +15,9 @@ namespace core {
+ #pragma pack(push, 1)
+ 
+ enum BrokerMessageType : uint32_t {
+-  BUFFER_REQUEST = 1,
+-  BUFFER_RESPONSE = 2,
++  INIT,
++  BUFFER_REQUEST,
++  BUFFER_RESPONSE,
+ };
+ 
+ struct BrokerMessageHeader {
+@@ -35,6 +37,15 @@ struct BufferResponseData {
+   uint64_t guid_low;
+ };
+ 
++#if BUILDFLAG(IS_WIN)
++struct InitData {
++  // NOTE: InitData in the payload is followed by string16 data with exactly
++  // |pipe_name_length| wide characters (i.e., |pipe_name_length|*2 bytes.)
++  // This applies to Windows only.
++  uint32_t pipe_name_length;
++};
++#endif
++
+ #pragma pack(pop)
+ 
+ template <typename T>
+@@ -50,11 +61,14 @@ inline bool GetBrokerMessageData(Channel::Message* message, T** out_data) {
+ }
+ 
+ template <typename T>
+-inline Channel::MessagePtr CreateBrokerMessage(BrokerMessageType type,
+-                                               size_t num_handles,
+-                                               T** out_message_data) {
+-  const size_t message_size =
+-      sizeof(BrokerMessageHeader) + sizeof(**out_message_data);
++inline Channel::MessagePtr CreateBrokerMessage(
++    BrokerMessageType type,
++    size_t num_handles,
++    size_t extra_data_size,
++    T** out_message_data,
++    void** out_extra_data = nullptr) {
++  const size_t message_size = sizeof(BrokerMessageHeader) +
++                              sizeof(**out_message_data) + extra_data_size;
+   Channel::MessagePtr message =
+       Channel::Message::CreateMessage(message_size, num_handles);
+   BrokerMessageHeader* header =
+@@ -62,6 +76,22 @@ inline Channel::MessagePtr CreateBrokerMessage(BrokerMessageType type,
+   header->type = type;
+   header->padding = 0;
+   *out_message_data = reinterpret_cast<T*>(UNSAFE_TODO(header + 1));
++  if (out_extra_data) {
++    *out_extra_data = UNSAFE_TODO(*out_message_data + 1);
++  }
++  return message;
++}
++
++inline Channel::MessagePtr CreateBrokerMessage(
++    BrokerMessageType type,
++    size_t num_handles,
++    std::nullptr_t** dummy_out_data) {
++  Channel::MessagePtr message =
++      Channel::Message::CreateMessage(sizeof(BrokerMessageHeader), num_handles);
++  BrokerMessageHeader* header =
++      reinterpret_cast<BrokerMessageHeader*>(message->mutable_payload());
++  header->type = type;
++  header->padding = 0;
+   return message;
+ }
+ 
+diff --git a/mojo/core/broker_posix.cc b/mojo/core/broker_posix.cc
+index 580a458f553aa..59e800ea6f11b 100644
+--- a/mojo/core/broker_posix.cc
++++ b/mojo/core/broker_posix.cc
+@@ -5,15 +5,18 @@
+ #include "mojo/core/broker.h"
+ 
+ #include <fcntl.h>
+-#include <sys/types.h>
++#include <unistd.h>
+ 
+ #include <utility>
+ #include <vector>
+ 
+ #include "base/logging.h"
+ #include "base/memory/platform_shared_memory_region.h"
++#include "build/build_config.h"
++#include "mojo/buildflags.h"
+ #include "mojo/core/broker_messages.h"
+ #include "mojo/core/channel.h"
++#include "mojo/core/platform_handle_utils.h"
+ #include "mojo/public/cpp/platform/socket_utils_posix.h"
+ 
+ namespace mojo {
+@@ -66,7 +69,8 @@ Channel::MessagePtr WaitForBrokerMessage(
+ 
+ }  // namespace
+ 
+-Broker::Broker(PlatformHandle handle) : sync_channel_(std::move(handle)) {
++Broker::Broker(PlatformHandle handle, bool wait_for_channel_handle)
++    : sync_channel_(std::move(handle)) {
+   CHECK(sync_channel_.is_valid());
+ 
+   int fd = sync_channel_.GetFD().get();
+@@ -75,17 +79,33 @@ Broker::Broker(PlatformHandle handle) : sync_channel_(std::move(handle)) {
+   PCHECK(flags != -1);
+   flags = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+   PCHECK(flags != -1);
++
++  if (!wait_for_channel_handle) {
++    return;
++  }
++
++  // Wait for the first message, which should contain a handle.
++  std::vector<PlatformHandle> incoming_platform_handles;
++  if (WaitForBrokerMessage(fd, BrokerMessageType::INIT, 1, 0,
++                           &incoming_platform_handles)) {
++    inviter_endpoint_ =
++        PlatformChannelEndpoint(std::move(incoming_platform_handles[0]));
++  }
+ }
+ 
+ Broker::~Broker() = default;
+ 
++PlatformChannelEndpoint Broker::GetInviterEndpoint() {
++  return std::move(inviter_endpoint_);
++}
++
+ base::WritableSharedMemoryRegion Broker::GetWritableSharedMemoryRegion(
+     size_t num_bytes) {
+   base::AutoLock lock(lock_);
+ 
+   BufferRequestData* buffer_request;
+   Channel::MessagePtr out_message = CreateBrokerMessage(
+-      BrokerMessageType::BUFFER_REQUEST, 0, &buffer_request);
++      BrokerMessageType::BUFFER_REQUEST, 0, 0, &buffer_request);
+   buffer_request->size = num_bytes;
+   ssize_t write_result =
+       SocketWrite(sync_channel_.GetFD().get(), out_message->data(),
+@@ -99,8 +119,14 @@ base::WritableSharedMemoryRegion Broker::GetWritableSharedMemoryRegion(
+     return base::WritableSharedMemoryRegion();
+   }
+ 
+-  // A writable region is sent as a writable and a read-only descriptor.
++#if !BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_ANDROID) || \
++    BUILDFLAG(MOJO_USE_APPLE_CHANNEL)
++  // Non-POSIX systems, as well as Android and Mac, only use a single handle to
++  // represent a writable region.
++  constexpr size_t kNumExpectedHandles = 1;
++#else
+   constexpr size_t kNumExpectedHandles = 2;
++#endif
+ 
+   std::vector<PlatformHandle> handles;
+   Channel::MessagePtr message = WaitForBrokerMessage(
+@@ -116,10 +142,13 @@ base::WritableSharedMemoryRegion Broker::GetWritableSharedMemoryRegion(
+     if (!guid.has_value()) {
+       return base::WritableSharedMemoryRegion();
+     }
++    if (handles.size() == 1) {
++      handles.emplace_back();
++    }
+     return base::WritableSharedMemoryRegion::Deserialize(
+         base::subtle::PlatformSharedMemoryRegion::Take(
+-            base::subtle::ScopedFDPair(handles[0].TakeFD(),
+-                                       handles[1].TakeFD()),
++            CreateSharedMemoryRegionHandleFromPlatformHandles(
++                std::move(handles[0]), std::move(handles[1])),
+             base::subtle::PlatformSharedMemoryRegion::Mode::kWritable,
+             num_bytes, guid.value()));
+   }
+diff --git a/mojo/core/broker_win.cc b/mojo/core/broker_win.cc
+new file mode 100644
+index 0000000000000..60409ae6baa0f
+--- /dev/null
++++ b/mojo/core/broker_win.cc
+@@ -0,0 +1,175 @@
++// Copyright 2016 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "mojo/core/broker.h"
++
++#include <windows.h>
++
++#include <limits>
++#include <utility>
++
++#include "base/compiler_specific.h"
++#include "base/debug/alias.h"
++#include "base/logging.h"
++#include "base/memory/platform_shared_memory_region.h"
++#include "base/notreached.h"
++#include "base/numerics/safe_conversions.h"
++#include "mojo/core/broker_messages.h"
++#include "mojo/core/channel.h"
++#include "mojo/core/platform_handle_utils.h"
++#include "mojo/public/cpp/platform/named_platform_channel.h"
++
++namespace mojo {
++namespace core {
++
++namespace {
++
++// 256 bytes should be enough for anyone!
++const size_t kMaxBrokerMessageSize = 256;
++
++bool TakeHandlesFromBrokerMessage(Channel::Message* message,
++                                  size_t num_handles,
++                                  PlatformHandle* out_handles) {
++  if (message->num_handles() != num_handles) {
++    DLOG(ERROR) << "Received unexpected number of handles in broker message";
++    return false;
++  }
++
++  std::vector<PlatformHandleInTransit> handles = message->TakeHandles();
++  DCHECK_EQ(handles.size(), num_handles);
++  DCHECK(out_handles);
++
++  for (size_t i = 0; i < num_handles; ++i) {
++    UNSAFE_TODO(out_handles[i]) = handles[i].TakeHandle();
++  }
++  return true;
++}
++
++Channel::MessagePtr WaitForBrokerMessage(HANDLE pipe_handle,
++                                         BrokerMessageType expected_type) {
++  char buffer[kMaxBrokerMessageSize];
++  DWORD bytes_read = 0;
++  BOOL result = ::ReadFile(pipe_handle, buffer, kMaxBrokerMessageSize,
++                           &bytes_read, nullptr);
++  if (!result) {
++    // The pipe may be broken if the browser side has been closed, e.g. during
++    // browser shutdown. In that case the ReadFile call will fail and we
++    // shouldn't continue waiting.
++    PLOG(ERROR) << "Error reading broker pipe";
++    return nullptr;
++  }
++
++  Channel::MessagePtr message =
++      Channel::Message::Deserialize(buffer, static_cast<size_t>(bytes_read),
++                                    Channel::HandlePolicy::kAcceptHandles);
++  if (!message || message->payload_size() < sizeof(BrokerMessageHeader)) {
++    LOG(ERROR) << "Invalid broker message";
++
++    base::debug::Alias(&buffer[0]);
++    base::debug::Alias(&bytes_read);
++    NOTREACHED();
++  }
++
++  const BrokerMessageHeader* header =
++      reinterpret_cast<const BrokerMessageHeader*>(message->payload());
++  if (header->type != expected_type) {
++    LOG(ERROR) << "Unexpected broker message type";
++
++    base::debug::Alias(&buffer[0]);
++    base::debug::Alias(&bytes_read);
++    NOTREACHED();
++  }
++
++  return message;
++}
++
++}  // namespace
++
++Broker::Broker(PlatformHandle handle, bool wait_for_channel_handle)
++    : sync_channel_(std::move(handle)) {
++  CHECK(sync_channel_.is_valid());
++  if (!wait_for_channel_handle) {
++    return;
++  }
++
++  Channel::MessagePtr message = WaitForBrokerMessage(
++      sync_channel_.GetHandle().Get(), BrokerMessageType::INIT);
++
++  // If we fail to read a message (broken pipe), just return early. The inviter
++  // handle will be null and callers must handle this gracefully.
++  if (!message) {
++    return;
++  }
++
++  PlatformHandle endpoint_handle;
++  if (TakeHandlesFromBrokerMessage(message.get(), 1, &endpoint_handle)) {
++    inviter_endpoint_ = PlatformChannelEndpoint(std::move(endpoint_handle));
++  } else {
++    // If the message has no handles, we expect it to carry pipe name instead.
++    const BrokerMessageHeader* header =
++        static_cast<const BrokerMessageHeader*>(message->payload());
++    CHECK_GE(message->payload_size(),
++             sizeof(BrokerMessageHeader) + sizeof(InitData));
++    const InitData* data =
++        reinterpret_cast<const InitData*>(UNSAFE_TODO(header + 1));
++    CHECK_EQ(message->payload_size(),
++             sizeof(BrokerMessageHeader) + sizeof(InitData) +
++                 data->pipe_name_length * sizeof(char16_t));
++    auto* name_data = reinterpret_cast<const wchar_t*>(UNSAFE_TODO(data + 1));
++    CHECK(data->pipe_name_length);
++    inviter_endpoint_ = NamedPlatformChannel::ConnectToServer(
++        NamedPlatformChannel::ServerName(name_data, data->pipe_name_length));
++  }
++}
++
++Broker::~Broker() = default;
++
++PlatformChannelEndpoint Broker::GetInviterEndpoint() {
++  return std::move(inviter_endpoint_);
++}
++
++base::WritableSharedMemoryRegion Broker::GetWritableSharedMemoryRegion(
++    size_t num_bytes) {
++  base::AutoLock lock(lock_);
++  BufferRequestData* buffer_request;
++  Channel::MessagePtr out_message = CreateBrokerMessage(
++      BrokerMessageType::BUFFER_REQUEST, 0, 0, &buffer_request);
++  buffer_request->size = base::checked_cast<uint32_t>(num_bytes);
++  DWORD bytes_written = 0;
++  BOOL result =
++      ::WriteFile(sync_channel_.GetHandle().Get(), out_message->data(),
++                  static_cast<DWORD>(out_message->data_num_bytes()),
++                  &bytes_written, nullptr);
++  if (!result ||
++      static_cast<size_t>(bytes_written) != out_message->data_num_bytes()) {
++    PLOG(ERROR) << "Error sending sync broker message";
++    return base::WritableSharedMemoryRegion();
++  }
++
++  PlatformHandle handle;
++  Channel::MessagePtr response = WaitForBrokerMessage(
++      sync_channel_.GetHandle().Get(), BrokerMessageType::BUFFER_RESPONSE);
++  if (response && TakeHandlesFromBrokerMessage(response.get(), 1, &handle)) {
++    BufferResponseData* data;
++    if (!GetBrokerMessageData(response.get(), &data)) {
++      return base::WritableSharedMemoryRegion();
++    }
++    std::optional<base::UnguessableToken> guid =
++        base::UnguessableToken::Deserialize(data->guid_high, data->guid_low);
++    if (!guid.has_value()) {
++      return base::WritableSharedMemoryRegion();
++    }
++    return base::WritableSharedMemoryRegion::Deserialize(
++        base::subtle::PlatformSharedMemoryRegion::Take(
++            CreateSharedMemoryRegionHandleFromPlatformHandles(std::move(handle),
++                                                              PlatformHandle()),
++            base::subtle::PlatformSharedMemoryRegion::Mode::kWritable,
++            num_bytes, guid.value()));
++  }
++
++  return base::WritableSharedMemoryRegion();
++}
++
++}  // namespace core
++}  // namespace mojo
+diff --git a/mojo/core/embedder/process_error_callback.h b/mojo/core/embedder/process_error_callback.h
+new file mode 100644
+index 0000000000000..130535feb324c
+--- /dev/null
++++ b/mojo/core/embedder/process_error_callback.h
+@@ -0,0 +1,21 @@
++// Copyright 2018 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef MOJO_CORE_EMBEDDER_PROCESS_ERROR_CALLBACK_H_
++#define MOJO_CORE_EMBEDDER_PROCESS_ERROR_CALLBACK_H_
++
++#include <string>
++
++#include "base/functional/callback_forward.h"
++
++namespace mojo {
++namespace core {
++
++using ProcessErrorCallback =
++    base::RepeatingCallback<void(const std::string& error)>;
++
++}  // namespace core
++}  // namespace mojo
++
++#endif  // MOJO_CORE_EMBEDDER_PROCESS_ERROR_CALLBACK_H_
+diff --git a/mojo/core/ipcz_driver/base_shared_memory_service.cc b/mojo/core/ipcz_driver/base_shared_memory_service.cc
+index 98cb0e4033336..8c9678a2ec3ff 100644
+--- a/mojo/core/ipcz_driver/base_shared_memory_service.cc
++++ b/mojo/core/ipcz_driver/base_shared_memory_service.cc
+@@ -7,14 +7,21 @@
+ #include <tuple>
+ #include <utility>
+ 
++#include "base/containers/circular_deque.h"
+ #include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/logging.h"
+ #include "base/memory/platform_shared_memory_region.h"
+ #include "base/memory/shared_memory_hooks.h"
+ #include "base/memory/shared_memory_mapping.h"
+ #include "base/memory/unsafe_shared_memory_region.h"
+ #include "base/memory/writable_shared_memory_region.h"
++#include "base/process/process.h"
+ #include "build/build_config.h"
++#include "mojo/core/broker.h"
++#include "mojo/core/broker_host.h"
++#include "mojo/core/configuration.h"
++#include "mojo/core/connection_params.h"
+ #include "mojo/core/ipcz_api.h"
+ #include "mojo/core/ipcz_driver/transport.h"
+ #include "mojo/core/scoped_ipcz_handle.h"
+@@ -23,16 +29,9 @@
+ #include "mojo/public/cpp/platform/platform_channel_endpoint.h"
+ #include "third_party/ipcz/include/ipcz/ipcz.h"
+ 
+-// Keep in sync with the condition guarding the broker sources in
+-// mojo/core/BUILD.gn.
+ #define SHARED_MEMORY_SERVICE_REQUIRED() \
+   BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_ANDROID)
+ 
+-#if SHARED_MEMORY_SERVICE_REQUIRED()
+-#include "mojo/core/broker.h"
+-#include "mojo/core/broker_host.h"
+-#endif
+-
+ namespace mojo::core::ipcz_driver {
+ 
+ namespace {
+@@ -40,8 +39,12 @@ namespace {
+ #if SHARED_MEMORY_SERVICE_REQUIRED()
+ 
+ void CreateBrokerHostOnIOThread(PlatformChannelEndpoint endpoint) {
+-  // Self-owned.
+-  new BrokerHost(std::move(endpoint));
++  // Self-owned. Note that a valid remote process handle is only needed by
++  // BrokerHost on Windows, but MojoIpcz doesn't yet support any version of
++  // Windows which requires use of the shared memory service (i.e., Windows
++  // versions older than 8.1).
++  new BrokerHost(base::Process(), ConnectionParams(std::move(endpoint)),
++                 base::NullCallback());
+ }
+ 
+ void CreateServiceFromNextParcel(ScopedIpczHandle portal) {
+@@ -177,7 +180,8 @@ void BaseSharedMemoryService::CreateClient(ScopedIpczHandle portal) {
+   if (result == IPCZ_RESULT_OK) {
+     // On success, ownership of the box is passed into the portal.
+     std::ignore = box.release();
+-    g_client = new Broker(channel.TakeLocalEndpoint().TakePlatformHandle());
++    g_client = new Broker(channel.TakeLocalEndpoint().TakePlatformHandle(),
++                          /*wait_for_channel_handle=*/false);
+   }
+ #endif
+ }
+diff --git a/mojo/core/platform_handle_utils.cc b/mojo/core/platform_handle_utils.cc
+index 52ca3f5432505..652e75e19e41a 100644
+--- a/mojo/core/platform_handle_utils.cc
++++ b/mojo/core/platform_handle_utils.cc
+@@ -8,13 +8,64 @@
+ 
+ #if BUILDFLAG(IS_FUCHSIA)
+ #include <lib/zx/process.h>
++#include <lib/zx/vmo.h>
++#elif BUILDFLAG(IS_POSIX)
++#include "base/files/scoped_file.h"
+ #elif BUILDFLAG(IS_WIN)
+ #include <windows.h>
++
++#include "base/win/scoped_handle.h"
++#endif
++
++#if BUILDFLAG(IS_APPLE)
++#include "base/apple/scoped_mach_port.h"
+ #endif
+ 
+ namespace mojo {
+ namespace core {
+ 
++void ExtractPlatformHandlesFromSharedMemoryRegionHandle(
++    base::subtle::ScopedPlatformSharedMemoryHandle handle,
++    PlatformHandle* extracted_handle,
++    PlatformHandle* extracted_readonly_handle) {
++#if BUILDFLAG(IS_WIN)
++  *extracted_handle = PlatformHandle(base::win::ScopedHandle(handle.Take()));
++#elif BUILDFLAG(IS_FUCHSIA)
++  *extracted_handle = PlatformHandle(std::move(handle));
++#elif BUILDFLAG(IS_APPLE)
++  // This is a Mach port. Same code as above and below, but separated for
++  // clarity.
++  *extracted_handle = PlatformHandle(std::move(handle));
++#elif BUILDFLAG(IS_ANDROID)
++  // This is a file descriptor. Same code as above, but separated for clarity.
++  *extracted_handle = PlatformHandle(std::move(handle));
++#else
++  *extracted_handle = PlatformHandle(std::move(handle.fd));
++  *extracted_readonly_handle = PlatformHandle(std::move(handle.readonly_fd));
++#endif
++}
++
++base::subtle::ScopedPlatformSharedMemoryHandle
++CreateSharedMemoryRegionHandleFromPlatformHandles(
++    PlatformHandle handle,
++    PlatformHandle readonly_handle) {
++#if BUILDFLAG(IS_WIN)
++  DCHECK(!readonly_handle.is_valid());
++  return handle.TakeHandle();
++#elif BUILDFLAG(IS_FUCHSIA)
++  DCHECK(!readonly_handle.is_valid());
++  return zx::vmo(handle.TakeHandle());
++#elif BUILDFLAG(IS_APPLE)
++  DCHECK(!readonly_handle.is_valid());
++  return handle.TakeMachSendRight();
++#elif BUILDFLAG(IS_ANDROID)
++  DCHECK(!readonly_handle.is_valid());
++  return handle.TakeFD();
++#else
++  return base::subtle::ScopedFDPair(handle.TakeFD(), readonly_handle.TakeFD());
++#endif
++}
++
+ MojoResult UnwrapAndClonePlatformProcessHandle(
+     const MojoPlatformProcessHandle* process_handle,
+     base::Process& process) {
+diff --git a/mojo/core/platform_handle_utils.h b/mojo/core/platform_handle_utils.h
+index f2be0a51b7d46..09b6ff4723508 100644
+--- a/mojo/core/platform_handle_utils.h
++++ b/mojo/core/platform_handle_utils.h
+@@ -5,13 +5,32 @@
+ #ifndef MOJO_CORE_PLATFORM_HANDLE_UTILS_H_
+ #define MOJO_CORE_PLATFORM_HANDLE_UTILS_H_
+ 
++#include "base/memory/platform_shared_memory_region.h"
+ #include "base/process/process.h"
++#include "mojo/core/system_impl_export.h"
+ #include "mojo/public/c/system/invitation.h"
++#include "mojo/public/c/system/platform_handle.h"
+ #include "mojo/public/c/system/types.h"
++#include "mojo/public/cpp/platform/platform_handle.h"
+ 
+ namespace mojo {
+ namespace core {
+ 
++// Converts a base shared memory platform handle into one (maybe two on POSIX)
++// PlatformHandle(s).
++MOJO_SYSTEM_IMPL_EXPORT void ExtractPlatformHandlesFromSharedMemoryRegionHandle(
++    base::subtle::ScopedPlatformSharedMemoryHandle handle,
++    PlatformHandle* extracted_handle,
++    PlatformHandle* extracted_readonly_handle);
++
++// Converts one (maybe two on POSIX) PlatformHandle(s) to a base shared memory
++// platform handle.
++MOJO_SYSTEM_IMPL_EXPORT
++base::subtle::ScopedPlatformSharedMemoryHandle
++CreateSharedMemoryRegionHandleFromPlatformHandles(
++    PlatformHandle handle,
++    PlatformHandle readonly_handle);
++
+ // Takes a MojoPlatformProcessHandle, which does not own the handle value
+ // contained within, duplicates the value, and stores the strongly-owned result
+ // in |process|.

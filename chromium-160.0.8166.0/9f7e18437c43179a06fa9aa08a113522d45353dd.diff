@@ -1,0 +1,26 @@
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index c3e606d881269..4909e74d565c1 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -7203,21 +7203,6 @@
+             ]
+         }
+     ],
+-    "EagerlyResolveCoreDllsImports": [
+-        {
+-            "platforms": [
+-                "windows"
+-            ],
+-            "experiments": [
+-                {
+-                    "name": "Enabled",
+-                    "enable_features": [
+-                        "EagerlyResolveCoreDllsImports"
+-                    ]
+-                }
+-            ]
+-        }
+-    ],
+     "EarlyCookieLoadOnPreconnect": [
+         {
+             "platforms": [

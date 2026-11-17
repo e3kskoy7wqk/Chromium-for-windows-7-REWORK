@@ -1,0 +1,1 @@
+Run DXGI initialization on worker thread    2026/11/4 4:07:10    2d493fb4a5c96d8e8976e3845343367bf31727d0

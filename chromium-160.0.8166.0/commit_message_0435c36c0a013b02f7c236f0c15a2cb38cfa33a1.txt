@@ -1,0 +1,1 @@
+[ui] Remove per-widget software compositing    2026/10/22 6:55:42    0435c36c0a013b02f7c236f0c15a2cb38cfa33a1

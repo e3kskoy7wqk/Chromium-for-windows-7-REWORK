@@ -1,0 +1,1 @@
+Reland of Link to DirectWrite directly, instead of calling LoadLibrary (patchset #1 id:1 of https://codereview.chromium.org/2127313002/ )    2016/8/9 4:50:59    99aa1722463f6eb9d3e39c9d3f9721cb4ddb7584

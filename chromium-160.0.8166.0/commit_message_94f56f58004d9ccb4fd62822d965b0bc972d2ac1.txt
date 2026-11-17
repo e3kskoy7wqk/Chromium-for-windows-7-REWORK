@@ -1,0 +1,1 @@
+Use GetTickCount64() instead of GetTickCount() in Windows, for portability    2026-05-13 18:47:40    94f56f58004d9ccb4fd62822d965b0bc972d2ac1

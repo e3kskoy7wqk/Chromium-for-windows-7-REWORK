@@ -1,0 +1,48 @@
+diff --git a/base/i18n/icu_util.cc b/base/i18n/icu_util.cc
+index ebcbcaade988b..c920bdd5d42ae 100644
+--- a/base/i18n/icu_util.cc
++++ b/base/i18n/icu_util.cc
+@@ -453,6 +453,22 @@ bool InitializeICU() {
+   return DoCommonInitialization();
+ }
+ 
++namespace {
++
++// ::PrefetchVirtualMemory() is only available on Windows 8 and above. Chrome
++// supports Windows 7, so we need to check for the function's presence
++// dynamically.
++using PrefetchVirtualMemoryPtr = decltype(&::PrefetchVirtualMemory);
++
++// Returns null if ::PrefetchVirtualMemory() is not available.
++PrefetchVirtualMemoryPtr GetPrefetchVirtualMemoryPtr() {
++  HMODULE kernel32_dll = ::GetModuleHandleA("kernel32.dll");
++  return reinterpret_cast<PrefetchVirtualMemoryPtr>(
++      GetProcAddress(kernel32_dll, "PrefetchVirtualMemory"));
++}
++
++}  // namespace
++
+ void PreReadIcuData() {
+ #if (ICU_UTIL_DATA_IMPL == ICU_UTIL_DATA_FILE) && BUILDFLAG(IS_WIN)
+   if (!g_icudtl_mapped_file || !g_icudtl_mapped_file->IsValid()) {
+@@ -468,9 +484,19 @@ void PreReadIcuData() {
+           [](span<const uint8_t> bytes) {
+             ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                     BlockingType::MAY_BLOCK);
++  // On Win8 and higher use ::PrefetchVirtualMemory(). This is better than a
++  // simple data file read, more from a RAM perspective than CPU. This is
++  // because reading the file as data results in double mapping to
++  // Image/executable pages for all pages of code executed.
++  static PrefetchVirtualMemoryPtr prefetch_virtual_memory =
++      GetPrefetchVirtualMemoryPtr();
++
++  if (prefetch_virtual_memory == nullptr)
++    return;
++
+             ::_WIN32_MEMORY_RANGE_ENTRY address_range = {
+                 const_cast<uint8_t*>(bytes.data()), bytes.size()};
+-            ::PrefetchVirtualMemory(::GetCurrentProcess(),
++            prefetch_virtual_memory(::GetCurrentProcess(),
+                                     /*NumberOfEntries=*/1, &address_range,
+                                     /*Flags=*/0);
+           },

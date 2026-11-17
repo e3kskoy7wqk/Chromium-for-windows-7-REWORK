@@ -1,0 +1,19 @@
+diff --git a/ui/base/ime/win/tsf_input_scope.cc b/ui/base/ime/win/tsf_input_scope.cc
+index f7e2f3198821a..e2a79de6f846f 100644
+--- a/ui/base/ime/win/tsf_input_scope.cc
++++ b/ui/base/ime/win/tsf_input_scope.cc
+@@ -100,6 +100,14 @@ class TSFInputScope final : public ITfInputScope {
+   volatile ULONG ref_count_;
+ };
+ 
++typedef HRESULT (WINAPI *SetInputScopesFunc)(HWND window_handle,
++                                             const InputScope* input_scope_list,
++                                             UINT num_input_scopes,
++                                             WCHAR**, /* unused */
++                                             UINT, /* unused */
++                                             WCHAR*, /* unused */
++                                             WCHAR* /* unused */);
++
+ InputScope ConvertTextInputTypeToInputScope(TextInputType text_input_type) {
+   // Following mapping is based in IE10 on Windows 8.
+   switch (text_input_type) {

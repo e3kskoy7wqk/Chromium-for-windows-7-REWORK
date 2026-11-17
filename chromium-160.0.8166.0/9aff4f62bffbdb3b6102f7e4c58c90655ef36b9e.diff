@@ -1,0 +1,28 @@
+diff --git a/testing/variations/fieldtrial_testing_config.json b/testing/variations/fieldtrial_testing_config.json
+index f7ffe314258a1..a66c255e3336f 100644
+--- a/testing/variations/fieldtrial_testing_config.json
++++ b/testing/variations/fieldtrial_testing_config.json
+@@ -7992,23 +7992,6 @@
+             ]
+         }
+     ],
+-    "FontDataServiceForCSSLocalFonts": [
+-        {
+-            "platforms": [
+-                "chromeos",
+-                "linux",
+-                "windows"
+-            ],
+-            "experiments": [
+-                {
+-                    "name": "Enabled_20261021",
+-                    "enable_features": [
+-                        "FontDataServiceForCSSLocalFonts"
+-                    ]
+-                }
+-            ]
+-        }
+-    ],
+     "FontDataServiceLinux": [
+         {
+             "platforms": [

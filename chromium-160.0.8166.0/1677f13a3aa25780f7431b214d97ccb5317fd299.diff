@@ -1,0 +1,143 @@
+diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
+index be226f07e6ad4..273c410dcfbbc 100644
+--- a/chrome/browser/about_flags.cc
++++ b/chrome/browser/about_flags.cc
+@@ -5616,6 +5616,13 @@ const FeatureEntry kFeatureEntries[] = {
+     {"enable-gpu-rasterization", flag_descriptions::kGpuRasterizationName,
+      flag_descriptions::kGpuRasterizationDescription, kOsAll,
+      MULTI_VALUE_TYPE(kEnableGpuRasterizationChoices)},
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
++    {"fallback-to-sw-if-gles3-not-supported",
++     flag_descriptions::kFallbackToSWIfGLES3NotSupportedName,
++     flag_descriptions::kFallbackToSWIfGLES3NotSupportedDescription,
++     kOsWin | kOsCrOS,
++     FEATURE_VALUE_TYPE(features::kFallbackToSWIfGLES3NotSupported)},
++#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+ #if BUILDFLAG(IS_WIN)
+     {"variable-system-font-support-on-windows",
+      flag_descriptions::kVariableSystemFontSupportOnWindowsName,
+diff --git a/chrome/browser/flag-metadata.json b/chrome/browser/flag-metadata.json
+index f86a13d314d28..8f541b0d8c15f 100644
+--- a/chrome/browser/flag-metadata.json
++++ b/chrome/browser/flag-metadata.json
+@@ -5161,6 +5161,14 @@
+     "owners": [ "khalidpeer@chromium.org", "chrome-journeys@google.com" ],
+     "expiry_milestone": 130
+   },
++  {
++    "name": "fallback-to-sw-if-gles3-not-supported",
++    "owners": [
++      "fangzhoug@chromium.org",
++      "chrome-gpu-team@google.com"
++    ],
++    "expiry_milestone": 155
++  },
+   {
+     "name": "fast-drm-master-drop",
+     "owners": [
+diff --git a/chrome/browser/flag_descriptions.h b/chrome/browser/flag_descriptions.h
+index b726023421881..70b63d817c7c1 100644
+--- a/chrome/browser/flag_descriptions.h
++++ b/chrome/browser/flag_descriptions.h
+@@ -3103,6 +3103,12 @@ inline constexpr char kChromeDarkNeutrals26Name[] = "Chrome Dark Neutrals 26";
+ inline constexpr char kChromeDarkNeutrals26Description[] =
+     "When enabled, updates the neutral palette for dark mode default theme";
+ 
++inline constexpr char kFallbackToSWIfGLES3NotSupportedName[] =
++    "Fallback to software if GLES3 is not supported";
++inline constexpr char kFallbackToSWIfGLES3NotSupportedDescription[] =
++    "Controls whether the GPU process falls back to software if GLES3 is not "
++    "supported.";
++
+ inline constexpr char kCoreAnimationBackdropFilterName[] =
+     "Core Animation Backdrop Filters";
+ inline constexpr char kCoreAnimationBackdropFilterDescription[] =
+diff --git a/gpu/command_buffer/service/service_utils.cc b/gpu/command_buffer/service/service_utils.cc
+index 4b8fa27cbb029..3d85930906863 100644
+--- a/gpu/command_buffer/service/service_utils.cc
++++ b/gpu/command_buffer/service/service_utils.cc
+@@ -157,7 +157,8 @@ gl::GLContextAttribs GenerateGLContextAttribsForDecoder(
+     if (IsWebGL2OrES3ContextType(context_type)) {
+       attribs.client_major_es_version = 3;
+       attribs.client_minor_es_version = 0;
+-      attribs.allow_es_version_fallback = false;
++      attribs.allow_es_version_fallback =
++          !features::ShouldFallbackToSWIfGLES3NotSupported();
+     } else {
+       DCHECK(IsWebGL1OrES2ContextType(context_type));
+       attribs.client_major_es_version = 2;
+diff --git a/gpu/config/gpu_info_collector.cc b/gpu/config/gpu_info_collector.cc
+index 0e75000d9ca5e..61bd5f54c4b56 100644
+--- a/gpu/config/gpu_info_collector.cc
++++ b/gpu/config/gpu_info_collector.cc
+@@ -35,6 +35,7 @@
+ #include "ui/gl/gl_bindings.h"
+ #include "ui/gl/gl_context.h"
+ #include "ui/gl/gl_egl_api_implementation.h"
++#include "ui/gl/gl_features.h"
+ #include "ui/gl/gl_implementation.h"
+ #include "ui/gl/gl_surface.h"
+ #include "ui/gl/gl_surface_egl.h"
+@@ -93,7 +94,8 @@ scoped_refptr<gl::GLSurface> InitializeGLSurface(gl::GLDisplay* display) {
+ scoped_refptr<gl::GLContext> InitializeGLContext(gl::GLSurface* surface) {
+   TRACE_EVENT("gpu,startup", "gpu_info_collector::InitializeGLContext");
+   gl::GLContextAttribs attribs;
+-  attribs.allow_es_version_fallback = false;
++  attribs.allow_es_version_fallback =
++      !features::ShouldFallbackToSWIfGLES3NotSupported();
+   scoped_refptr<gl::GLContext> context(
+       gl::init::CreateGLContext(nullptr, surface, attribs));
+   if (!context.get()) {
+diff --git a/ui/gl/gl_features.cc b/ui/gl/gl_features.cc
+index d35e3fcf5f4d3..aa4159df18d94 100644
+--- a/ui/gl/gl_features.cc
++++ b/ui/gl/gl_features.cc
+@@ -109,6 +109,12 @@ BASE_FEATURE(kDefaultPassthroughCommandDecoder,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ #endif  // BUILDFLAG(ENABLE_VALIDATING_COMMAND_DECODER)
+ 
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
++// Controls whether the GPU process falls back to software if GLES3 is not
++// supported.
++BASE_FEATURE(kFallbackToSWIfGLES3NotSupported,
++             base::FEATURE_ENABLED_BY_DEFAULT);
++#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+ 
+ #if BUILDFLAG(IS_WIN)
+ // If true, VsyncThreadWin will use the compositor clock
+@@ -275,6 +281,13 @@ void GetANGLEFeaturesFromCommandLineAndFinch(
+ #endif
+ }
+ 
++bool ShouldFallbackToSWIfGLES3NotSupported() {
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
++  return base::FeatureList::IsEnabled(kFallbackToSWIfGLES3NotSupported);
++#else   // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
++  return true;
++#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
++}
+ 
+ #if BUILDFLAG(ENABLE_SWIFTSHADER)
+ #if BUILDFLAG(IS_FUCHSIA)
+diff --git a/ui/gl/gl_features.h b/ui/gl/gl_features.h
+index 23d1c9b32b255..3cf409297779e 100644
+--- a/ui/gl/gl_features.h
++++ b/ui/gl/gl_features.h
+@@ -27,6 +27,9 @@ GL_EXPORT bool UseCompositorClockVSyncInterval();
+ GL_EXPORT BASE_DECLARE_FEATURE(kDefaultPassthroughCommandDecoder);
+ #endif
+ 
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
++GL_EXPORT BASE_DECLARE_FEATURE(kFallbackToSWIfGLES3NotSupported);
++#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+ #if BUILDFLAG(IS_WIN)
+ GL_EXPORT BASE_DECLARE_FEATURE(kUseCompositorClockVSyncInterval);
+ #endif  // BUILDFLAG(IS_WIN)
+@@ -50,6 +53,7 @@ GL_EXPORT void GetANGLEFeaturesFromCommandLineAndFinch(
+     std::vector<std::string>& enabled_angle_features,
+     std::vector<std::string>& disabled_angle_features);
+ 
++GL_EXPORT bool ShouldFallbackToSWIfGLES3NotSupported();
+ #if BUILDFLAG(IS_APPLE)
+ GL_EXPORT BASE_DECLARE_FEATURE(kANGLEPurgeableBufferPool);
+ #endif  // BUILDFLAG(IS_APPLE)

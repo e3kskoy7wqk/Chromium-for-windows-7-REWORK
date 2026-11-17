@@ -1,0 +1,106 @@
+diff --git a/third_party/libc++/src/src/filesystem/posix_compat.h b/third_party/libc++/src/src/filesystem/posix_compat.h
+index ddd99d8aa..8ff2fb226 100644
+--- a/third_party/libc++/src/src/filesystem/posix_compat.h
++++ b/third_party/libc++/src/src/filesystem/posix_compat.h
+@@ -146,9 +146,84 @@ private:
+   HANDLE h;
+ };
+ 
++//
++// Define the file information class values
++//
++// WARNING:  The order of the following values are assumed by the I/O system.
++//           Any changes made here should be reflected there as well.
++//
++
++typedef enum _FILE_INFORMATION_CLASS {
++// end_wdm
++    FileDirectoryInformation         = 1,
++    FileFullDirectoryInformation,   // 2
++    FileBothDirectoryInformation,   // 3
++    FileBasicInformation,           // 4  wdm
++    FileStandardInformation,        // 5  wdm
++    FileInternalInformation,        // 6
++    FileEaInformation,              // 7
++    FileAccessInformation,          // 8
++    FileNameInformation,            // 9
++    FileRenameInformation,          // 10
++    FileLinkInformation,            // 11
++    FileNamesInformation,           // 12
++    FileDispositionInformation,     // 13
++    FilePositionInformation,        // 14 wdm
++    FileFullEaInformation,          // 15
++    FileModeInformation,            // 16
++    FileAlignmentInformation,       // 17
++    FileAllInformation,             // 18
++    FileAllocationInformation,      // 19
++    FileEndOfFileInformation,       // 20 wdm
++    FileAlternateNameInformation,   // 21
++    FileStreamInformation,          // 22
++    FilePipeInformation,            // 23
++    FilePipeLocalInformation,       // 24
++    FilePipeRemoteInformation,      // 25
++    FileMailslotQueryInformation,   // 26
++    FileMailslotSetInformation,     // 27
++    FileCompressionInformation,     // 28
++    FileObjectIdInformation,        // 29
++    FileCompletionInformation,      // 30
++    FileMoveClusterInformation,     // 31
++    FileQuotaInformation,           // 32
++    FileReparsePointInformation,    // 33
++    FileNetworkOpenInformation,     // 34
++    FileAttributeTagInformation,    // 35
++    FileTrackingInformation,        // 36
++    FileIdBothDirectoryInformation, // 37
++    FileIdFullDirectoryInformation, // 38
++    FileValidDataLengthInformation, // 39
++    FileShortNameInformation,       // 40
++    FileMaximumInformation
++// begin_wdm
++} FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
++
++#define NT_SUCCESS(Status) ((NTSTATUS)(Status) >= 0)
++//
++// NT Status defs, macros (from ntstatus.h in NT project)
++//
++typedef LONG NTSTATUS;
++//
++// Define the base asynchronous I/O argument types
++//
++
++typedef struct _IO_STATUS_BLOCK {
++    union {
++        NTSTATUS Status;
++        PVOID Pointer;
++    };
++
++    ULONG_PTR Information;
++} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
++
++#pragma comment(lib, "ntdll.lib")
++EXTERN_C NTSYSAPI NTSTATUS  WINAPI NtQueryInformationFile(HANDLE,PIO_STATUS_BLOCK,PVOID,LONG,FILE_INFORMATION_CLASS);
++EXTERN_C NTSYSAPI NTSTATUS  WINAPI NtSetInformationFile(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+ inline int stat_handle(HANDLE h, StatT* buf) {
+   FILE_BASIC_INFO basic;
+-  if (!GetFileInformationByHandleEx(h, FileBasicInfo, &basic, sizeof(basic)))
++    IO_STATUS_BLOCK IoStatusBlock;
++  if (!NT_SUCCESS(NtQueryInformationFile(h,&IoStatusBlock, &basic, sizeof(basic), FileBasicInformation)))
+     return -1;
+   memset(buf, 0, sizeof(*buf));
+   buf->st_mtim = filetime_to_timespec(basic.LastWriteTime);
+@@ -163,13 +238,13 @@ inline int stat_handle(HANDLE h, StatT* buf) {
+   }
+   if (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+     FILE_ATTRIBUTE_TAG_INFO tag;
+-    if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)))
++    if (!NT_SUCCESS(NtQueryInformationFile(h,&IoStatusBlock, &tag, sizeof(tag), FileAttributeTagInformation)))
+       return -1;
+     if (tag.ReparseTag == IO_REPARSE_TAG_SYMLINK)
+       buf->st_mode = (buf->st_mode & ~_S_IFMT) | _S_IFLNK;
+   }
+   FILE_STANDARD_INFO standard;
+-  if (!GetFileInformationByHandleEx(h, FileStandardInfo, &standard, sizeof(standard)))
++  if (!NT_SUCCESS(NtQueryInformationFile(h,&IoStatusBlock, &standard, sizeof(standard), FileStandardInformation)))
+     return -1;
+   buf->st_nlink = standard.NumberOfLinks;
+   buf->st_size  = standard.EndOfFile.QuadPart;

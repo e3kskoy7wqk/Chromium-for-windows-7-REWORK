@@ -1,0 +1,1 @@
+Make Chrome shortcut support setting toast activator CLSID    2017/11/7 5:49:55    350a8e0f8ab9bf3e17555c395854fa4d8d43f0d6

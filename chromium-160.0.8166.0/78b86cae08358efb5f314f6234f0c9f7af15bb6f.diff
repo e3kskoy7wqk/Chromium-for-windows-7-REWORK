@@ -1,0 +1,51 @@
+diff --git a/ui/base/ime/win/tsf_text_store.cc b/ui/base/ime/win/tsf_text_store.cc
+index e4f43e94ba4df..36f4a51c0b19a 100644
+--- a/ui/base/ime/win/tsf_text_store.cc
++++ b/ui/base/ime/win/tsf_text_store.cc
+@@ -68,14 +68,6 @@ HRESULT TSFTextStore::Initialize() {
+     return hr;
+   }
+ 
+-  hr = ::CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr,
+-                          CLSCTX_INPROC_SERVER,
+-                          IID_PPV_ARGS(&input_processor_profile_mgr_));
+-  if (FAILED(hr)) {
+-    DVLOG(1) << "Failed to initialize InputProcessorProfileMgr.";
+-    return hr;
+-  }
+-
+   return S_OK;
+ }
+ 
+@@ -644,10 +636,8 @@ HRESULT TSFTextStore::RequestLock(DWORD lock_flags, HRESULT* result) {
+         is_tic_write_in_progress_ = false;
+       } else {
+         composition_start_ = selection_.start();
+-        if (!selection_.EqualsIgnoringDirection(selection_from_client_) &&
+-            !IsInputIME()) {
++        if (!selection_.EqualsIgnoringDirection(selection_from_client_))
+           text_input_client_->SetEditableSelectionRange(selection_);
+-        }
+         CalculateTextandSelectionDiffAndNotifyIfNeeded();
+       }
+       ResetCacheAfterEditSession();
+@@ -1490,7 +1480,7 @@ void TSFTextStore::CommitTextAndEndCompositionIfAny(size_t old_size,
+     text_input_client_->ClearCompositionText();
+   }
+ 
+-  if (!selection_.is_empty() && !IsInputIME() &&
++  if (!selection_.is_empty() && !is_selection_interim_char_ &&
+       selection_.GetMax() <= string_buffer_document_.size()) {
+     text_input_client_->SetEditableSelectionRange(selection_);
+   }
+@@ -1592,6 +1582,10 @@ void TSFTextStore::GetStyle(const TF_DISPLAYATTRIBUTE& attribute,
+ void TSFTextStore::ResetCacheAfterEditSession() {
+   // reset the flag since we've already inserted/replaced the text.
+   new_text_inserted_ = false;
++  if (is_selection_interim_char_) {
++    // Need to reset |selection_| for interim char selection.
++    selection_ = gfx::Range(selection_.GetMax());
++  }
+   is_selection_interim_char_ = false;
+   // reset |on_start_composition_called_| for next edit session.
+   on_start_composition_called_ = false;

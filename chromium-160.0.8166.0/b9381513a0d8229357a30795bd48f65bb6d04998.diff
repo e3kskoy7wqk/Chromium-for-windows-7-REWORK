@@ -1,0 +1,229 @@
+diff --git a/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm b/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm
+index 061927645f875..f689b344c96e4 100644
+--- a/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm
++++ b/chrome/browser/apps/app_shim/app_shim_listener_browsertest.mm
+@@ -42,6 +42,7 @@
+ #include "mojo/public/cpp/platform/named_platform_channel.h"
+ #include "mojo/public/cpp/platform/platform_channel.h"
+ #include "mojo/public/cpp/system/handle.h"
++#include "mojo/public/cpp/system/isolated_connection.h"
+ #include "third_party/ipcz/include/ipcz/ipcz.h"
+ 
+ // A test version of the AppShimController mojo client in chrome_main_app_mode.
+@@ -134,6 +135,7 @@ class TestShimClient : public chrome::mojom::AppShim {
+     return mojo::ScopedMessagePipeHandle(mojo::MessagePipeHandle(portals[1]));
+   }
+ 
++  mojo::IsolatedConnection mojo_connection_;
+   mojo::ScopedHandle secondary_ipcz_broker_;
+   mojo::Receiver<chrome::mojom::AppShim> shim_receiver_{this};
+   mojo::Remote<chrome::mojom::AppShimHost> host_;
+diff --git a/mojo/core/core_ipcz_test.cc b/mojo/core/core_ipcz_test.cc
+index d2ed1033c5e5e..ea6ae1614658d 100644
+--- a/mojo/core/core_ipcz_test.cc
++++ b/mojo/core/core_ipcz_test.cc
+@@ -12,9 +12,11 @@
+ #include "base/containers/span.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/synchronization/waitable_event.h"
++#include "build/build_config.h"
+ #include "mojo/core/ipcz_api.h"
+ #include "mojo/core/ipcz_driver/transport.h"
+ #include "mojo/core/test/mojo_test_base.h"
++#include "mojo/public/c/system/invitation.h"
+ #include "mojo/public/c/system/thunks.h"
+ #include "mojo/public/cpp/platform/platform_channel.h"
+ #include "mojo/public/cpp/platform/platform_handle.h"
+@@ -24,6 +26,12 @@
+ namespace mojo::core {
+ namespace {
+ 
++struct InvitationDetails {
++  MojoPlatformProcessHandle process;
++  MojoPlatformHandle handle;
++  MojoInvitationTransportEndpoint endpoint;
++};
++
+ // Basic smoke tests for the Mojo Core API as implemented over ipcz.
+ class CoreIpczTest : public test::MojoTestBase {
+  public:
+@@ -31,6 +39,14 @@ class CoreIpczTest : public test::MojoTestBase {
+   const IpczAPI& ipcz() const { return GetIpczAPI(); }
+   IpczHandle node() const { return GetIpczNode(); }
+ 
++  CoreIpczTest() : CoreIpczTest(/*is_broker=*/true) {}
++
++  enum { kForClient };
++  explicit CoreIpczTest(decltype(kForClient))
++      : CoreIpczTest(/*is_broker=*/false) {}
++
++  ~CoreIpczTest() override = default;
++
+   MojoMessageHandle CreateMessage(std::string_view contents,
+                                   base::span<MojoHandle> handles = {}) {
+     MojoMessageHandle message;
+@@ -71,6 +87,51 @@ class CoreIpczTest : public test::MojoTestBase {
+     return details;
+   }
+ 
++  static void CreateAndShareInvitationTransport(MojoHandle pipe,
++                                                const base::Process& process,
++                                                InvitationDetails& details) {
++    PlatformChannel channel;
++    MojoHandle handle_for_client =
++        WrapPlatformHandle(channel.TakeRemoteEndpoint().TakePlatformHandle())
++            .release()
++            .value();
++    WriteMessageWithHandles(pipe, "", &handle_for_client, 1);
++
++    details.process.struct_size = sizeof(details.process);
++#if BUILDFLAG(IS_WIN)
++    details.process.value =
++        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(process.Handle()));
++#else
++    details.process.value = static_cast<uint64_t>(process.Handle());
++#endif
++
++    details.handle.struct_size = sizeof(details.handle);
++    PlatformHandle::ToMojoPlatformHandle(
++        channel.TakeLocalEndpoint().TakePlatformHandle(), &details.handle);
++    details.endpoint = {
++        .struct_size = sizeof(details.endpoint),
++        .type = MOJO_INVITATION_TRANSPORT_TYPE_CHANNEL,
++        .num_platform_handles = 1,
++        .platform_handles = &details.handle,
++    };
++  }
++
++  static void ReceiveInvitationTransport(MojoHandle pipe,
++                                         InvitationDetails& details) {
++    MojoHandle handle;
++    ReadMessageWithHandles(pipe, &handle, 1);
++
++    details.handle.struct_size = sizeof(details.handle);
++    PlatformHandle::ToMojoPlatformHandle(
++        UnwrapPlatformHandle(ScopedHandle(Handle(handle))), &details.handle);
++    details.endpoint = {
++        .struct_size = sizeof(details.endpoint),
++        .type = MOJO_INVITATION_TRANSPORT_TYPE_CHANNEL,
++        .num_platform_handles = 1,
++        .platform_handles = &details.handle,
++    };
++  }
++
+   void WriteToMessagePipe(MojoHandle pipe, std::string_view contents) {
+     MojoMessageHandle message = CreateMessage(contents);
+     EXPECT_EQ(MOJO_RESULT_OK, mojo().WriteMessage(pipe, message, nullptr));
+@@ -135,6 +196,8 @@ class CoreIpczTest : public test::MojoTestBase {
+   }
+ 
+  private:
++  explicit CoreIpczTest(bool is_broker) {}
++
+   const raw_ptr<const MojoSystemThunks2> mojo_{GetMojoIpczImpl()};
+ };
+ 
+@@ -171,6 +234,11 @@ class ChannelPeerClosureListener {
+   scoped_refptr<ipcz_driver::Transport> transport_;
+ };
+ 
++class CoreIpczTestClient : public CoreIpczTest {
++ public:
++  CoreIpczTestClient() : CoreIpczTest(kForClient) {}
++};
++
+ TEST_F(CoreIpczTest, Close) {
+   // With ipcz-based Mojo Core, Mojo handles are ipcz handles. So Mojo Close()
+   // forwards to ipcz Close().
+diff --git a/mojo/core/embedder/configuration.h b/mojo/core/embedder/configuration.h
+index 448355b5ae7d7..f105900688b40 100644
+--- a/mojo/core/embedder/configuration.h
++++ b/mojo/core/embedder/configuration.h
+@@ -22,6 +22,13 @@ struct Configuration {
+   // relevant in multiprocess environments.
+   bool is_broker_process = false;
+ 
++  // Forcibly disables the Mojo's ipcz-based implementation. This is an
++  // alternative to manual feature override for applications which don't use
++  // base::FeatureList.
++  //
++  // TODO(crbug.com/40058840): Remove this once dependents are gone.
++  bool disable_ipcz = false;
++
+   // If |true|, this process will always attempt to allocate shared memory
+   // directly rather than synchronously delegating to a broker process where
+   // applicable.
+diff --git a/mojo/core/embedder/embedder.cc b/mojo/core/embedder/embedder.cc
+index cfaa689b7d083..74f9820330680 100644
+--- a/mojo/core/embedder/embedder.cc
++++ b/mojo/core/embedder/embedder.cc
+@@ -64,6 +64,8 @@ void InitFeatures() {
+ void Init(const Configuration& configuration) {
+   internal::g_configuration = configuration;
+ 
++  CHECK(!configuration.disable_ipcz);
++
+   CHECK(InitializeIpczNodeForProcess({
+       .is_broker = configuration.is_broker_process,
+       .use_local_shared_memory_allocation =
+diff --git a/mojo/core/embedder/scoped_ipc_support.cc b/mojo/core/embedder/scoped_ipc_support.cc
+index df1a4f325228d..9554bfff62502 100644
+--- a/mojo/core/embedder/scoped_ipc_support.cc
++++ b/mojo/core/embedder/scoped_ipc_support.cc
+@@ -11,10 +11,15 @@ namespace mojo::core {
+ 
+ ScopedIPCSupport::ScopedIPCSupport(
+     scoped_refptr<base::SingleThreadTaskRunner> io_thread_task_runner,
+-    ShutdownPolicy) {
++    ShutdownPolicy shutdown_policy)
++    : shutdown_policy_(shutdown_policy) {
+   ipcz_driver::Transport::SetIOTaskRunner(io_thread_task_runner);
+ }
+ 
+-ScopedIPCSupport::~ScopedIPCSupport() = default;
++ScopedIPCSupport::~ScopedIPCSupport() {
++  // No extra shutdown required for mojo-ipcz.
++  // Suppress -Wunused-private-field warning.
++  (void)shutdown_policy_;
++}
+ 
+ }  // namespace mojo::core
+diff --git a/mojo/core/embedder/scoped_ipc_support.h b/mojo/core/embedder/scoped_ipc_support.h
+index b4c2b05c93a46..0cb35e245cb08 100644
+--- a/mojo/core/embedder/scoped_ipc_support.h
++++ b/mojo/core/embedder/scoped_ipc_support.h
+@@ -113,6 +113,9 @@ class COMPONENT_EXPORT(MOJO_CORE_EMBEDDER) ScopedIPCSupport {
+   ScopedIPCSupport& operator=(const ScopedIPCSupport&) = delete;
+ 
+   ~ScopedIPCSupport();
++
++ private:
++  const ShutdownPolicy shutdown_policy_;
+ };
+ 
+ }  // namespace core
+diff --git a/mojo/core/invitation_unittest.cc b/mojo/core/invitation_unittest.cc
+index 353b3d9af7df5..14c314a721839 100644
+--- a/mojo/core/invitation_unittest.cc
++++ b/mojo/core/invitation_unittest.cc
+@@ -415,10 +415,17 @@ class TestClientBase : public MAYBE_InvitationTest {
+   TestClientBase(const TestClientBase&) = delete;
+   TestClientBase& operator=(const TestClientBase&) = delete;
+ 
+-  static MojoHandle AcceptInvitation(MojoAcceptInvitationFlags flags) {
++  static MojoHandle AcceptInvitation(MojoAcceptInvitationFlags flags,
++                                     std::string_view switch_name = {}) {
+     const auto& command_line = *base::CommandLine::ForCurrentProcess();
+-    PlatformChannelEndpoint channel_endpoint =
+-        PlatformChannel::RecoverPassedEndpointFromCommandLine(command_line);
++    PlatformChannelEndpoint channel_endpoint;
++    if (switch_name.empty()) {
++      channel_endpoint =
++          PlatformChannel::RecoverPassedEndpointFromCommandLine(command_line);
++    } else {
++      channel_endpoint = PlatformChannel::RecoverPassedEndpointFromString(
++          command_line.GetSwitchValueASCII(switch_name));
++    }
+     MojoPlatformHandle endpoint_handle;
+     PlatformHandle::ToMojoPlatformHandle(channel_endpoint.TakePlatformHandle(),
+                                          &endpoint_handle);

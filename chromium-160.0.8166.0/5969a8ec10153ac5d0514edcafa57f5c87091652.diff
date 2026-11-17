@@ -1,0 +1,48 @@
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index f89325d420865..efa24d64852be 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -116,12 +116,26 @@ void UpdateMouseLockRegion(aura::Window* window, bool locked) {
+ // rectangle, even for `WDA_NONE` (https://crbug.com/359921643), so avoid
+ // needless calls. Returns whether `affinity` is now in effect.
+ bool SetDisplayAffinityIfChanged(HWND hwnd, DWORD affinity) {
++    typedef BOOL(WINAPI *GetWindowDisplayAffinity_t)(HWND, DWORD *);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    GetWindowDisplayAffinity_t pfnGetWindowDisplayAffinity =
++        (GetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "GetWindowDisplayAffinity");
++    typedef BOOL(WINAPI *SetWindowDisplayAffinity_t)(HWND, DWORD);
++
++    SetWindowDisplayAffinity_t pfnSetWindowDisplayAffinity =
++        (SetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "SetWindowDisplayAffinity");
++    if (!pfnGetWindowDisplayAffinity || !pfnSetWindowDisplayAffinity)
++    {
++        return false;
++    }
++
+   DWORD current_affinity = WDA_NONE;
+-  if (::GetWindowDisplayAffinity(hwnd, &current_affinity) &&
++  if (pfnGetWindowDisplayAffinity(hwnd, &current_affinity) &&
+       current_affinity == affinity) {
+     return true;
+   }
+-  return ::SetWindowDisplayAffinity(hwnd, affinity);
++  return pfnSetWindowDisplayAffinity(hwnd, affinity);
+ }
+ 
+ // Applies display affinity to all active Win32 native system/popup menu
+@@ -1686,7 +1698,13 @@ void DesktopWindowTreeHostWin::UpdateDisplayAffinity() {
+     HWND owner_hwnd = ::GetWindow(GetHWND(), GW_OWNER);
+     if (owner_hwnd) {
+       DWORD owner_affinity = WDA_NONE;
+-      if (::GetWindowDisplayAffinity(owner_hwnd, &owner_affinity) &&
++    typedef BOOL(WINAPI *GetWindowDisplayAffinity_t)(HWND, DWORD *);
++
++    HMODULE dllUser32 = LoadLibraryW(L"user32.dll");
++    GetWindowDisplayAffinity_t pfnGetWindowDisplayAffinity =
++        (GetWindowDisplayAffinity_t)GetProcAddress(dllUser32, "GetWindowDisplayAffinity");
++    if (pfnGetWindowDisplayAffinity)
++      if (pfnGetWindowDisplayAffinity(owner_hwnd, &owner_affinity) &&
+           owner_affinity != WDA_NONE) {
+         affinity = owner_affinity;
+       }

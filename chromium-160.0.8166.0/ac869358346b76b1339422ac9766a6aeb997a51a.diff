@@ -1,0 +1,50 @@
+diff --git a/ui/base/fullscreen_win.cc b/ui/base/fullscreen_win.cc
+index b82f96f3ea940..924a1be7b5029 100644
+--- a/ui/base/fullscreen_win.cc
++++ b/ui/base/fullscreen_win.cc
+@@ -7,17 +7,40 @@
+ #include <windows.h>
+ 
+ #include <shellapi.h>
++#include "base/win/windows_version.h"
+ 
+ namespace ui {
+ 
+ namespace {
+ 
+ bool IsPlatformFullScreenMode() {
+-  QUERY_USER_NOTIFICATION_STATE state = {};
+-  if (FAILED(::SHQueryUserNotificationState(&state)))
+-    return false;
+-  return state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+-         state == QUNS_PRESENTATION_MODE;
++  // SHQueryUserNotificationState is only available for Vista and above.
++#if defined(NTDDI_VERSION) && (NTDDI_VERSION >= NTDDI_VISTA)
++  if (base::win::GetVersion() < base::win::Version::VISTA)
++    return false;
++
++  typedef HRESULT(WINAPI *SHQueryUserNotificationStatePtr)(
++      QUERY_USER_NOTIFICATION_STATE* state);
++
++  HMODULE shell32_base = ::GetModuleHandle(L"shell32.dll");
++  if (!shell32_base) {
++    return false;
++  }
++  SHQueryUserNotificationStatePtr query_user_notification_state_ptr =
++        reinterpret_cast<SHQueryUserNotificationStatePtr>
++            (::GetProcAddress(shell32_base, "SHQueryUserNotificationState"));
++  if (!query_user_notification_state_ptr) {
++    return false;
++  }
++
++  QUERY_USER_NOTIFICATION_STATE state;
++  if (FAILED((*query_user_notification_state_ptr)(&state)))
++    return false;
++  return state == QUNS_RUNNING_D3D_FULL_SCREEN ||
++         state == QUNS_PRESENTATION_MODE;
++#else
++  return false;
++#endif
+ }
+ 
+ bool IsFullScreenWindowMode() {

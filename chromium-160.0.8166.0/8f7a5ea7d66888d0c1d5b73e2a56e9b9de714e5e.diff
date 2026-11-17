@@ -1,0 +1,81 @@
+diff --git a/chrome/browser/media/router/discovery/discovery_network_list_win.cc b/chrome/browser/media/router/discovery/discovery_network_list_win.cc
+index f1d4a35364b27..3822b180a7933 100644
+--- a/chrome/browser/media/router/discovery/discovery_network_list_win.cc
++++ b/chrome/browser/media/router/discovery/discovery_network_list_win.cc
+@@ -32,10 +32,26 @@ struct GuidOperatorLess {
+ }
+ 
+ void IfTable2Deleter(PMIB_IF_TABLE2 interface_table) {
++  // This is available on Vista+ only.
++  HMODULE library = ::LoadLibraryW(L"Iphlpapi.dll");
++
++  typedef DWORD (NETIOAPI_API_ *GetIfTablePtr)(PMIB_IF_TABLE2*);
++  typedef void (NETIOAPI_API_ *FreeMibTablePtr)(PMIB_IF_TABLE2);
++
++  GetIfTablePtr getIfTable = reinterpret_cast<GetIfTablePtr>(
++      ::GetProcAddress(library, "GetIfTable2"));
++  FreeMibTablePtr freeMibTablePtr = reinterpret_cast<FreeMibTablePtr>(
++      ::GetProcAddress(library, "FreeMibTable"));
++  if (getIfTable == NULL || freeMibTablePtr == NULL) {
++    FreeLibrary(library);
++    return;
++  }
++
+   if (interface_table) {
+-    GetWindowsOsApi().ip_helper_api.free_mib_table_callback.Run(
++    freeMibTablePtr(
+         interface_table);
+   }
++  ::FreeLibrary(library);
+ }
+ 
+ }  // namespace
+@@ -128,9 +144,25 @@ class ScopedWlanClientHandle {
+ // enumerates all network interfaces, not just wireless interfaces.
+ base::small_map<std::map<GUID, std::string, GuidOperatorLess>>
+ GetInterfaceGuidMacMap() {
++  // This is available on Vista+ only.
++  HMODULE library = ::LoadLibraryW(L"Iphlpapi.dll");
++
++  typedef DWORD (NETIOAPI_API_ *GetIfTablePtr)(PMIB_IF_TABLE2*);
++  typedef void (NETIOAPI_API_ *FreeMibTablePtr)(PMIB_IF_TABLE2);
++
++  GetIfTablePtr getIfTable = reinterpret_cast<GetIfTablePtr>(
++      ::GetProcAddress(library, "GetIfTable2"));
++  FreeMibTablePtr freeMibTablePtr = reinterpret_cast<FreeMibTablePtr>(
++      ::GetProcAddress(library, "FreeMibTable"));
++  if (getIfTable == NULL || freeMibTablePtr == NULL) {
++    FreeLibrary(library);
++    return {};
++  }
++
+   PMIB_IF_TABLE2 interface_table_raw = nullptr;
+-  auto result = GetWindowsOsApi().ip_helper_api.get_if_table2_callback.Run(
++  auto result = getIfTable(
+       &interface_table_raw);
++  ::FreeLibrary(library);
+   if (result != ERROR_SUCCESS) {
+     return {};
+   }
+diff --git a/chrome/browser/media/router/discovery/discovery_network_list_win.h b/chrome/browser/media/router/discovery/discovery_network_list_win.h
+index d58a80c5858a9..6584729c3892d 100644
+--- a/chrome/browser/media/router/discovery/discovery_network_list_win.h
++++ b/chrome/browser/media/router/discovery/discovery_network_list_win.h
+@@ -89,17 +89,6 @@ struct WindowsOsApi {
+                                       ULONG* size_pointer)>;
+     GetAdaptersAddressesCallback get_adapters_addresses_callback =
+         base::BindRepeating(&GetAdaptersAddresses);
+-
+-    // https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2
+-    using GetIfTable2Callback =
+-        base::RepeatingCallback<DWORD(MIB_IF_TABLE2** out_table)>;
+-    GetIfTable2Callback get_if_table2_callback =
+-        base::BindRepeating(&GetIfTable2);
+-
+-    // https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-freemibtable
+-    using FreeMibTableCallback = base::RepeatingCallback<void(void* table)>;
+-    FreeMibTableCallback free_mib_table_callback =
+-        base::BindRepeating(&FreeMibTable);
+   };
+   IpHelperApi ip_helper_api;
+ 

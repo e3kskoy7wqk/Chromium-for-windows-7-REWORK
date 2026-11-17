@@ -1,0 +1,40 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/time/time_win.cc b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/time/time_win.cc
+index b68e825b23711..3b1896b4fd991 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/time/time_win.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/time/time_win.cc
+@@ -78,7 +78,14 @@ FILETIME MicrosecondsToFileTime(int64_t us) {
+ 
+ int64_t CurrentWallclockMicroseconds() {
+   FILETIME ft;
+-  ::GetSystemTimePreciseAsFileTime(&ft);
++typedef void(WINAPI* GetSystemTimeAsFileTimePtr)(LPFILETIME);
++
++  GetSystemTimeAsFileTimePtr fp;
++    fp = (GetSystemTimeAsFileTimePtr)(void*)GetProcAddress(
++        GetModuleHandleW(L"kernel32.dll"), "GetSystemTimePreciseAsFileTime");
++    if (fp == nullptr)
++      fp = GetSystemTimeAsFileTime;
++  fp(&ft);
+   return FileTimeToMicroseconds(ft);
+ }
+ 
+diff --git a/base/time/time_win.cc b/base/time/time_win.cc
+index 587dc3e432778..5d496940a9987 100644
+--- a/base/time/time_win.cc
++++ b/base/time/time_win.cc
+@@ -79,7 +79,14 @@ FILETIME MicrosecondsToFileTime(int64_t us) {
+ 
+ int64_t CurrentWallclockMicroseconds() {
+   FILETIME ft;
+-  ::GetSystemTimePreciseAsFileTime(&ft);
++typedef void(WINAPI* GetSystemTimeAsFileTimePtr)(LPFILETIME);
++
++  GetSystemTimeAsFileTimePtr fp;
++    fp = (GetSystemTimeAsFileTimePtr)(void*)GetProcAddress(
++        GetModuleHandleW(L"kernel32.dll"), "GetSystemTimePreciseAsFileTime");
++    if (fp == nullptr)
++      fp = GetSystemTimeAsFileTime;
++  fp(&ft);
+   return FileTimeToMicroseconds(ft);
+ }
+ 

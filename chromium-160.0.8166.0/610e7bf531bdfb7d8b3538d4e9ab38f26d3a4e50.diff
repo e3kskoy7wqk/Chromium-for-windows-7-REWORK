@@ -1,0 +1,1113 @@
+diff --git a/mojo/core/BUILD.gn b/mojo/core/BUILD.gn
+index 01c332518506e..8c64e80fbd8a2 100644
+--- a/mojo/core/BUILD.gn
++++ b/mojo/core/BUILD.gn
+@@ -127,14 +127,11 @@ source_set("impl_for_embedder") {
+   # ipcz_driver/base_shared_memory_service.cc.
+   if (is_posix && !is_apple && !is_android) {
+     sources += [
+-      "broker_host.cc",
+-      "broker_posix.cc",
+-    ]
+-
+-    public += [
+       "broker.h",
++      "broker_host.cc",
+       "broker_host.h",
+       "broker_messages.h",
++      "broker_posix.cc",
+     ]
+   }
+ 
+@@ -176,11 +173,6 @@ source_set("test_sources") {
+     "trap_unittest.cc",
+   ]
+ 
+-  # Keep in sync with the condition guarding the broker sources above.
+-  if (is_posix && !is_apple && !is_android) {
+-    sources += [ "broker_unittest.cc" ]
+-  }
+-
+   if (use_blink) {
+     sources += [
+       "data_pipe_unittest.cc",
+diff --git a/mojo/core/broker.h b/mojo/core/broker.h
+index 79926a05a2efb..dd71e5a329bc8 100644
+--- a/mojo/core/broker.h
++++ b/mojo/core/broker.h
+@@ -5,26 +5,18 @@
+ #ifndef MOJO_CORE_BROKER_H_
+ #define MOJO_CORE_BROKER_H_
+ 
+-#include <stddef.h>
+-
+-#include "base/files/scoped_file.h"
+ #include "base/memory/writable_shared_memory_region.h"
+ #include "base/synchronization/lock.h"
+-#include "base/thread_annotations.h"
+-#include "mojo/core/system_impl_export.h"
+-
+-namespace mojo::core {
+-
+-// Synchronously requests shared memory regions from a BrokerHost in the broker
+-// process, using the protocol in broker_messages.h.
+-//
+-// Sandboxed processes on Linux and ChromeOS need it because they can't create
+-// writable or read-only regions themselves: base creates the read-only
+-// descriptor that these need by reopening the region's file (through
+-// /proc/self/fd for a memfd), which the sandbox doesn't allow.
+-class MOJO_SYSTEM_IMPL_EXPORT Broker {
++#include "mojo/public/cpp/platform/platform_handle.h"
++
++namespace mojo {
++namespace core {
++
++// The Broker is a channel to the broker process, which allows synchronous IPCs
++// to fulfill shared memory allocation requests on some platforms.
++class Broker {
+  public:
+-  explicit Broker(base::ScopedFD socket);
++  explicit Broker(PlatformHandle handle);
+ 
+   Broker(const Broker&) = delete;
+   Broker& operator=(const Broker&) = delete;
+@@ -36,16 +28,16 @@ class MOJO_SYSTEM_IMPL_EXPORT Broker {
+       size_t num_bytes);
+ 
+  private:
++  // Handle to the broker process, used for synchronous IPCs.
++  PlatformHandle sync_channel_;
++
+   // Lock to only allow one sync message at a time. This avoids having to deal
+   // with message ordering since we can only have one request at a time
+   // in-flight.
+   base::Lock lock_;
+-
+-  // Socket connected to the BrokerHost in the broker process. Reset when a
+-  // request fails in a way that leaves the connection unusable.
+-  base::ScopedFD socket_ GUARDED_BY(lock_);
+ };
+ 
+-}  // namespace mojo::core
++}  // namespace core
++}  // namespace mojo
+ 
+ #endif  // MOJO_CORE_BROKER_H_
+diff --git a/mojo/core/broker_host.cc b/mojo/core/broker_host.cc
+index b635e140f8842..605868fefe733 100644
+--- a/mojo/core/broker_host.cc
++++ b/mojo/core/broker_host.cc
+@@ -4,103 +4,102 @@
+ 
+ #include "mojo/core/broker_host.h"
+ 
+-#include <errno.h>
+-#include <sys/socket.h>
+-#include <sys/types.h>
+-#include <sys/uio.h>
+-
+ #include <utility>
+-#include <vector>
+ 
+-#include "base/check.h"
+-#include "base/check_op.h"
+-#include "base/containers/span.h"
++#include "base/compiler_specific.h"
++#include "base/logging.h"
+ #include "base/memory/platform_shared_memory_region.h"
+-#include "base/notreached.h"
+-#include "base/posix/eintr_wrapper.h"
+-#include "mojo/public/cpp/platform/socket_utils_posix.h"
++#include "base/memory/ref_counted.h"
++#include "base/task/single_thread_task_runner.h"
++#include "mojo/core/broker_messages.h"
++#include "mojo/core/connection_params.h"
++#include "mojo/core/ipcz_driver/envelope.h"
++#include "mojo/core/platform_handle_in_transit.h"
+ 
+-namespace mojo::core {
++namespace mojo {
++namespace core {
+ 
+-BrokerHost::BrokerHost(base::ScopedFD socket) : socket_(std::move(socket)) {
+-  CHECK(socket_.is_valid());
++BrokerHost::BrokerHost(PlatformChannelEndpoint endpoint) {
+   base::CurrentThread::Get()->AddDestructionObserver(this);
+-  read_watch_ = base::IOWatcher::Get()->WatchFileDescriptor(
+-      socket_.get(), base::IOWatcher::FdWatchDuration::kPersistent,
+-      base::IOWatcher::FdWatchMode::kRead, *this);
++  CHECK(endpoint.is_valid());
++  channel_ = Channel::Create(this, ConnectionParams(std::move(endpoint)),
++                             Channel::HandlePolicy::kRejectHandles,
++                             base::SingleThreadTaskRunner::GetCurrentDefault());
++  channel_->Start();
+ }
+ 
+ BrokerHost::~BrokerHost() {
+   // We're always destroyed on the creation thread, which is the IO thread.
+   base::CurrentThread::Get()->RemoveDestructionObserver(this);
++
++  if (channel_) {
++    channel_->ShutDown();
++  }
+ }
+ 
+-void BrokerHost::OnFdReadable(int fd) {
+-  CHECK_EQ(fd, socket_.get());
+-
+-  // The socket is a byte stream, so a request may arrive in pieces. Read at
+-  // most the rest of the current request: a well-behaved client waits for each
+-  // response before sending another request, and the watch is level-triggered,
+-  // so any further data is read in a later call.
+-  base::span<uint8_t> unread =
+-      base::byte_span_from_ref(request_).subspan(request_bytes_received_);
+-  // recv() has no buffer for ancillary data, so the kernel discards any
+-  // descriptors sent by the client instead of passing them to this process.
+-  const ssize_t result = HANDLE_EINTR(
+-      recv(socket_.get(), unread.data(), unread.size(), MSG_DONTWAIT));
+-  if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+-    return;
++void BrokerHost::OnBufferRequest(uint32_t num_bytes) {
++  base::subtle::PlatformSharedMemoryRegion region =
++      base::subtle::PlatformSharedMemoryRegion::CreateWritable(num_bytes);
++
++  std::vector<PlatformHandleInTransit> handles;
++  handles.reserve(2);
++  if (region.IsValid()) {
++    base::subtle::ScopedFDPair fds = region.PassPlatformHandle();
++    DCHECK(fds.readonly_fd.is_valid());
++    handles.emplace_back(PlatformHandle(std::move(fds.fd)));
++    handles.emplace_back(PlatformHandle(std::move(fds.readonly_fd)));
+   }
+ 
+-  // Close the connection on error or end-of-stream.
+-  if (result <= 0) {
+-    delete this;
+-    return;
++  BufferResponseData* response;
++  Channel::MessagePtr message = CreateBrokerMessage(
++      BrokerMessageType::BUFFER_RESPONSE, handles.size(), &response);
++  if (handles.empty()) {
++    response->guid_high = 0;
++    response->guid_low = 0;
++  } else {
++    const base::UnguessableToken& guid = region.GetGUID();
++    response->guid_high = guid.GetHighForSerialization();
++    response->guid_low = guid.GetLowForSerialization();
++    message->SetHandles(std::move(handles));
+   }
+ 
+-  request_bytes_received_ += static_cast<size_t>(result);
+-  if (request_bytes_received_ < sizeof(request_)) {
++  channel_->Write(std::move(message));
++}
++
++void BrokerHost::OnChannelMessage(
++    const void* payload,
++    size_t payload_size,
++    std::vector<PlatformHandle> handles,
++    scoped_refptr<ipcz_driver::Envelope> envelope) {
++  if (payload_size < sizeof(BrokerMessageHeader)) {
+     return;
+   }
+-  request_bytes_received_ = 0;
+-  if (!OnBufferRequest(request_.num_bytes)) {
+-    delete this;
++
++  const BrokerMessageHeader* header =
++      static_cast<const BrokerMessageHeader*>(payload);
++  switch (header->type) {
++    case BrokerMessageType::BUFFER_REQUEST:
++      if (payload_size ==
++          sizeof(BrokerMessageHeader) + sizeof(BufferRequestData)) {
++        const BufferRequestData* request =
++            reinterpret_cast<const BufferRequestData*>(UNSAFE_TODO(header + 1));
++        OnBufferRequest(request->size);
++      }
++      break;
++
++    default:
++      DLOG(ERROR) << "Unexpected broker message type: " << header->type;
++      break;
+   }
+ }
+ 
+-void BrokerHost::OnFdWritable(int fd) {
+-  // Only `socket_`'s readability is watched.
+-  NOTREACHED();
++void BrokerHost::OnChannelError(Channel::Error error) {
++  delete this;
+ }
+ 
+ void BrokerHost::WillDestroyCurrentMessageLoop() {
+   delete this;
+ }
+ 
+-bool BrokerHost::OnBufferRequest(uint32_t num_bytes) {
+-  base::subtle::PlatformSharedMemoryRegion region =
+-      base::subtle::PlatformSharedMemoryRegion::CreateWritable(num_bytes);
+-
+-  // The client reads each response before sending its next request, so there
+-  // is always enough room in the socket for the 1-byte response. A failed
+-  // write, including one which would have blocked, means that the client is
+-  // gone or misbehaving.
+-  ssize_t result;
+-  if (region.IsValid()) {
+-    base::subtle::ScopedFDPair fd_pair = region.PassPlatformHandle();
+-    CHECK(fd_pair.readonly_fd.is_valid());
+-    std::vector<base::ScopedFD> fds;
+-    fds.push_back(std::move(fd_pair.fd));
+-    fds.push_back(std::move(fd_pair.readonly_fd));
+-    BrokerBufferResponse response = BrokerBufferResponse::kSuccess;
+-    struct iovec iov = {&response, sizeof(response)};
+-    result = SendmsgWithHandles(socket_.get(), &iov, 1, fds, MSG_DONTWAIT);
+-  } else {
+-    const BrokerBufferResponse response = BrokerBufferResponse::kFailure;
+-    result =
+-        SocketWrite(socket_.get(), &response, sizeof(response), MSG_DONTWAIT);
+-  }
+-  return result == static_cast<ssize_t>(sizeof(BrokerBufferResponse));
+-}
+-
+-}  // namespace mojo::core
++}  // namespace core
++}  // namespace mojo
+diff --git a/mojo/core/broker_host.h b/mojo/core/broker_host.h
+index 2f4629dbf5df4..a822c7f256131 100644
+--- a/mojo/core/broker_host.h
++++ b/mojo/core/broker_host.h
+@@ -5,36 +5,24 @@
+ #ifndef MOJO_CORE_BROKER_HOST_H_
+ #define MOJO_CORE_BROKER_HOST_H_
+ 
+-#include <stddef.h>
+ #include <stdint.h>
+ 
+-#include <memory>
++#include <vector>
+ 
+-#include "base/files/scoped_file.h"
+-#include "base/message_loop/io_watcher.h"
+ #include "base/task/current_thread.h"
+-#include "mojo/core/broker_messages.h"
+-#include "mojo/core/system_impl_export.h"
++#include "mojo/core/channel.h"
++#include "mojo/public/cpp/platform/platform_channel_endpoint.h"
++#include "mojo/public/cpp/platform/platform_handle.h"
+ 
+-namespace mojo::core {
++namespace mojo {
++namespace core {
+ 
+-// Services shared memory allocation requests from a client process's Broker
+-// over a dedicated socket, using the protocol in broker_messages.h.
+-//
+-// The client is untrusted: the kernel discards any file descriptors the client
+-// sends, and the BrokerHost closes the connection as soon as a response cannot
+-// be written without blocking. The client created the socket and can change its
+-// blocking mode at any time through a duplicate descriptor, so every read and
+-// write uses MSG_DONTWAIT.
+-//
+-// A BrokerHost must be created on an IO thread. It owns itself and is
+-// destroyed on that thread when the connection is closed, or when the thread's
+-// message loop is destroyed.
+-class MOJO_SYSTEM_IMPL_EXPORT BrokerHost final
+-    : public base::IOWatcher::FdWatcher,
+-      public base::CurrentThread::DestructionObserver {
++// The BrokerHost is a channel to a broker client process, servicing synchronous
++// IPCs issued by the client.
++class BrokerHost : public Channel::Delegate,
++                   public base::CurrentThread::DestructionObserver {
+  public:
+-  explicit BrokerHost(base::ScopedFD socket);
++  explicit BrokerHost(PlatformChannelEndpoint endpoint);
+ 
+   BrokerHost(const BrokerHost&) = delete;
+   BrokerHost& operator=(const BrokerHost&) = delete;
+@@ -42,28 +30,22 @@ class MOJO_SYSTEM_IMPL_EXPORT BrokerHost final
+  private:
+   ~BrokerHost() override;
+ 
+-  // base::IOWatcher::FdWatcher:
+-  void OnFdReadable(int fd) override;
+-  void OnFdWritable(int fd) override;
++  // Channel::Delegate:
++  void OnChannelMessage(const void* payload,
++                        size_t payload_size,
++                        std::vector<PlatformHandle> handles,
++                        scoped_refptr<ipcz_driver::Envelope>) override;
++  void OnChannelError(Channel::Error error) override;
+ 
+   // base::CurrentThread::DestructionObserver:
+   void WillDestroyCurrentMessageLoop() override;
+ 
+-  // Creates a region of `num_bytes` and sends it to the client. Returns false
+-  // if the response could not be sent.
+-  bool OnBufferRequest(uint32_t num_bytes);
++  void OnBufferRequest(uint32_t num_bytes);
+ 
+-  base::ScopedFD socket_;
+-
+-  // Declared after `socket_` so that the watch is removed before the socket is
+-  // closed.
+-  std::unique_ptr<base::IOWatcher::FdWatch> read_watch_;
+-
+-  // The request being received, and how many of its bytes have arrived.
+-  BrokerBufferRequest request_ = {};
+-  size_t request_bytes_received_ = 0;
++  scoped_refptr<Channel> channel_;
+ };
+ 
+-}  // namespace mojo::core
++}  // namespace core
++}  // namespace mojo
+ 
+ #endif  // MOJO_CORE_BROKER_HOST_H_
+diff --git a/mojo/core/broker_messages.h b/mojo/core/broker_messages.h
+index cd502080b9092..1bc234b821a09 100644
+--- a/mojo/core/broker_messages.h
++++ b/mojo/core/broker_messages.h
+@@ -5,43 +5,67 @@
+ #ifndef MOJO_CORE_BROKER_MESSAGES_H_
+ #define MOJO_CORE_BROKER_MESSAGES_H_
+ 
+-#include <stdint.h>
+-
+-#include <type_traits>
+-
+-namespace mojo::core {
+-
+-// The wire format used between a Broker and its BrokerHost over their dedicated
+-// socket. Out-of-tree Mojo peers also get a Broker, but never install the
+-// shared memory hooks (see InstallMojoIpczBaseSharedMemoryHooks()) that send
+-// requests through it. So every process that sends requests runs the same build
+-// as its BrokerHost, and this format needs no versioning.
+-//
+-// The protocol is strictly request/response: the Broker sends one
+-// BrokerBufferRequest and blocks until it has read the matching
+-// BrokerBufferResponse before sending another request. Values are fixed-size
+-// and copied directly to and from the socket as raw bytes.
+-
+-// Asks the BrokerHost for a new writable shared memory region of `num_bytes`.
+-// No file descriptors are attached.
+-struct BrokerBufferRequest {
+-  uint32_t num_bytes;
++#include "base/compiler_specific.h"
++#include "mojo/core/channel.h"
++
++namespace mojo {
++namespace core {
++
++#pragma pack(push, 1)
++
++enum BrokerMessageType : uint32_t {
++  BUFFER_REQUEST = 1,
++  BUFFER_RESPONSE = 2,
+ };
+ 
+-// The BrokerHost's reply to a BrokerBufferRequest. Stream sockets require at
+-// least one data byte to carry SCM_RIGHTS descriptors and to distinguish a
+-// reply from end-of-stream.
+-enum class BrokerBufferResponse : uint8_t {
+-  // Allocation failed. No file descriptors are attached.
+-  kFailure = 0,
+-  // Region created. Accompanied by two file descriptors: the region's writable
+-  // descriptor followed by its read-only descriptor.
+-  kSuccess = 1,
++struct BrokerMessageHeader {
++  BrokerMessageType type;
++  uint32_t padding;
++};
++
++static_assert(IsAlignedForChannelMessage(sizeof(BrokerMessageHeader)),
++              "Invalid header size.");
++
++struct BufferRequestData {
++  uint32_t size;
+ };
+ 
+-static_assert(std::has_unique_object_representations_v<BrokerBufferRequest>);
+-static_assert(std::has_unique_object_representations_v<BrokerBufferResponse>);
++struct BufferResponseData {
++  uint64_t guid_high;
++  uint64_t guid_low;
++};
++
++#pragma pack(pop)
++
++template <typename T>
++inline bool GetBrokerMessageData(Channel::Message* message, T** out_data) {
++  const size_t required_size = sizeof(BrokerMessageHeader) + sizeof(T);
++  if (message->payload_size() < required_size) {
++    return false;
++  }
++
++  auto* header = static_cast<BrokerMessageHeader*>(message->mutable_payload());
++  *out_data = reinterpret_cast<T*>(UNSAFE_TODO(header + 1));
++  return true;
++}
++
++template <typename T>
++inline Channel::MessagePtr CreateBrokerMessage(BrokerMessageType type,
++                                               size_t num_handles,
++                                               T** out_message_data) {
++  const size_t message_size =
++      sizeof(BrokerMessageHeader) + sizeof(**out_message_data);
++  Channel::MessagePtr message =
++      Channel::Message::CreateMessage(message_size, num_handles);
++  BrokerMessageHeader* header =
++      reinterpret_cast<BrokerMessageHeader*>(message->mutable_payload());
++  header->type = type;
++  header->padding = 0;
++  *out_message_data = reinterpret_cast<T*>(UNSAFE_TODO(header + 1));
++  return message;
++}
+ 
+-}  // namespace mojo::core
++}  // namespace core
++}  // namespace mojo
+ 
+ #endif  // MOJO_CORE_BROKER_MESSAGES_H_
+diff --git a/mojo/core/broker_posix.cc b/mojo/core/broker_posix.cc
+index f880b7d1ca271..580a458f553aa 100644
+--- a/mojo/core/broker_posix.cc
++++ b/mojo/core/broker_posix.cc
+@@ -5,29 +5,75 @@
+ #include "mojo/core/broker.h"
+ 
+ #include <fcntl.h>
+-#include <stdint.h>
+ #include <sys/types.h>
+ 
+ #include <utility>
+ #include <vector>
+ 
+-#include "base/check.h"
+ #include "base/logging.h"
+ #include "base/memory/platform_shared_memory_region.h"
+-#include "base/numerics/safe_conversions.h"
+-#include "base/unguessable_token.h"
+ #include "mojo/core/broker_messages.h"
++#include "mojo/core/channel.h"
+ #include "mojo/public/cpp/platform/socket_utils_posix.h"
+ 
+-namespace mojo::core {
++namespace mojo {
++namespace core {
++
++namespace {
++
++Channel::MessagePtr WaitForBrokerMessage(
++    int socket_fd,
++    BrokerMessageType expected_type,
++    size_t expected_num_handles,
++    size_t expected_data_size,
++    std::vector<PlatformHandle>* incoming_handles) {
++  Channel::MessagePtr message = Channel::Message::CreateMessage(
++      sizeof(BrokerMessageHeader) + expected_data_size, expected_num_handles);
++  std::vector<base::ScopedFD> incoming_fds;
++  ssize_t read_result =
++      SocketRecvmsg(socket_fd, const_cast<void*>(message->data()),
++                    message->data_num_bytes(), &incoming_fds, true /* block */);
++  bool error = false;
++  if (read_result < 0) {
++    PLOG(ERROR) << "Recvmsg error";
++    error = true;
++  } else if (static_cast<size_t>(read_result) != message->data_num_bytes()) {
++    LOG(ERROR) << "Invalid node channel message";
++    error = true;
++  } else if (incoming_fds.size() != expected_num_handles) {
++    DLOG(ERROR) << "Received unexpected number of handles";
++    error = true;
++  }
++
++  if (error) {
++    return nullptr;
++  }
++
++  const BrokerMessageHeader* header =
++      reinterpret_cast<const BrokerMessageHeader*>(message->payload());
++  if (header->type != expected_type) {
++    LOG(ERROR) << "Unexpected message";
++    return nullptr;
++  }
++
++  incoming_handles->reserve(incoming_fds.size());
++  for (size_t i = 0; i < incoming_fds.size(); ++i) {
++    incoming_handles->emplace_back(std::move(incoming_fds[i]));
++  }
++
++  return message;
++}
++
++}  // namespace
+ 
+-Broker::Broker(base::ScopedFD socket) : socket_(std::move(socket)) {
+-  CHECK(socket_.is_valid());
++Broker::Broker(PlatformHandle handle) : sync_channel_(std::move(handle)) {
++  CHECK(sync_channel_.is_valid());
+ 
+-  // Mark the socket as blocking.
+-  int flags = fcntl(socket_.get(), F_GETFL);
++  int fd = sync_channel_.GetFD().get();
++  // Mark the channel as blocking.
++  int flags = fcntl(fd, F_GETFL);
+   PCHECK(flags != -1);
+-  flags = fcntl(socket_.get(), F_SETFL, flags & ~O_NONBLOCK);
++  flags = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+   PCHECK(flags != -1);
+ }
+ 
+@@ -35,68 +81,51 @@ Broker::~Broker() = default;
+ 
+ base::WritableSharedMemoryRegion Broker::GetWritableSharedMemoryRegion(
+     size_t num_bytes) {
+-  // The request carries a 32-bit size. Base never creates regions larger than
+-  // INT_MAX bytes anyway, so there is no point in asking for one.
+-  if (!base::IsValueInRangeForNumericType<uint32_t>(num_bytes)) {
+-    return {};
+-  }
+-
+   base::AutoLock lock(lock_);
+-  if (!socket_.is_valid()) {
+-    return {};
+-  }
+ 
+-  // Move `socket_` out so that any early return on an I/O or protocol error
+-  // closes the connection permanently rather than leaving it out of sync.
+-  base::ScopedFD socket = std::move(socket_);
+-
+-  const BrokerBufferRequest request = {
+-      .num_bytes = base::checked_cast<uint32_t>(num_bytes),
+-  };
+-  const ssize_t write_result =
+-      SocketWrite(socket.get(), &request, sizeof(request));
++  BufferRequestData* buffer_request;
++  Channel::MessagePtr out_message = CreateBrokerMessage(
++      BrokerMessageType::BUFFER_REQUEST, 0, &buffer_request);
++  buffer_request->size = num_bytes;
++  ssize_t write_result =
++      SocketWrite(sync_channel_.GetFD().get(), out_message->data(),
++                  out_message->data_num_bytes());
+   if (write_result < 0) {
+     PLOG(ERROR) << "Error sending sync broker message";
+-    return {};
+-  }
+-  if (static_cast<size_t>(write_result) != sizeof(request)) {
++    return base::WritableSharedMemoryRegion();
++  } else if (static_cast<size_t>(write_result) !=
++             out_message->data_num_bytes()) {
+     LOG(ERROR) << "Error sending complete broker message";
+-    return {};
++    return base::WritableSharedMemoryRegion();
+   }
+ 
+-  // A 1-byte response can't arrive in pieces, so unlike requests in
+-  // BrokerHost, it needs no reassembly.
+-  static_assert(sizeof(BrokerBufferResponse) == 1);
+-  BrokerBufferResponse response = BrokerBufferResponse::kFailure;
+-  std::vector<base::ScopedFD> fds;
+-  const ssize_t read_result = SocketRecvmsg(
+-      socket.get(), &response, sizeof(response), &fds, /*block=*/true);
+-  if (read_result < 0) {
+-    PLOG(ERROR) << "Recvmsg error";
+-    return {};
+-  }
+-  if (static_cast<size_t>(read_result) != sizeof(response)) {
+-    LOG(ERROR) << "Connection closed or response descriptors dropped";
+-    return {};
+-  }
+-
+-  if (response == BrokerBufferResponse::kFailure && fds.empty()) {
+-    socket_ = std::move(socket);
+-    return {};
+-  }
+-  if (response != BrokerBufferResponse::kSuccess || fds.size() != 2) {
+-    LOG(ERROR) << "Invalid broker response";
+-    return {};
++  // A writable region is sent as a writable and a read-only descriptor.
++  constexpr size_t kNumExpectedHandles = 2;
++
++  std::vector<PlatformHandle> handles;
++  Channel::MessagePtr message = WaitForBrokerMessage(
++      sync_channel_.GetFD().get(), BrokerMessageType::BUFFER_RESPONSE,
++      kNumExpectedHandles, sizeof(BufferResponseData), &handles);
++  if (message) {
++    const BufferResponseData* data;
++    if (!GetBrokerMessageData(message.get(), &data)) {
++      return base::WritableSharedMemoryRegion();
++    }
++    std::optional<base::UnguessableToken> guid =
++        base::UnguessableToken::Deserialize(data->guid_high, data->guid_low);
++    if (!guid.has_value()) {
++      return base::WritableSharedMemoryRegion();
++    }
++    return base::WritableSharedMemoryRegion::Deserialize(
++        base::subtle::PlatformSharedMemoryRegion::Take(
++            base::subtle::ScopedFDPair(handles[0].TakeFD(),
++                                       handles[1].TakeFD()),
++            base::subtle::PlatformSharedMemoryRegion::Mode::kWritable,
++            num_bytes, guid.value()));
+   }
+ 
+-  socket_ = std::move(socket);
+-  // A region's GUID only identifies it, e.g. in memory dumps, so the BrokerHost
+-  // doesn't send one. Mint it here, as for regions created in this process.
+-  return base::WritableSharedMemoryRegion::Deserialize(
+-      base::subtle::PlatformSharedMemoryRegion::Take(
+-          base::subtle::ScopedFDPair(std::move(fds[0]), std::move(fds[1])),
+-          base::subtle::PlatformSharedMemoryRegion::Mode::kWritable, num_bytes,
+-          base::UnguessableToken::Create()));
++  return base::WritableSharedMemoryRegion();
+ }
+ 
+-}  // namespace mojo::core
++}  // namespace core
++}  // namespace mojo
+diff --git a/mojo/core/broker_unittest.cc b/mojo/core/broker_unittest.cc
+deleted file mode 100644
+index f55c07b7de98b..0000000000000
+--- a/mojo/core/broker_unittest.cc
++++ /dev/null
+@@ -1,248 +0,0 @@
+-// Copyright 2026 The Chromium Authors
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-#include "mojo/core/broker.h"
+-
+-#include <errno.h>
+-#include <fcntl.h>
+-#include <stddef.h>
+-#include <stdint.h>
+-#include <sys/socket.h>
+-#include <sys/types.h>
+-#include <sys/uio.h>
+-#include <unistd.h>
+-
+-#include <algorithm>
+-#include <utility>
+-#include <vector>
+-
+-#include "base/check_op.h"
+-#include "base/containers/span.h"
+-#include "base/files/file_util.h"
+-#include "base/files/scoped_file.h"
+-#include "base/functional/bind.h"
+-#include "base/functional/callback.h"
+-#include "base/memory/read_only_shared_memory_region.h"
+-#include "base/memory/shared_memory_mapping.h"
+-#include "base/memory/writable_shared_memory_region.h"
+-#include "base/posix/eintr_wrapper.h"
+-#include "base/run_loop.h"
+-#include "base/task/thread_pool.h"
+-#include "base/test/task_environment.h"
+-#include "base/test/test_future.h"
+-#include "build/build_config.h"
+-#include "mojo/core/broker_host.h"
+-#include "mojo/core/broker_messages.h"
+-#include "mojo/public/cpp/platform/platform_channel.h"
+-#include "mojo/public/cpp/platform/socket_utils_posix.h"
+-#include "testing/gtest/include/gtest/gtest.h"
+-
+-namespace mojo::core {
+-namespace {
+-
+-constexpr size_t kRegionSize = 64 * 1024;
+-
+-void SetBlocking(int fd) {
+-  const int flags = fcntl(fd, F_GETFL);
+-  CHECK_NE(flags, -1);
+-  CHECK_NE(fcntl(fd, F_SETFL, flags & ~O_NONBLOCK), -1);
+-}
+-
+-// The result of reading a single message from a BrokerHost.
+-struct ReadResult {
+-  ssize_t num_bytes = -1;
+-  BrokerBufferResponse response = BrokerBufferResponse::kFailure;
+-  std::vector<base::ScopedFD> fds;
+-};
+-
+-class BrokerTest : public testing::Test {
+- protected:
+-  // Starts a BrokerHost on the main thread for one end of a new socket pair
+-  // and returns the other end. Both ends are blocking: the client creates the
+-  // pair and controls its mode, so this is the BrokerHost's worst case.
+-  base::ScopedFD StartBrokerHost() {
+-    PlatformChannel channel;
+-    base::ScopedFD host =
+-        channel.TakeLocalEndpoint().TakePlatformHandle().TakeFD();
+-    base::ScopedFD client =
+-        channel.TakeRemoteEndpoint().TakePlatformHandle().TakeFD();
+-    SetBlocking(host.get());
+-    SetBlocking(client.get());
+-    // Make `host`'s send buffer as small as the kernel allows, so that a
+-    // client which stops reading fills it after a few responses. A single
+-    // response always fits.
+-    const int send_buffer_size = 1;
+-    CHECK_EQ(setsockopt(host.get(), SOL_SOCKET, SO_SNDBUF, &send_buffer_size,
+-                        sizeof(send_buffer_size)),
+-             0);
+-    new BrokerHost(std::move(host));  // Owns itself.
+-    return client;
+-  }
+-
+-  // Runs `task` on a thread which may block while the main thread services the
+-  // BrokerHost, and returns the result.
+-  template <typename T>
+-  T RunBlocking(base::OnceCallback<T()> task) {
+-    base::test::TestFuture<T> future;
+-    base::ThreadPool::PostTaskAndReplyWithResult(
+-        FROM_HERE, {base::MayBlock()}, std::move(task), future.GetCallback());
+-    return future.Take();
+-  }
+-
+-  base::WritableSharedMemoryRegion AllocateRegion(Broker& broker,
+-                                                  size_t num_bytes) {
+-    return RunBlocking(base::BindOnce(&Broker::GetWritableSharedMemoryRegion,
+-                                      base::Unretained(&broker), num_bytes));
+-  }
+-
+-  // Blocks until the BrokerHost sends a message or closes the connection.
+-  ReadResult ReadFromHost(const base::ScopedFD& client) {
+-    return RunBlocking(base::BindOnce(
+-        [](int fd) {
+-          ReadResult result;
+-          result.num_bytes =
+-              SocketRecvmsg(fd, &result.response, sizeof(result.response),
+-                            &result.fds, /*block=*/true);
+-          return result;
+-        },
+-        client.get()));
+-  }
+-
+- private:
+-  base::test::TaskEnvironment task_environment_{
+-      base::test::TaskEnvironment::MainThreadType::IO};
+-};
+-
+-// End-to-end allocation through Broker and BrokerHost.
+-
+-TEST_F(BrokerTest, CreatesWritableRegion) {
+-  Broker broker{StartBrokerHost()};
+-  base::WritableSharedMemoryRegion region = AllocateRegion(broker, kRegionSize);
+-  ASSERT_TRUE(region.IsValid());
+-  EXPECT_EQ(kRegionSize, region.GetSize());
+-
+-  base::WritableSharedMemoryMapping mapping = region.Map();
+-  ASSERT_TRUE(mapping.IsValid());
+-  std::ranges::fill(mapping.GetMemoryAsSpan<uint8_t>(), 0x42);
+-
+-  // Converting the region to read-only requires the read-only descriptor that
+-  // is sent along with the writable one.
+-  base::ReadOnlySharedMemoryRegion read_only_region =
+-      base::WritableSharedMemoryRegion::ConvertToReadOnly(std::move(region));
+-  ASSERT_TRUE(read_only_region.IsValid());
+-  base::ReadOnlySharedMemoryMapping read_only_mapping = read_only_region.Map();
+-  ASSERT_TRUE(read_only_mapping.IsValid());
+-  EXPECT_TRUE(std::ranges::all_of(read_only_mapping.GetMemoryAsSpan<uint8_t>(),
+-                                  [](uint8_t byte) { return byte == 0x42; }));
+-}
+-
+-TEST_F(BrokerTest, AllocationFailureKeepsConnectionOpen) {
+-  Broker broker{StartBrokerHost()};
+-
+-  // The BrokerHost cannot create an empty region. It reports the failure
+-  // without closing the connection.
+-  EXPECT_FALSE(AllocateRegion(broker, 0).IsValid());
+-#if defined(ARCH_CPU_64_BITS)
+-  // Sizes that don't fit in a request fail cleanly.
+-  EXPECT_FALSE(AllocateRegion(broker, size_t{UINT32_MAX} + 1).IsValid());
+-#endif
+-  EXPECT_TRUE(AllocateRegion(broker, kRegionSize).IsValid());
+-}
+-
+-// BrokerHost hardening against an untrusted client.
+-
+-TEST_F(BrokerTest, HandlesRequestSplitAcrossWrites) {
+-  base::ScopedFD client = StartBrokerHost();
+-
+-  const BrokerBufferRequest request = {.num_bytes = kRegionSize};
+-  const auto [first, second] = base::byte_span_from_ref(request).split_at(1u);
+-  ASSERT_EQ(static_cast<ssize_t>(first.size()),
+-            SocketWrite(client.get(), first.data(), first.size()));
+-  // The write above made the BrokerHost's end readable before returning, and
+-  // the IO loop handles ready descriptors before going idle, so this lets the
+-  // BrokerHost read the first part on its own.
+-  base::RunLoop().RunUntilIdle();
+-  ASSERT_EQ(static_cast<ssize_t>(second.size()),
+-            SocketWrite(client.get(), second.data(), second.size()));
+-
+-  ReadResult result = ReadFromHost(client);
+-  ASSERT_EQ(static_cast<ssize_t>(sizeof(BrokerBufferResponse)),
+-            result.num_bytes);
+-  EXPECT_EQ(BrokerBufferResponse::kSuccess, result.response);
+-  EXPECT_EQ(2u, result.fds.size());
+-}
+-
+-TEST_F(BrokerTest, DiscardsDescriptorsSentByClient) {
+-  base::ScopedFD client = StartBrokerHost();
+-  base::ScopedFD pipe_read_end;
+-  base::ScopedFD pipe_write_end;
+-  ASSERT_TRUE(base::CreatePipe(&pipe_read_end, &pipe_write_end,
+-                               /*non_blocking=*/true));
+-
+-  // Send a valid request with the pipe's only write end attached.
+-  BrokerBufferRequest request = {.num_bytes = kRegionSize};
+-  struct iovec iov = {&request, sizeof(request)};
+-  std::vector<base::ScopedFD> fds;
+-  fds.push_back(std::move(pipe_write_end));
+-  ASSERT_EQ(static_cast<ssize_t>(sizeof(request)),
+-            SendmsgWithHandles(client.get(), &iov, 1, fds));
+-  fds.clear();
+-
+-  // The BrokerHost handles the request, and the kernel closes the attached
+-  // write end, so reading from the pipe returns EOF.
+-  ReadResult result = ReadFromHost(client);
+-  ASSERT_EQ(static_cast<ssize_t>(sizeof(BrokerBufferResponse)),
+-            result.num_bytes);
+-  EXPECT_EQ(BrokerBufferResponse::kSuccess, result.response);
+-  EXPECT_EQ(2u, result.fds.size());
+-  char byte;
+-  EXPECT_EQ(0, HANDLE_EINTR(read(pipe_read_end.get(), &byte, 1)));
+-}
+-
+-TEST_F(BrokerTest, ClosesConnectionWhenClientStopsReading) {
+-  // Check both kinds of response: kFailure, which carries no descriptors, and
+-  // kSuccess, which carries two.
+-  for (const uint32_t num_bytes : {uint32_t{0}, uint32_t{kRegionSize}}) {
+-    SCOPED_TRACE(num_bytes);
+-    base::ScopedFD client = StartBrokerHost();
+-
+-    // Send requests without reading the responses until they fill the socket's
+-    // buffer. The BrokerHost must then close the connection rather than block.
+-    const int error = RunBlocking(base::BindOnce(
+-        [](int fd, BrokerBufferRequest request) {
+-          while (SocketWrite(fd, &request, sizeof(request)) ==
+-                 static_cast<ssize_t>(sizeof(request))) {
+-          }
+-          return errno;
+-        },
+-        client.get(), BrokerBufferRequest{.num_bytes = num_bytes}));
+-    EXPECT_TRUE(error == EPIPE || error == ECONNRESET) << error;
+-  }
+-}
+-
+-// Broker behavior, with the test acting as the BrokerHost.
+-
+-TEST_F(BrokerTest, BrokerStopsUsingConnectionAfterProtocolError) {
+-  PlatformChannel channel;
+-  base::ScopedFD host =
+-      channel.TakeLocalEndpoint().TakePlatformHandle().TakeFD();
+-  Broker broker{channel.TakeRemoteEndpoint().TakePlatformHandle().TakeFD()};
+-
+-  // Queue an invalid reply to the first request: kSuccess without descriptors.
+-  const BrokerBufferResponse response = BrokerBufferResponse::kSuccess;
+-  ASSERT_EQ(static_cast<ssize_t>(sizeof(response)),
+-            SocketWrite(host.get(), &response, sizeof(response)));
+-  EXPECT_FALSE(broker.GetWritableSharedMemoryRegion(kRegionSize).IsValid());
+-
+-  // The connection may be out of sync, so later requests fail without being
+-  // sent: the host sees only the first request, then end-of-stream.
+-  EXPECT_FALSE(broker.GetWritableSharedMemoryRegion(kRegionSize).IsValid());
+-  BrokerBufferRequest request;
+-  EXPECT_EQ(static_cast<ssize_t>(sizeof(request)),
+-            HANDLE_EINTR(read(host.get(), &request, sizeof(request))));
+-  EXPECT_EQ(0, HANDLE_EINTR(read(host.get(), &request, sizeof(request))));
+-}
+-
+-}  // namespace
+-}  // namespace mojo::core
+diff --git a/mojo/core/ipcz_driver/base_shared_memory_service.cc b/mojo/core/ipcz_driver/base_shared_memory_service.cc
+index bba6f1070c89e..98cb0e4033336 100644
+--- a/mojo/core/ipcz_driver/base_shared_memory_service.cc
++++ b/mojo/core/ipcz_driver/base_shared_memory_service.cc
+@@ -29,7 +29,6 @@
+   BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_ANDROID)
+ 
+ #if SHARED_MEMORY_SERVICE_REQUIRED()
+-#include "base/files/scoped_file.h"
+ #include "mojo/core/broker.h"
+ #include "mojo/core/broker_host.h"
+ #endif
+@@ -40,9 +39,9 @@ namespace {
+ 
+ #if SHARED_MEMORY_SERVICE_REQUIRED()
+ 
+-void CreateBrokerHostOnIOThread(base::ScopedFD socket) {
++void CreateBrokerHostOnIOThread(PlatformChannelEndpoint endpoint) {
+   // Self-owned.
+-  new BrokerHost(std::move(socket));
++  new BrokerHost(std::move(endpoint));
+ }
+ 
+ void CreateServiceFromNextParcel(ScopedIpczHandle portal) {
+@@ -67,8 +66,7 @@ void CreateServiceFromNextParcel(ScopedIpczHandle portal) {
+   std::ignore = box.release();
+   Transport::GetIOTaskRunner()->PostTask(
+       FROM_HERE,
+-      base::BindOnce(&CreateBrokerHostOnIOThread,
+-                     transport->TakeEndpoint().TakePlatformHandle().TakeFD()));
++      base::BindOnce(&CreateBrokerHostOnIOThread, transport->TakeEndpoint()));
+ }
+ 
+ void WaitForClientConnection(ScopedIpczHandle portal) {
+@@ -179,8 +177,7 @@ void BaseSharedMemoryService::CreateClient(ScopedIpczHandle portal) {
+   if (result == IPCZ_RESULT_OK) {
+     // On success, ownership of the box is passed into the portal.
+     std::ignore = box.release();
+-    g_client =
+-        new Broker(channel.TakeLocalEndpoint().TakePlatformHandle().TakeFD());
++    g_client = new Broker(channel.TakeLocalEndpoint().TakePlatformHandle());
+   }
+ #endif
+ }
+diff --git a/mojo/core/shared_buffer_unittest.cc b/mojo/core/shared_buffer_unittest.cc
+index a80b56aa9a8c6..1f6afed928aa3 100644
+--- a/mojo/core/shared_buffer_unittest.cc
++++ b/mojo/core/shared_buffer_unittest.cc
+@@ -10,13 +10,10 @@
+ #include <utility>
+ 
+ #include "base/memory/platform_shared_memory_region.h"
+-#include "base/memory/read_only_shared_memory_region.h"
+ #include "build/blink_buildflags.h"
+ #include "build/build_config.h"
+-#include "mojo/core/embedder/embedder.h"
+ #include "mojo/core/test/mojo_test_base.h"
+ #include "mojo/public/c/system/types.h"
+-#include "mojo/public/cpp/system/platform_handle.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace mojo::core {
+@@ -281,49 +278,6 @@ TEST_F(SharedBufferTest, MAYBE_CreateAndPassFromChildReadOnlyBuffer) {
+   });
+ }
+ 
+-// Keep in sync with SHARED_MEMORY_SERVICE_REQUIRED() in
+-// ipcz_driver/base_shared_memory_service.cc.
+-#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_ANDROID)
+-// Installs the hooks with which sandboxed processes create shared memory
+-// regions through the broker process, then creates a read-only region with
+-// base's shared memory API and passes it to the parent.
+-DEFINE_TEST_CLIENT_TEST_WITH_PIPE(CreateReadOnlyRegionThroughBroker,
+-                                  SharedBufferTest,
+-                                  h) {
+-  InstallMojoIpczBaseSharedMemoryHooks();
+-
+-  const std::string message = ReadMessage(h);
+-  base::MappedReadOnlyRegion region =
+-      base::ReadOnlySharedMemoryRegion::Create(message.size());
+-  ASSERT_TRUE(region.IsValid());
+-  region.mapping.GetMemoryAsSpan<char>().copy_from(message);
+-  WriteMessageWithHandle(
+-      h, "",
+-      WrapReadOnlySharedMemoryRegion(std::move(region.region))
+-          .release()
+-          .value());
+-
+-  EXPECT_EQ("quit", ReadMessage(h));
+-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+-}
+-
+-TEST_F(SharedBufferTest, CreateReadOnlyRegionThroughBrokerInChild) {
+-  RunTestClient("CreateReadOnlyRegionThroughBroker", [&](MojoHandle h) {
+-    WriteMessage(h, "hello");
+-
+-    MojoHandle b;
+-    EXPECT_EQ("", ReadMessageWithHandle(h, &b));
+-    ExpectBufferContents(b, 0, "hello");
+-    auto buffer = ipcz_driver::SharedBuffer::Unbox(b);
+-    EXPECT_EQ(buffer->region().GetMode(),
+-              base::subtle::PlatformSharedMemoryRegion::Mode::kReadOnly);
+-
+-    WriteMessage(h, "quit");
+-  });
+-}
+-#endif  // BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE) &&
+-        // !BUILDFLAG(IS_ANDROID)
+-
+ #endif  // BUILDFLAG(USE_BLINK)
+ 
+ }  // namespace
+diff --git a/mojo/public/cpp/platform/socket_utils_posix.cc b/mojo/public/cpp/platform/socket_utils_posix.cc
+index 607681ffb9e49..4e70977d2a0d4 100644
+--- a/mojo/public/cpp/platform/socket_utils_posix.cc
++++ b/mojo/public/cpp/platform/socket_utils_posix.cc
+@@ -66,16 +66,14 @@ bool IsPeerAuthorized(base::PlatformFile fd) {
+ 
+ ssize_t SocketWrite(base::PlatformFile socket,
+                     const void* bytes,
+-                    size_t num_bytes,
+-                    int flags) {
+-  return HANDLE_EINTR(send(socket, bytes, num_bytes, MSG_NOSIGNAL | flags));
++                    size_t num_bytes) {
++  return HANDLE_EINTR(send(socket, bytes, num_bytes, MSG_NOSIGNAL));
+ }
+ 
+ ssize_t SendmsgWithHandles(base::PlatformFile socket,
+                            struct iovec* iov,
+                            size_t num_iov,
+-                           const std::vector<base::ScopedFD>& descriptors,
+-                           int flags) {
++                           const std::vector<base::ScopedFD>& descriptors) {
+   DCHECK(iov);
+   DCHECK_GT(num_iov, 0u);
+   DCHECK(!descriptors.empty());
+@@ -96,7 +94,7 @@ ssize_t SendmsgWithHandles(base::PlatformFile socket,
+     UNSAFE_TODO(reinterpret_cast<int*>(CMSG_DATA(cmsg))[i]) =
+         descriptors[i].get();
+   }
+-  return HANDLE_EINTR(sendmsg(socket, &msg, MSG_NOSIGNAL | flags));
++  return HANDLE_EINTR(sendmsg(socket, &msg, MSG_NOSIGNAL));
+ }
+ 
+ ssize_t SocketRecvmsg(base::PlatformFile socket,
+diff --git a/mojo/public/cpp/platform/socket_utils_posix.h b/mojo/public/cpp/platform/socket_utils_posix.h
+index f992ae93fd25c..917e32900ecd2 100644
+--- a/mojo/public/cpp/platform/socket_utils_posix.h
++++ b/mojo/public/cpp/platform/socket_utils_posix.h
+@@ -28,13 +28,11 @@ constexpr size_t kMaxSendmsgHandles = 128;
+ // and there wasn't a much better home for them. Consider moving them to
+ // src/base or something.
+ 
+-// Like |write()| but handles |EINTR| and never raises |SIGPIPE|. |flags| are
+-// passed to |send()| along with |MSG_NOSIGNAL|.
++// Like |write()| but handles |EINTR| and never raises |SIGPIPE|.
+ COMPONENT_EXPORT(MOJO_CPP_PLATFORM)
+ ssize_t SocketWrite(base::PlatformFile socket,
+                     const void* bytes,
+-                    size_t num_bytes,
+-                    int flags = 0);
++                    size_t num_bytes);
+ 
+ // Wrapper around |sendmsg()| which makes it convenient to send attached file
+ // descriptors. All entries in |descriptors| must be valid and |descriptors|
+@@ -46,14 +44,11 @@ ssize_t SocketWrite(base::PlatformFile socket,
+ //
+ // Note that regardless of success or failure, descriptors in |descriptors| are
+ // not closed.
+-//
+-// |flags| are passed to |sendmsg()| along with |MSG_NOSIGNAL|.
+ COMPONENT_EXPORT(MOJO_CPP_PLATFORM)
+ ssize_t SendmsgWithHandles(base::PlatformFile socket,
+                            struct iovec* iov,
+                            size_t num_iov,
+-                           const std::vector<base::ScopedFD>& descriptors,
+-                           int flags = 0);
++                           const std::vector<base::ScopedFD>& descriptors);
+ 
+ // Like |recvmsg()|, but handles |EINTR|. Returns 0 if some file descriptors
+ // failed to be received, -1 for other errors (in which case, refer to `errno`),
+diff --git a/tools/clang/unsafe_todo_remover/unsafe_todo_remover.py b/tools/clang/unsafe_todo_remover/unsafe_todo_remover.py
+index f4997008f3ea7..9c1e6b42d7645 100755
+--- a/tools/clang/unsafe_todo_remover/unsafe_todo_remover.py
++++ b/tools/clang/unsafe_todo_remover/unsafe_todo_remover.py
+@@ -131,6 +131,7 @@ EXCLUSIONS: list[Exclusion] = [
+       "device/fido/cbor_extract.h",
+       "gpu/command_buffer/common/cmd_buffer_common.h",
+       "gpu/command_buffer/common/gles2_cmd_utils.h",
++      "mojo/core/broker_messages.h",
+       "mojo/public/cpp/bindings/lib/array_internal.h",
+       "mojo/public/cpp/bindings/lib/array_serialization.h",
+       "third_party/blink/renderer/core/css/parser/css_tokenizer_input_stream.h",

@@ -1,0 +1,136 @@
+diff --git a/modules/desktop_capture/BUILD.gn b/modules/desktop_capture/BUILD.gn
+index 300a6cff44..f0cf323bc0 100644
+--- a/third_party/webrtc/modules/desktop_capture/BUILD.gn
++++ b/third_party/webrtc/modules/desktop_capture/BUILD.gn
+@@ -861,7 +861,6 @@ rtc_library("desktop_capture") {
+       "shcore.lib",
+     ]
+     deps += [
+-      "../../rtc_base:platform_thread",
+       "../../rtc_base:threading",
+       "../../rtc_base:win32",
+       "../../rtc_base/containers:flat_map",
+diff --git a/modules/desktop_capture/win/dxgi_duplicator_controller.cc b/modules/desktop_capture/win/dxgi_duplicator_controller.cc
+index d2112d82d2..a140029d78 100644
+--- a/third_party/webrtc/modules/desktop_capture/win/dxgi_duplicator_controller.cc
++++ b/third_party/webrtc/modules/desktop_capture/win/dxgi_duplicator_controller.cc
+@@ -30,7 +30,6 @@
+ #include "modules/desktop_capture/win/dxgi_frame.h"
+ #include "rtc_base/checks.h"
+ #include "rtc_base/logging.h"
+-#include "rtc_base/platform_thread.h"
+ #include "rtc_base/synchronization/mutex.h"
+ #include "rtc_base/thread.h"
+ #include "rtc_base/time_utils.h"
+@@ -40,10 +39,6 @@ namespace webrtc {
+ namespace {
+ 
+ constexpr DWORD kInvalidSessionId = 0xFFFFFFFF;
+-// Minimum interval between failed re-initialization attempts during capture so
+-// transient failure states (e.g. Winlogon or display sleep) do not spawn a
+-// worker thread on every capture tick.
+-constexpr int64_t kInitializationRetryIntervalMs = 500;
+ 
+ DWORD GetCurrentSessionId() {
+   DWORD session_id = kInvalidSessionId;
+@@ -194,21 +189,13 @@ DxgiDuplicatorController::Result DxgiDuplicatorController::DoDuplicate(
+     Deinitialize();
+   }
+ 
+-  if (duplicators_.empty()) {
++  if (!Initialize()) {
+     if (succeeded_duplications_ == 0 && !IsCurrentSessionSupported()) {
+       RTC_LOG(LS_WARNING) << "Current binary is running in session 0. DXGI "
+                              "components cannot be initialized.";
+       return Result::UNSUPPORTED_SESSION;
+     }
+ 
+-    if (last_init_failure_ms_.has_value() &&
+-        TimeMillis() - *last_init_failure_ms_ <
+-            kInitializationRetryIntervalMs) {
+-      return Result::INITIALIZATION_FAILED;
+-    }
+-  }
+-
+-  if (!Initialize()) {
+     // Cannot initialize COM components now, display mode may be changing.
+     return Result::INITIALIZATION_FAILED;
+   }
+@@ -259,11 +246,9 @@ bool DxgiDuplicatorController::Initialize() {
+   }
+ 
+   if (DoInitialize()) {
+-    last_init_failure_ms_.reset();
+     return true;
+   }
+   Deinitialize();
+-  last_init_failure_ms_ = TimeMillis();
+   return false;
+ }
+ 
+@@ -271,33 +256,6 @@ bool DxgiDuplicatorController::DoInitialize() {
+   RTC_DCHECK(desktop_rect_.is_empty());
+   RTC_DCHECK(duplicators_.empty());
+ 
+-  // Run D3D11/DXGI initialization on an ephemeral thread so that any hidden
+-  // windows or hooks attached to the calling thread by GPU driver DLLs (e.g.
+-  // NVIDIA Optimus nvinitx.dll during D3D11CreateDevice) are cleaned up when
+-  // the thread exits and do not cause ::SetThreadDesktop() to fail with
+-  // ERROR_BUSY (170) if the caller later falls back to GDI capture on its
+-  // capture thread. Propagate the caller's thread desktop and per-thread DPI
+-  // awareness context so DXGI/GDI enumeration matches the caller thread.
+-  HDESK caller_desktop = ::GetThreadDesktop(::GetCurrentThreadId());
+-  DPI_AWARENESS_CONTEXT dpi_context = ::GetThreadDpiAwarenessContext();
+-  bool result = false;
+-  PlatformThread init_thread = PlatformThread::SpawnJoinable(
+-      [this, caller_desktop, dpi_context,
+-       &result]() RTC_NO_THREAD_SAFETY_ANALYSIS {
+-        if (caller_desktop) {
+-          ::SetThreadDesktop(caller_desktop);
+-        }
+-        if (dpi_context) {
+-          ::SetThreadDpiAwarenessContext(dpi_context);
+-        }
+-        result = DoInitializeOnWorkerThread();
+-      },
+-      "DxgiInitThread");
+-  init_thread.Finalize();
+-  return result;
+-}
+-
+-bool DxgiDuplicatorController::DoInitializeOnWorkerThread() {
+   d3d_info_.min_feature_level = static_cast<D3D_FEATURE_LEVEL>(0);
+   d3d_info_.max_feature_level = static_cast<D3D_FEATURE_LEVEL>(0);
+ 
+@@ -359,7 +317,6 @@ void DxgiDuplicatorController::Deinitialize() {
+   desktop_rect_ = DesktopRect();
+   duplicators_.clear();
+   display_configuration_monitor_.Reset();
+-  last_init_failure_ms_.reset();
+ }
+ 
+ bool DxgiDuplicatorController::ContextExpired(
+diff --git a/modules/desktop_capture/win/dxgi_duplicator_controller.h b/modules/desktop_capture/win/dxgi_duplicator_controller.h
+index 3b1d11bca1..c1b82547de 100644
+--- a/third_party/webrtc/modules/desktop_capture/win/dxgi_duplicator_controller.h
++++ b/third_party/webrtc/modules/desktop_capture/win/dxgi_duplicator_controller.h
+@@ -171,10 +171,8 @@ class RTC_EXPORT DxgiDuplicatorController {
+   bool Initialize() RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+ 
+   // Does the real initialization work, this function should only be called in
+-  // Initialize(). Runs D3D11/DXGI initialization on an ephemeral thread so GPU
+-  // driver thread hooks/HWNDs do not pollute the capture thread.
++  // Initialize().
+   bool DoInitialize() RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+-  bool DoInitializeOnWorkerThread() RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+ 
+   // Clears all COM components referred to by this instance. So next Duplicate()
+   // call will eventually initialize this instance again.
+@@ -265,7 +263,6 @@ class RTC_EXPORT DxgiDuplicatorController {
+       RTC_GUARDED_BY(mutex_);
+   // A number to indicate how many successful duplications have been performed.
+   uint32_t succeeded_duplications_ RTC_GUARDED_BY(mutex_) = 0;
+-  std::optional<int64_t> last_init_failure_ms_ RTC_GUARDED_BY(mutex_);
+ };
+ 
+ }  // namespace webrtc
